@@ -64,67 +64,134 @@ impl BoundOAuthCallbackListener {
         expected_state: &str,
         timeout_secs: u64,
     ) -> Result<OAuthCallbackPayload, String> {
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            self.accept_one(),
-        )
-        .await
-        .map_err(|_| "OAuth callback timeout: no response received")?;
+        let deadline = std::time::Duration::from_secs(timeout_secs);
 
-        let payload = result?;
+        // Loop accepting connections until we get a valid OAuth callback with matching state.
+        // Browsers may send favicon.ico, preflight, or other requests before/after the real
+        // callback — we must ignore those instead of consuming the only accept slot.
+        tokio::time::timeout(deadline, self.accept_matching(expected_state))
+            .await
+            .map_err(|_| "OAuth callback timeout: no response received".to_string())?
+    }
 
-        // Validate state parameter
-        if let Some(ref state) = payload.state {
-            if !constant_time_eq(state.as_bytes(), expected_state.as_bytes()) {
-                return Err("OAuth state mismatch: possible CSRF attack".to_string());
+    async fn accept_matching(self, expected_state: &str) -> Result<OAuthCallbackPayload, String> {
+        loop {
+            let (mut stream, _addr) = self
+                .listener
+                .accept()
+                .await
+                .map_err(|e| format!("failed to accept callback connection: {e}"))?;
+
+            let payload = Self::read_and_parse(&mut stream).await;
+
+            match payload {
+                Ok(ref p) if p.code.is_some() => {
+                    // Looks like a real OAuth callback — validate state.
+                    let state_ok = match p.state.as_deref() {
+                        Some(s) => constant_time_eq(s.as_bytes(), expected_state.as_bytes()),
+                        None => false,
+                    };
+
+                    if state_ok {
+                        // Check for OAuth error in the callback itself.
+                        if p.error.is_some() {
+                            let err = p.error.as_deref().unwrap_or("unknown");
+                            let desc = p.error_description.as_deref().unwrap_or("");
+                            Self::send_response(
+                                &mut stream,
+                                "400 Bad Request",
+                                "Authentication failed. You can close this tab.",
+                            )
+                            .await;
+                            return Err(format!("OAuth callback error: {err}: {desc}"));
+                        }
+                        Self::send_response(
+                            &mut stream,
+                            "200 OK",
+                            "Authentication successful! You can close this tab.",
+                        )
+                        .await;
+                        return Ok(p.clone());
+                    }
+
+                    // State mismatch — could be a stale callback from a prior flow.
+                    tracing::warn!(
+                        "oauth callback ignored invalid request while waiting for matching state \
+                         reason=OAuth state mismatch: possible CSRF attack"
+                    );
+                    Self::send_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        "State mismatch. Please retry login from the app.",
+                    )
+                    .await;
+                    // Continue looping for the correct callback.
+                }
+                Ok(ref p) if p.error.is_some() => {
+                    let err = p.error.as_deref().unwrap_or("unknown");
+                    let desc = p.error_description.as_deref().unwrap_or("");
+                    Self::send_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        "Authentication failed. You can close this tab.",
+                    )
+                    .await;
+                    return Err(format!("OAuth callback error: {err}: {desc}"));
+                }
+                _ => {
+                    // Non-OAuth request (favicon.ico, preflight, empty, etc.) — ignore and loop.
+                    tracing::debug!("oauth callback listener: ignoring non-OAuth request");
+                    Self::send_response(&mut stream, "404 Not Found", "").await;
+                }
+            }
+        }
+    }
+
+    async fn read_and_parse(
+        stream: &mut tokio::net::TcpStream,
+    ) -> Result<OAuthCallbackPayload, String> {
+        // Read enough to cover the GET request line + headers.
+        // Use a larger buffer and loop until we see the end-of-headers marker or hit the limit.
+        let mut buf = Vec::with_capacity(16384);
+        let mut tmp = [0u8; 4096];
+        loop {
+            let n = stream
+                .read(&mut tmp)
+                .await
+                .map_err(|e| format!("failed to read callback request: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            // Stop once we have the full headers (double CRLF) or hit size limit.
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() >= 16384 {
+                break;
             }
         }
 
-        if payload.error.is_some() {
-            let err = payload.error.as_deref().unwrap_or("unknown");
-            let desc = payload.error_description.as_deref().unwrap_or("");
-            return Err(format!("OAuth callback error: {err}: {desc}"));
-        }
-
-        if payload.code.is_none() {
-            return Err("OAuth callback missing authorization code".to_string());
-        }
-
-        Ok(payload)
+        let request = String::from_utf8_lossy(&buf);
+        Ok(parse_callback_request(&request))
     }
 
-    async fn accept_one(self) -> Result<OAuthCallbackPayload, String> {
-        let (mut stream, _addr) = self
-            .listener
-            .accept()
-            .await
-            .map_err(|e| format!("failed to accept callback connection: {e}"))?;
-
-        let mut buf = vec![0u8; 4096];
-        let n = stream
-            .read(&mut buf)
-            .await
-            .map_err(|e| format!("failed to read callback request: {e}"))?;
-
-        let request = String::from_utf8_lossy(&buf[..n]);
-        let payload = parse_callback_request(&request);
-
-        // Send response
-        let (status, body) = if payload.error.is_some() || payload.code.is_none() {
-            ("400 Bad Request", "<html><body><h1>OAuth Error</h1><p>Authentication failed. You can close this tab.</p></body></html>")
+    async fn send_response(stream: &mut tokio::net::TcpStream, status: &str, message: &str) {
+        let body = if message.is_empty() {
+            String::new()
         } else {
-            ("200 OK", "<html><body><h1>Success</h1><p>Authentication successful! You can close this tab.</p></body></html>")
+            format!(
+                "<html><body><h1>{}</h1><p>{message}</p></body></html>",
+                if status.starts_with('2') {
+                    "Success"
+                } else {
+                    "Error"
+                }
+            )
         };
-
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
-
         let _ = stream.write_all(response.as_bytes()).await;
         let _ = stream.shutdown().await;
-
-        Ok(payload)
     }
 }
 

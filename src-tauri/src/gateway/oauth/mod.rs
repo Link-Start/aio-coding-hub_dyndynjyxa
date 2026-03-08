@@ -9,6 +9,25 @@ pub(crate) mod refresh_loop;
 pub(crate) mod registry;
 pub(crate) mod token_exchange;
 
+use std::sync::Mutex;
+use tokio::sync::watch;
+
+/// Global abort handle for in-progress OAuth flows.
+/// When a new flow starts, it cancels any prior pending flow so the old callback
+/// listener is dropped immediately (frees the port).
+static ACTIVE_FLOW_ABORT: Mutex<Option<watch::Sender<()>>> = Mutex::new(None);
+
+/// Cancel any in-progress OAuth flow and return a receiver that the new flow
+/// should select on so it can itself be cancelled by a future invocation.
+pub(crate) fn cancel_previous_flow() -> watch::Receiver<()> {
+    let mut guard = ACTIVE_FLOW_ABORT.lock().unwrap_or_else(|e| e.into_inner());
+    // Dropping the old sender causes the old receiver to see a channel-closed signal,
+    // which aborts the old `wait_for_callback` via the tokio::select! in the caller.
+    let (tx, rx) = watch::channel(());
+    *guard = Some(tx);
+    rx
+}
+
 /// Build an HTTP client suitable for OAuth token exchange and refresh requests.
 ///
 /// Respects standard proxy environment variables (`HTTPS_PROXY`, `HTTP_PROXY`,

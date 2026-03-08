@@ -186,41 +186,6 @@ export function SortableProviderCard({
               <span className="shrink-0 rounded-full bg-slate-50 px-2 py-0.5 font-mono text-[10px] text-slate-700 dark:bg-slate-700 dark:text-slate-300">
                 倍率 {provider.cost_multiplier}x
               </span>
-              {provider.auth_mode === "oauth" ? (
-                <span
-                  className={cn(
-                    "shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px]",
-                    provider.oauth_last_error
-                      ? "bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400"
-                      : "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
-                  )}
-                  title={
-                    provider.oauth_last_error
-                      ? `OAuth 错误: ${provider.oauth_last_error}`
-                      : provider.oauth_email
-                        ? `OAuth: ${provider.oauth_email}`
-                        : "OAuth 已连接"
-                  }
-                >
-                  OAuth{provider.oauth_email ? ` (${provider.oauth_email})` : ""}
-                </span>
-              ) : null}
-              {isOAuth ? (
-                <span
-                  className="shrink-0 rounded-full bg-sky-50 px-2 py-0.5 font-mono text-[10px] text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
-                  title="OAuth 账号 5h 限额"
-                >
-                  5h {oauthLimits?.limit_5h_text ?? "未获取"}
-                </span>
-              ) : null}
-              {isOAuth ? (
-                <span
-                  className="shrink-0 rounded-full bg-sky-50 px-2 py-0.5 font-mono text-[10px] text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
-                  title="OAuth 账号每周限额"
-                >
-                  周 {oauthLimits?.limit_weekly_text ?? "未获取"}
-                </span>
-              ) : null}
               {provider.cli_key === "claude" && hasClaudeModels ? (
                 <span
                   className="shrink-0 rounded-full bg-sky-50 px-2 py-0.5 font-mono text-[10px] text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
@@ -239,12 +204,76 @@ export function SortableProviderCard({
               ) : null}
             </div>
             <div className="mt-1 flex min-w-0 items-center gap-2">
-              <span
-                className="truncate font-mono text-xs text-slate-500 dark:text-slate-400 cursor-default"
-                title={provider.base_urls.join("\n")}
-              >
-                {providerBaseUrlSummary(provider)}
-              </span>
+              {/* Auth mode chip — fixed width for alignment */}
+              {isOAuth ? (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    fetchLimits();
+                  }}
+                  disabled={limitsLoading}
+                  className={cn(
+                    "inline-flex w-16 shrink-0 cursor-pointer items-center justify-center gap-1 rounded-full px-2 py-0.5 font-mono text-[10px] transition-opacity hover:opacity-80",
+                    provider.oauth_last_error
+                      ? "bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400"
+                      : "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                  )}
+                  title={
+                    provider.oauth_last_error
+                      ? `OAuth 错误: ${provider.oauth_last_error}（点击刷新用量）`
+                      : provider.oauth_email
+                        ? `OAuth: ${provider.oauth_email}（点击刷新用量）`
+                        : "OAuth 已连接（点击刷新用量）"
+                  }
+                >
+                  <RefreshCw className={cn("h-2.5 w-2.5", limitsLoading && "animate-spin")} />
+                  OAuth
+                </button>
+              ) : (
+                <span
+                  className="inline-flex w-16 shrink-0 items-center justify-center rounded-full px-2 py-0.5 font-mono text-[10px] bg-sky-50 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
+                  title="API Key 认证"
+                >
+                  API Key
+                </span>
+              )}
+              {/* Detail: OAuth shows email + limits; API Key shows base_url summary */}
+              {isOAuth ? (
+                <>
+                  {provider.oauth_email ? (
+                    <span
+                      className="truncate font-mono text-xs text-slate-500 dark:text-slate-400 cursor-default"
+                      title={`OAuth: ${provider.oauth_email}`}
+                    >
+                      {provider.oauth_email}
+                    </span>
+                  ) : null}
+                  {oauthLimits?.limit_5h_text ? (
+                    <span
+                      className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 font-mono text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                      title={`5h 用量: ${oauthLimits.limit_5h_text}`}
+                    >
+                      5h: {oauthLimits.limit_5h_text}
+                    </span>
+                  ) : null}
+                  {oauthLimits?.limit_weekly_text ? (
+                    <span
+                      className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 font-mono text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                      title={`周用量: ${oauthLimits.limit_weekly_text}`}
+                    >
+                      周: {oauthLimits.limit_weekly_text}
+                    </span>
+                  ) : null}
+                </>
+              ) : (
+                <span
+                  className="truncate font-mono text-xs text-slate-500 dark:text-slate-400 cursor-default"
+                  title={provider.base_urls.join("\n")}
+                >
+                  {providerBaseUrlSummary(provider)}
+                </span>
+              )}
               {provider.note ? (
                 <span
                   className="truncate text-xs text-slate-400 dark:text-slate-500 cursor-default"
@@ -311,19 +340,6 @@ export function SortableProviderCard({
             <Trash2 className="h-4 w-4" />
             删除
           </Button>
-
-          {isOAuth ? (
-            <Button
-              onClick={fetchLimits}
-              variant="secondary"
-              size="sm"
-              disabled={limitsLoading}
-              title="刷新 OAuth 用量"
-            >
-              <RefreshCw className={cn("h-3.5 w-3.5", limitsLoading && "animate-spin")} />
-              {limitsLoading ? "加载中…" : "用量"}
-            </Button>
-          ) : null}
         </div>
       </Card>
     </div>

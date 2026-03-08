@@ -487,6 +487,9 @@ pub(crate) async fn provider_oauth_start_flow(
         state_bytes,
     );
 
+    // 3b. Cancel any prior pending OAuth flow so its listener is dropped (frees port).
+    let mut abort_rx = crate::gateway::oauth::cancel_previous_flow();
+
     // 4. Bind callback listener
     let listener = crate::gateway::oauth::callback_server::bind_callback_listener(
         endpoints.default_callback_port,
@@ -516,14 +519,21 @@ pub(crate) async fn provider_oauth_start_flow(
         authorize_url.push_str(&urlencoding_encode(value));
     }
 
+    // Force a fresh login session to avoid stale PKCE/state conflicts on retry.
+    authorize_url.push_str("&prompt=login");
+
     // 6. Open browser
     let _ = tauri_plugin_opener::open_url(&authorize_url, None::<&str>);
 
-    // 7. Wait for callback (300s timeout)
-    let callback = listener
-        .wait_for_callback(&oauth_state, 300)
-        .await
-        .map_err(|e| format!("OAuth callback failed: {e}"))?;
+    // 7. Wait for callback (300s timeout), but abort if a newer flow cancels us.
+    let callback = tokio::select! {
+        result = listener.wait_for_callback(&oauth_state, 300) => {
+            result.map_err(|e| format!("OAuth callback failed: {e}"))?
+        }
+        _ = abort_rx.changed() => {
+            return Err("OAuth flow cancelled: a new login attempt was started".to_string());
+        }
+    };
 
     let code = callback
         .code

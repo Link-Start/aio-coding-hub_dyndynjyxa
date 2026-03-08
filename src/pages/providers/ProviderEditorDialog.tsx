@@ -599,21 +599,23 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
       className="max-w-4xl"
     >
       <div className="space-y-4">
-        {/* ── Auth mode selector at the very top ── */}
-        <FormField label="认证方式" hint="选择后下方表单会相应变化">
-          <TabList<"api_key" | "oauth">
-            ariaLabel="认证方式"
-            items={[
-              { key: "api_key", label: "API 密钥" },
-              { key: "oauth", label: "OAuth 登录" },
-            ]}
-            value={authMode}
-            onChange={(next) => {
-              setAuthMode(next);
-              setValue("auth_mode", next, { shouldDirty: true });
-            }}
-          />
-        </FormField>
+        {/* ── Auth mode selector (only for Codex — Claude/Gemini OAuth not yet tested) ── */}
+        {cliKey === "codex" ? (
+          <FormField label="认证方式" hint="选择后下方表单会相应变化">
+            <TabList<"api_key" | "oauth">
+              ariaLabel="认证方式"
+              items={[
+                { key: "api_key", label: "API 密钥" },
+                { key: "oauth", label: "OAuth 登录" },
+              ]}
+              value={authMode}
+              onChange={(next) => {
+                setAuthMode(next);
+                setValue("auth_mode", next, { shouldDirty: true });
+              }}
+            />
+          </FormField>
+        ) : null}
 
         {authMode === "oauth" ? (
           /* ── OAuth mode: simplified form ── */
