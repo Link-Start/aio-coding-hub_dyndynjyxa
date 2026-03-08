@@ -1,0 +1,281 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
+import { SortableProviderCard, type SortableProviderCardProps } from "../SortableProviderCard";
+import { providerOAuthFetchLimits, type ProviderSummary } from "../../../services/providers";
+
+vi.mock("sonner", () => ({ toast: vi.fn() }));
+vi.mock("../../../services/consoleLog", () => ({ logToConsole: vi.fn() }));
+vi.mock("../../../services/providers", async () => {
+  const actual = await vi.importActual<typeof import("../../../services/providers")>(
+    "../../../services/providers"
+  );
+  return { ...actual, providerOAuthFetchLimits: vi.fn() };
+});
+
+vi.mock("@dnd-kit/sortable", () => ({
+  useSortable: () => ({
+    attributes: {},
+    listeners: {},
+    setNodeRef: () => {},
+    transform: null,
+    transition: undefined,
+    isDragging: false,
+  }),
+}));
+
+vi.mock("@dnd-kit/utilities", () => ({
+  CSS: { Transform: { toString: () => null } },
+}));
+
+function makeProvider(partial: Partial<ProviderSummary> = {}): ProviderSummary {
+  return {
+    id: 1,
+    cli_key: "claude",
+    name: "Test Provider",
+    base_urls: ["https://example.com/v1"],
+    base_url_mode: "order",
+    claude_models: {},
+    enabled: true,
+    priority: 0,
+    cost_multiplier: 1.0,
+    limit_5h_usd: null,
+    limit_daily_usd: null,
+    daily_reset_mode: "fixed",
+    daily_reset_time: "00:00:00",
+    limit_weekly_usd: null,
+    limit_monthly_usd: null,
+    limit_total_usd: null,
+    tags: [],
+    note: "",
+    created_at: 0,
+    updated_at: 0,
+    auth_mode: "api_key",
+    oauth_provider_type: null,
+    oauth_email: null,
+    oauth_expires_at: null,
+    oauth_last_error: null,
+    ...partial,
+  };
+}
+
+function renderCard(
+  partialProvider: Partial<ProviderSummary> = {},
+  extraProps: Partial<SortableProviderCardProps> = {}
+) {
+  const provider = makeProvider(partialProvider);
+  const defaultProps: SortableProviderCardProps = {
+    provider,
+    circuit: null,
+    circuitResetting: false,
+    onToggleEnabled: vi.fn(),
+    onResetCircuit: vi.fn(),
+    onEdit: vi.fn(),
+    onDelete: vi.fn(),
+    ...extraProps,
+  };
+  return render(<SortableProviderCard {...defaultProps} />);
+}
+
+describe("pages/providers/SortableProviderCard", () => {
+  it("renders OAuth badge with email", () => {
+    renderCard({
+      auth_mode: "oauth",
+      oauth_email: "user@example.com",
+    });
+
+    expect(screen.getByText(/OAuth \(user@example.com\)/)).toBeInTheDocument();
+  });
+
+  it("renders OAuth badge with error styling", () => {
+    renderCard({
+      auth_mode: "oauth",
+      oauth_last_error: "Token expired",
+    });
+
+    const badge = screen.getByText("OAuth");
+    expect(badge).toBeInTheDocument();
+    expect(badge.getAttribute("title")).toContain("OAuth 错误: Token expired");
+  });
+
+  it("renders OAuth badge without email", () => {
+    renderCard({
+      auth_mode: "oauth",
+      oauth_email: null,
+    });
+
+    const badge = screen.getByText("OAuth");
+    expect(badge.getAttribute("title")).toBe("OAuth 已连接");
+  });
+
+  it("renders OAuth limits chips and fetch button", () => {
+    renderCard({
+      auth_mode: "oauth",
+    });
+
+    expect(screen.getByTitle("OAuth 账号 5h 限额")).toBeInTheDocument();
+    expect(screen.getByTitle("OAuth 账号每周限额")).toBeInTheDocument();
+    expect(screen.getByText("用量")).toBeInTheDocument();
+  });
+
+  it("fetches OAuth limits on button click", async () => {
+    vi.mocked(providerOAuthFetchLimits).mockResolvedValueOnce({
+      limit_5h_text: "100 requests",
+      limit_weekly_text: "1000 requests",
+    });
+
+    renderCard({
+      auth_mode: "oauth",
+    });
+
+    fireEvent.click(screen.getByText("用量"));
+
+    await waitFor(() => expect(vi.mocked(providerOAuthFetchLimits)).toHaveBeenCalledWith(1));
+  });
+
+  it("handles null result from fetchLimits", async () => {
+    vi.mocked(providerOAuthFetchLimits).mockResolvedValueOnce(null);
+
+    renderCard({
+      auth_mode: "oauth",
+    });
+
+    fireEvent.click(screen.getByText("用量"));
+
+    await waitFor(() => expect(vi.mocked(toast)).toHaveBeenCalledWith("获取 OAuth 用量失败"));
+  });
+
+  it("handles fetchLimits error", async () => {
+    vi.mocked(providerOAuthFetchLimits).mockRejectedValueOnce(new Error("fetch error"));
+
+    renderCard({
+      auth_mode: "oauth",
+    });
+
+    fireEvent.click(screen.getByText("用量"));
+
+    await waitFor(() =>
+      expect(vi.mocked(toast)).toHaveBeenCalledWith(expect.stringContaining("获取 OAuth 用量失败"))
+    );
+  });
+
+  it("renders note when present", () => {
+    renderCard({ note: "My custom note" });
+
+    expect(screen.getByText("· My custom note")).toBeInTheDocument();
+  });
+
+  it("renders limit chips", () => {
+    renderCard({
+      limit_5h_usd: 10,
+      limit_daily_usd: 100,
+      daily_reset_mode: "rolling",
+      limit_weekly_usd: 500,
+      limit_monthly_usd: 2000,
+      limit_total_usd: 10000,
+    });
+
+    expect(screen.getByText("限额")).toBeInTheDocument();
+  });
+
+  it("renders Claude models badge", () => {
+    renderCard({
+      cli_key: "claude",
+      claude_models: { main_model: "claude-3", haiku_model: null as any },
+    });
+
+    expect(screen.getByText("Claude Models")).toBeInTheDocument();
+  });
+
+  it("renders ping mode label", () => {
+    renderCard({ base_url_mode: "ping" });
+
+    expect(screen.getByText("Ping")).toBeInTheDocument();
+  });
+
+  it("renders circuit breaker state", () => {
+    renderCard(
+      {},
+      {
+        circuit: {
+          provider_id: 1,
+          state: "OPEN",
+          open_until: null,
+          cooldown_until: null,
+        } as any,
+      }
+    );
+
+    expect(screen.getByTitle("熔断")).toBeInTheDocument();
+    expect(screen.getByText("解除熔断")).toBeInTheDocument();
+  });
+
+  it("computes unavailableUntil as max of open_until and cooldown_until", () => {
+    const futureTs = Math.floor(Date.now() / 1000) + 600;
+    renderCard(
+      {},
+      {
+        circuit: {
+          provider_id: 1,
+          state: "OPEN",
+          open_until: futureTs,
+          cooldown_until: futureTs + 100,
+        } as any,
+      }
+    );
+
+    // The title should contain the formatted timestamp
+    const badge = screen.getByTitle(/熔断至/);
+    expect(badge).toBeInTheDocument();
+  });
+
+  it("computes unavailableUntil from cooldown_until when not OPEN", () => {
+    const futureTs = Math.floor(Date.now() / 1000) + 600;
+    renderCard(
+      {},
+      {
+        circuit: {
+          provider_id: 1,
+          state: "CLOSED",
+          open_until: null,
+          cooldown_until: futureTs,
+        } as any,
+      }
+    );
+
+    const badge = screen.getByTitle(/熔断至/);
+    expect(badge).toBeInTheDocument();
+  });
+
+  it("shows terminal launch button when callback provided", () => {
+    renderCard(
+      {},
+      {
+        onCopyTerminalLaunchCommand: vi.fn(),
+      }
+    );
+
+    expect(screen.getByText("终端启动")).toBeInTheDocument();
+  });
+
+  it("shows validate model button when callback provided", () => {
+    renderCard(
+      {},
+      {
+        onValidateModel: vi.fn(),
+      }
+    );
+
+    expect(screen.getByText("模型验证")).toBeInTheDocument();
+  });
+
+  it("renders limit chips with fixed daily reset", () => {
+    renderCard({
+      limit_daily_usd: 50,
+      daily_reset_mode: "fixed",
+      daily_reset_time: "08:00:00",
+    });
+
+    expect(screen.getByText("限额")).toBeInTheDocument();
+  });
+});

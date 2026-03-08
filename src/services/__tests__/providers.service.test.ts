@@ -3,6 +3,12 @@ import {
   baseUrlPingMs,
   providerClaudeTerminalLaunchCommand,
   providerDelete,
+  providerGetApiKey,
+  providerOAuthDisconnect,
+  providerOAuthFetchLimits,
+  providerOAuthRefresh,
+  providerOAuthStartFlow,
+  providerOAuthStatus,
   providerSetEnabled,
   providersList,
   providersReorder,
@@ -135,6 +141,100 @@ describe("services/providers", () => {
     });
     expect(invokeTauriOrNull).toHaveBeenCalledWith("provider_claude_terminal_launch_command", {
       providerId: 5,
+    });
+  });
+
+  it("providerGetApiKey delegates to invokeService", async () => {
+    vi.mocked(hasTauriRuntime).mockReturnValue(true);
+    vi.mocked(invokeTauriOrNull).mockResolvedValueOnce("sk-test-key" as any);
+
+    const result = await providerGetApiKey(42);
+    expect(result).toBe("sk-test-key");
+    expect(invokeTauriOrNull).toHaveBeenCalledWith("provider_get_api_key", { providerId: 42 });
+  });
+
+  it("providerOAuthStartFlow calls invokeTauriOrNull directly", async () => {
+    vi.mocked(invokeTauriOrNull).mockResolvedValueOnce({
+      success: true,
+      provider_type: "google",
+      expires_at: 1700000000,
+    });
+
+    const result = await providerOAuthStartFlow("claude", 10);
+    expect(result).toEqual({
+      success: true,
+      provider_type: "google",
+      expires_at: 1700000000,
+    });
+    expect(invokeTauriOrNull).toHaveBeenCalledWith("provider_oauth_start_flow", {
+      cliKey: "claude",
+      providerId: 10,
+    });
+  });
+
+  it("providerOAuthStartFlow returns null when tauri is absent", async () => {
+    vi.mocked(invokeTauriOrNull).mockResolvedValueOnce(null);
+
+    const result = await providerOAuthStartFlow("codex", 1);
+    expect(result).toBeNull();
+  });
+
+  it("providerOAuthRefresh calls invokeTauriOrNull directly", async () => {
+    vi.mocked(invokeTauriOrNull).mockResolvedValueOnce({
+      success: true,
+      expires_at: 1700001000,
+    });
+
+    const result = await providerOAuthRefresh(20);
+    expect(result).toEqual({ success: true, expires_at: 1700001000 });
+    expect(invokeTauriOrNull).toHaveBeenCalledWith("provider_oauth_refresh", { providerId: 20 });
+  });
+
+  it("providerOAuthDisconnect calls invokeTauriOrNull directly", async () => {
+    vi.mocked(invokeTauriOrNull).mockResolvedValueOnce({ success: true });
+
+    const result = await providerOAuthDisconnect(30);
+    expect(result).toEqual({ success: true });
+    expect(invokeTauriOrNull).toHaveBeenCalledWith("provider_oauth_disconnect", {
+      providerId: 30,
+    });
+  });
+
+  it("providerOAuthStatus calls invokeTauriOrNull directly", async () => {
+    vi.mocked(invokeTauriOrNull).mockResolvedValueOnce({
+      connected: true,
+      provider_type: "google",
+      email: "test@example.com",
+      expires_at: 1700002000,
+      has_refresh_token: true,
+    });
+
+    const result = await providerOAuthStatus(40);
+    expect(result).toEqual({
+      connected: true,
+      provider_type: "google",
+      email: "test@example.com",
+      expires_at: 1700002000,
+      has_refresh_token: true,
+    });
+    expect(invokeTauriOrNull).toHaveBeenCalledWith("provider_oauth_status", { providerId: 40 });
+  });
+
+  it("providerOAuthFetchLimits calls invokeTauriOrNull directly", async () => {
+    vi.mocked(invokeTauriOrNull).mockResolvedValueOnce({
+      limit_5h_text: "100 requests",
+      limit_weekly_text: "1000 requests",
+      raw_json: { key: "value" },
+    });
+
+    const result = await providerOAuthFetchLimits(50);
+    expect(result).toEqual({
+      limit_5h_text: "100 requests",
+      limit_weekly_text: "1000 requests",
+      raw_json: { key: "value" },
+    });
+    expect(invokeTauriOrNull).toHaveBeenCalledWith("provider_oauth_fetch_limits", {
+      providerId: 50,
     });
   });
 });

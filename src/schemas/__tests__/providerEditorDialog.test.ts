@@ -154,4 +154,168 @@ describe("schemas/providerEditorDialog", () => {
       ).toBe(true);
     }
   });
+
+  it("rejects cost_multiplier above 1000", () => {
+    const schema = createProviderEditorDialogSchema({ mode: "edit" });
+    const res = schema.safeParse({
+      name: "n",
+      api_key: "",
+      auth_mode: "api_key",
+      cost_multiplier: "1001",
+      limit_5h_usd: "",
+      limit_daily_usd: "",
+      limit_weekly_usd: "",
+      limit_monthly_usd: "",
+      limit_total_usd: "",
+      daily_reset_mode: "fixed",
+      daily_reset_time: "00:00:00",
+      enabled: true,
+      note: "",
+    });
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues.some((i) => i.message === "价格倍率不能大于 1000")).toBe(true);
+    }
+  });
+
+  it("rejects non-finite cost_multiplier", () => {
+    const schema = createProviderEditorDialogSchema({ mode: "edit" });
+    const res = schema.safeParse({
+      name: "n",
+      api_key: "",
+      auth_mode: "api_key",
+      cost_multiplier: "abc",
+      limit_5h_usd: "",
+      limit_daily_usd: "",
+      limit_weekly_usd: "",
+      limit_monthly_usd: "",
+      limit_total_usd: "",
+      daily_reset_mode: "fixed",
+      daily_reset_time: "00:00:00",
+      enabled: true,
+      note: "",
+    });
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues.some((i) => i.message === "价格倍率必须是数字")).toBe(true);
+    }
+  });
+
+  it("rejects negative limit_usd values", () => {
+    const schema = createProviderEditorDialogSchema({ mode: "edit" });
+    const res = schema.safeParse({
+      name: "n",
+      api_key: "",
+      auth_mode: "api_key",
+      cost_multiplier: "1.0",
+      limit_5h_usd: "-1",
+      limit_daily_usd: "",
+      limit_weekly_usd: "",
+      limit_monthly_usd: "",
+      limit_total_usd: "",
+      daily_reset_mode: "fixed",
+      daily_reset_time: "00:00:00",
+      enabled: true,
+      note: "",
+    });
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues.some((i) => i.message === "5 小时消费上限 必须大于等于 0")).toBe(
+        true
+      );
+    }
+  });
+
+  it("rejects limit_usd exceeding max", () => {
+    const schema = createProviderEditorDialogSchema({ mode: "edit" });
+    const res = schema.safeParse({
+      name: "n",
+      api_key: "",
+      auth_mode: "api_key",
+      cost_multiplier: "1.0",
+      limit_5h_usd: "2000000000",
+      limit_daily_usd: "",
+      limit_weekly_usd: "",
+      limit_monthly_usd: "",
+      limit_total_usd: "",
+      daily_reset_mode: "fixed",
+      daily_reset_time: "00:00:00",
+      enabled: true,
+      note: "",
+    });
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues.some((i) => i.message.includes("5 小时消费上限 不能大于"))).toBe(
+        true
+      );
+    }
+  });
+
+  it("rejects invalid daily_reset_time format", () => {
+    const schema = createProviderEditorDialogSchema({ mode: "edit" });
+    const res = schema.safeParse({
+      name: "n",
+      api_key: "",
+      auth_mode: "api_key",
+      cost_multiplier: "1.0",
+      limit_5h_usd: "",
+      limit_daily_usd: "",
+      limit_weekly_usd: "",
+      limit_monthly_usd: "",
+      limit_total_usd: "",
+      daily_reset_mode: "fixed",
+      daily_reset_time: "not-a-time",
+      enabled: true,
+      note: "",
+    });
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(
+        res.error.issues.some((i) => i.message.includes("固定重置时间格式必须为 HH:mm:ss"))
+      ).toBe(true);
+    }
+  });
+
+  it("defaults empty daily_reset_time to 00:00:00", () => {
+    const schema = createProviderEditorDialogSchema({ mode: "edit" });
+    const res = schema.safeParse({
+      name: "n",
+      api_key: "",
+      auth_mode: "api_key",
+      cost_multiplier: "1.0",
+      limit_5h_usd: "",
+      limit_daily_usd: "",
+      limit_weekly_usd: "",
+      limit_monthly_usd: "",
+      limit_total_usd: "",
+      daily_reset_mode: "fixed",
+      daily_reset_time: "",
+      enabled: true,
+      note: "",
+    });
+    expect(res.success).toBe(true);
+    if (res.success) {
+      expect(res.data.daily_reset_time).toBe("00:00:00");
+    }
+  });
+
+  it("skips api_key check in create mode when auth_mode is oauth", () => {
+    const schema = createProviderEditorDialogSchema({ mode: "create" });
+    const res = schema.safeParse({
+      name: "n",
+      api_key: "",
+      auth_mode: "oauth",
+      cost_multiplier: "1.0",
+      limit_5h_usd: "",
+      limit_daily_usd: "",
+      limit_weekly_usd: "",
+      limit_monthly_usd: "",
+      limit_total_usd: "",
+      daily_reset_mode: "fixed",
+      daily_reset_time: "00:00:00",
+      enabled: true,
+      note: "",
+    });
+    expect(res.success).toBe(true);
+  });
 });
