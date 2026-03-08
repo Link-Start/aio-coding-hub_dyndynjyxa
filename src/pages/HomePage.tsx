@@ -14,6 +14,7 @@ import { useProviderLimitUsageV1Query } from "../query/providerLimitUsage";
 import {
   useRequestAttemptLogsByTraceIdQuery,
   useRequestLogDetailQuery,
+  useRequestLogsIncrementalPollQuery,
   useRequestLogsListAllQuery,
 } from "../query/requestLogs";
 import { useUsageHourlySeriesQuery } from "../query/usage";
@@ -85,6 +86,10 @@ export function HomePage() {
       : providerLimitQuery.data != null;
 
   const requestLogsQuery = useRequestLogsListAllQuery(50, { enabled: tab === "overview" });
+  useRequestLogsIncrementalPollQuery(50, {
+    enabled: overviewForegroundPollingEnabled,
+    refetchIntervalMs: overviewForegroundPollingEnabled ? 1000 : false,
+  });
   const requestLogsRaw = requestLogsQuery.data;
   const requestLogs = useMemo(() => requestLogsRaw ?? [], [requestLogsRaw]);
   const requestLogsLoading = requestLogsQuery.isLoading;

@@ -93,6 +93,7 @@ export function createProviderEditorDialogSchema(options: { mode: "create" | "ed
     .object({
       name: z.string().trim().min(1, { message: "名称不能为空" }),
       api_key: z.string(),
+      auth_mode: z.enum(["api_key", "oauth"]),
       cost_multiplier: parseCostMultiplier(),
       limit_5h_usd: parseLimitUsd("5 小时消费上限"),
       limit_daily_usd: parseLimitUsd("每日消费上限"),
@@ -106,6 +107,7 @@ export function createProviderEditorDialogSchema(options: { mode: "create" | "ed
     })
     .superRefine((values, ctx) => {
       if (options.mode !== "create") return;
+      if (values.auth_mode === "oauth") return;
       if (values.api_key.trim()) return;
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

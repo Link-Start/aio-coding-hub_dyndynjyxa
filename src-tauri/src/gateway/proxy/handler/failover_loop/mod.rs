@@ -45,6 +45,8 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -89,6 +91,381 @@ fn finalize_owned_from_input(input: &RequestContext) -> FinalizeOwnedCommon {
         session_id: input.session_id.clone(),
         requested_model: input.requested_model.clone(),
         special_settings: input.special_settings.clone(),
+    }
+}
+
+// ── OAuth credential resolution helpers ──
+
+const CODEX_ORIGINATOR_HEADER_VALUE: &str = "codex_cli_rs";
+
+fn resolve_oauth_adapter_for_provider(
+    cli_key: &str,
+    provider_id: i64,
+    oauth_provider_type: Option<&str>,
+) -> crate::shared::error::AppResult<
+    &'static dyn crate::gateway::oauth::provider_trait::OAuthProvider,
+> {
+    let registry = crate::gateway::oauth::registry::global_registry();
+    let provider_type = oauth_provider_type.map(str::trim).unwrap_or_default();
+    let adapter = if provider_type.is_empty() {
+        registry
+            .get_by_cli_key(cli_key)
+            .ok_or_else(|| format!("SEC_INVALID_INPUT: no OAuth adapter for cli_key={cli_key}"))?
+    } else {
+        registry
+            .get_by_provider_type(provider_type)
+            .ok_or_else(|| {
+                format!("SEC_INVALID_INPUT: no OAuth adapter for provider_type={provider_type}")
+            })?
+    };
+
+    if adapter.cli_key() != cli_key {
+        return Err(format!(
+            "SEC_INVALID_STATE: oauth adapter mismatch for provider_id={provider_id} (cli_key={cli_key}, provider_type={}, resolved_cli_key={})",
+            if provider_type.is_empty() {
+                "<empty>"
+            } else {
+                provider_type
+            },
+            adapter.cli_key()
+        )
+        .into());
+    }
+
+    Ok(adapter)
+}
+
+/// Resolve the effective API credential for a provider.
+/// For `api_key` mode, returns the plaintext key.
+/// For `oauth` mode, checks token freshness and refreshes inline if needed.
+async fn resolve_effective_credential(
+    state: &crate::gateway::manager::GatewayAppState,
+    cli_key: &str,
+    provider: &crate::providers::ProviderForGateway,
+) -> crate::shared::error::AppResult<String> {
+    if provider.auth_mode != "oauth" {
+        let api_key = provider.api_key_plaintext.trim();
+        if api_key.is_empty() {
+            return Err("SEC_INVALID_INPUT: provider api_key is empty"
+                .to_string()
+                .into());
+        }
+        return Ok(api_key.to_string());
+    }
+
+    // OAuth mode: load details from DB and refresh if needed.
+    let details = crate::providers::get_oauth_details(&state.db, provider.id)?;
+    if details.cli_key != cli_key {
+        return Err(format!(
+            "SEC_INVALID_STATE: oauth details cli_key mismatch for provider_id={} (expected={cli_key}, actual={})",
+            provider.id, details.cli_key
+        )
+        .into());
+    }
+    let oauth_adapter = resolve_oauth_adapter_for_provider(
+        cli_key,
+        provider.id,
+        Some(details.oauth_provider_type.as_str()),
+    )?;
+
+    let raw_token = details.oauth_access_token.trim().to_string();
+    if raw_token.is_empty() {
+        return Err("SEC_INVALID_INPUT: oauth access_token is empty"
+            .to_string()
+            .into());
+    }
+
+    // All OAuth providers use the raw access_token as the effective credential.
+    // For Codex, the access_token is used as Bearer token (per official Codex CLI).
+    // The id_token is only used for extracting chatgpt_account_id (handled separately).
+    let token = raw_token;
+
+    let now_unix = now_unix_seconds() as i64;
+    if crate::gateway::oauth::refresh::should_refresh_now(
+        details.oauth_expires_at,
+        details.oauth_refresh_lead_s,
+    ) {
+        // Attempt inline refresh.
+        if let (Some(ref refresh_token), Some(ref token_uri)) =
+            (&details.oauth_refresh_token, &details.oauth_token_uri)
+        {
+            if !refresh_token.trim().is_empty() && !token_uri.trim().is_empty() {
+                match crate::gateway::oauth::refresh::refresh_provider_token_with_retry(
+                    &state.client,
+                    token_uri,
+                    details.oauth_client_id.as_deref().unwrap_or(""),
+                    details.oauth_client_secret.as_deref(),
+                    refresh_token,
+                )
+                .await
+                {
+                    Ok(refreshed) => {
+                        let new_token = refreshed.access_token.trim().to_string();
+                        if !new_token.is_empty() {
+                            // Persist refreshed tokens via CAS (avoid concurrent overwrite).
+                            match crate::providers::update_oauth_tokens_if_last_refreshed_matches(
+                                &state.db,
+                                provider.id,
+                                "oauth",
+                                oauth_adapter.provider_type(),
+                                &new_token,
+                                refreshed.refresh_token.as_deref().or(Some(refresh_token)),
+                                refreshed
+                                    .id_token
+                                    .as_deref()
+                                    .or(details.oauth_id_token.as_deref()),
+                                token_uri,
+                                details.oauth_client_id.as_deref().unwrap_or(""),
+                                details.oauth_client_secret.as_deref(),
+                                refreshed.expires_at.or(details.oauth_expires_at),
+                                details.oauth_email.as_deref(),
+                                details.oauth_last_refreshed_at,
+                            ) {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    tracing::info!(
+                                        cli_key = %cli_key,
+                                        provider_id = provider.id,
+                                        "OAuth inline refresh CAS conflict: skipped stale token write"
+                                    );
+                                }
+                                Err(persist_err) => {
+                                    tracing::warn!(
+                                        cli_key = %cli_key,
+                                        provider_id = provider.id,
+                                        "OAuth token refresh persisted failed: {}",
+                                        persist_err
+                                    );
+                                }
+                            }
+                            tracing::info!(
+                                cli_key = %cli_key,
+                                provider_id = provider.id,
+                                "OAuth token refreshed inline successfully"
+                            );
+                            // All providers use the refreshed access_token as credential.
+                            return Ok(new_token);
+                        }
+                    }
+                    Err(err) => {
+                        // Refresh failed — check if current token is still valid.
+                        let still_valid = details
+                            .oauth_expires_at
+                            .map(|exp| exp > now_unix)
+                            .unwrap_or(false);
+                        if still_valid {
+                            tracing::warn!(
+                                provider_id = provider.id,
+                                cli_key = %cli_key,
+                                "oauth inline refresh failed; fallback to existing token: {}",
+                                err
+                            );
+                            return Ok(token);
+                        }
+                        return Err(format!("OAUTH_REFRESH_FAILED: {err}").into());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(token)
+}
+
+/// After a 401 response, attempt to refresh OAuth token and return the new credential.
+async fn refresh_oauth_credential_after_401(
+    state: &crate::gateway::manager::GatewayAppState,
+    cli_key: &str,
+    provider: &crate::providers::ProviderForGateway,
+) -> crate::shared::error::AppResult<String> {
+    if provider.auth_mode != "oauth" {
+        return Err("SEC_INVALID_INPUT: provider is not oauth mode"
+            .to_string()
+            .into());
+    }
+
+    let details = crate::providers::get_oauth_details(&state.db, provider.id)?;
+    if details.cli_key != cli_key {
+        return Err(format!(
+            "SEC_INVALID_STATE: oauth details cli_key mismatch for provider_id={} (expected={cli_key}, actual={})",
+            provider.id, details.cli_key
+        )
+        .into());
+    }
+    let oauth_adapter = resolve_oauth_adapter_for_provider(
+        cli_key,
+        provider.id,
+        Some(details.oauth_provider_type.as_str()),
+    )?;
+
+    let (refresh_token, token_uri) = match (&details.oauth_refresh_token, &details.oauth_token_uri)
+    {
+        (Some(rt), Some(tu)) if !rt.trim().is_empty() && !tu.trim().is_empty() => (rt, tu),
+        _ => {
+            tracing::warn!(
+                provider_id = provider.id,
+                has_refresh_token = details
+                    .oauth_refresh_token
+                    .as_ref()
+                    .map(|t| !t.trim().is_empty())
+                    .unwrap_or(false),
+                has_token_uri = details
+                    .oauth_token_uri
+                    .as_ref()
+                    .map(|t| !t.trim().is_empty())
+                    .unwrap_or(false),
+                "oauth 401 refresh aborted: missing refresh_token or token_uri"
+            );
+            return Err(
+                "OAUTH_REFRESH_FAILED: no refresh_token or token_uri available"
+                    .to_string()
+                    .into(),
+            );
+        }
+    };
+
+    let refreshed = crate::gateway::oauth::refresh::refresh_provider_token_with_retry(
+        &state.client,
+        token_uri,
+        details.oauth_client_id.as_deref().unwrap_or(""),
+        details.oauth_client_secret.as_deref(),
+        refresh_token,
+    )
+    .await
+    .map_err(|e| format!("OAUTH_REFRESH_FAILED: {e}"))?;
+
+    let new_token = refreshed.access_token.trim().to_string();
+    if new_token.is_empty() {
+        return Err("OAUTH_REFRESH_FAILED: refreshed access_token is empty"
+            .to_string()
+            .into());
+    }
+
+    match crate::providers::update_oauth_tokens_if_last_refreshed_matches(
+        &state.db,
+        provider.id,
+        "oauth",
+        oauth_adapter.provider_type(),
+        &new_token,
+        refreshed.refresh_token.as_deref().or(Some(refresh_token)),
+        refreshed
+            .id_token
+            .as_deref()
+            .or(details.oauth_id_token.as_deref()),
+        token_uri,
+        details.oauth_client_id.as_deref().unwrap_or(""),
+        details.oauth_client_secret.as_deref(),
+        refreshed.expires_at.or(details.oauth_expires_at),
+        details.oauth_email.as_deref(),
+        details.oauth_last_refreshed_at,
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(
+                provider_id = provider.id,
+                "oauth 401 refresh: CAS conflict, skipped stale token write"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                provider_id = provider.id,
+                "oauth 401 refresh: token persisted failed (will retry next request): {e}"
+            );
+        }
+    }
+
+    // All providers use the refreshed access_token as credential.
+    Ok(new_token)
+}
+
+// ── Codex ChatGPT backend helpers ──
+
+fn is_codex_chatgpt_backend(
+    cli_key: &str,
+    provider: &crate::providers::ProviderForGateway,
+    provider_base_url: &str,
+) -> bool {
+    if cli_key != "codex" || provider.auth_mode != "oauth" {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(provider_base_url) else {
+        return false;
+    };
+    let path = url.path().trim_end_matches('/');
+    path.ends_with("/backend-api/codex")
+}
+
+fn normalize_codex_chatgpt_forwarded_path(forwarded_path: &str) -> String {
+    if forwarded_path == "/v1" {
+        return "/".to_string();
+    }
+    if let Some(stripped) = forwarded_path.strip_prefix("/v1/") {
+        return format!("/{stripped}");
+    }
+    forwarded_path.to_string()
+}
+
+fn parse_codex_chatgpt_account_id(id_token: Option<&str>) -> Option<String> {
+    let token = id_token.map(str::trim).filter(|value| !value.is_empty())?;
+    let payload_part = token.split('.').nth(1)?;
+    let payload = URL_SAFE_NO_PAD.decode(payload_part).ok().or_else(|| {
+        let mut padded = payload_part.to_string();
+        while padded.len() % 4 != 0 {
+            padded.push('=');
+        }
+        URL_SAFE_NO_PAD.decode(padded).ok()
+    })?;
+    let json: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    json.get("https://api.openai.com/auth")
+        .and_then(|value| value.get("chatgpt_account_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn maybe_inject_codex_chatgpt_headers(headers: &mut HeaderMap, account_id: Option<&str>) {
+    if !headers.contains_key("originator") {
+        headers.insert(
+            "originator",
+            HeaderValue::from_static(CODEX_ORIGINATOR_HEADER_VALUE),
+        );
+    }
+    if headers.contains_key("chatgpt-account-id") {
+        return;
+    }
+    let Some(value) = account_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        tracing::warn!("codex chatgpt: missing chatgpt-account-id, request may fail with 401");
+        return;
+    };
+    if let Ok(header_value) = HeaderValue::from_str(value) {
+        headers.insert("chatgpt-account-id", header_value);
+    }
+}
+
+fn maybe_enforce_codex_chatgpt_store_false(
+    forwarded_path: &str,
+    upstream_body_bytes: &mut Bytes,
+    strip_request_content_encoding: &mut bool,
+) {
+    if forwarded_path != "/responses" {
+        return;
+    }
+    let Ok(mut root) = serde_json::from_slice::<serde_json::Value>(upstream_body_bytes.as_ref())
+    else {
+        return;
+    };
+    let Some(obj) = root.as_object_mut() else {
+        return;
+    };
+    let needs_update = !matches!(obj.get("store"), Some(serde_json::Value::Bool(false)));
+    if !needs_update {
+        return;
+    }
+    obj.insert("store".to_string(), serde_json::Value::Bool(false));
+    if let Ok(encoded) = serde_json::to_vec(&root) {
+        *upstream_body_bytes = Bytes::from(encoded);
+        *strip_request_content_encoding = true;
     }
 }
 
@@ -239,12 +616,182 @@ pub(super) async fn run(mut input: RequestContext) -> Response {
 
         // NOTE: model whitelist filtering removed (Claude uses slot-based model mapping).
 
-        let provider_base_url_base = select_provider_base_url_for_request(
+        // Resolve effective credential (API key or OAuth token with inline refresh).
+        let mut effective_credential =
+            match resolve_effective_credential(&input.state, &input.cli_key, provider).await {
+                Ok(value) => value,
+                Err(err) => {
+                    let err_text = err.to_string();
+                    tracing::warn!(
+                        trace_id = %input.trace_id,
+                        cli_key = %input.cli_key,
+                        provider_id = provider_id,
+                        provider_name = %provider_name_base,
+                        "provider skipped by credential resolution: {}",
+                        err_text
+                    );
+                    attempts.push(FailoverAttempt {
+                        provider_id,
+                        provider_name: provider_name_base.clone(),
+                        base_url: provider_base_url_display.clone(),
+                        outcome: "skipped".to_string(),
+                        status: None,
+                        provider_index: None,
+                        retry_index: None,
+                        session_reuse: None,
+                        error_category: Some("auth"),
+                        error_code: Some(GatewayErrorCode::InternalError.as_str()),
+                        decision: Some("skip"),
+                        reason: Some(format!(
+                            "provider skipped by credential resolution: {err_text}"
+                        )),
+                        selection_method: Some(dc::SELECTION_METHOD_FILTERED),
+                        reason_code: None,
+                        attempt_started_ms: Some(started.elapsed().as_millis()),
+                        attempt_duration_ms: Some(0),
+                        circuit_state_before: None,
+                        circuit_state_after: None,
+                        circuit_failure_count: None,
+                        circuit_failure_threshold: None,
+                    });
+                    continue;
+                }
+            };
+
+        // OAuth providers get at least 2 retry attempts (to handle 401 reactive refresh).
+        let provider_max_attempts = if provider.auth_mode == "oauth" {
+            input.max_attempts_per_provider.max(2)
+        } else {
+            input.max_attempts_per_provider
+        };
+        let mut oauth_reactive_refreshed_once = false;
+
+        let provider_base_url_base = match select_provider_base_url_for_request(
             &input.state,
             provider,
+            &input.cli_key,
             input.provider_base_url_ping_cache_ttl_seconds,
         )
-        .await;
+        .await
+        {
+            Ok(base_url) => base_url,
+            Err(err) => {
+                tracing::warn!(
+                    trace_id = %input.trace_id,
+                    cli_key = %input.cli_key,
+                    provider_id = provider_id,
+                    provider_name = %provider_name_base,
+                    "provider skipped by base_url resolution: {}",
+                    err
+                );
+                attempts.push(FailoverAttempt {
+                    provider_id,
+                    provider_name: provider_name_base.clone(),
+                    base_url: provider_base_url_display.clone(),
+                    outcome: "skipped".to_string(),
+                    status: None,
+                    provider_index: None,
+                    retry_index: None,
+                    session_reuse: None,
+                    error_category: Some("system"),
+                    error_code: Some(GatewayErrorCode::InternalError.as_str()),
+                    decision: Some("skip"),
+                    reason: Some(format!("provider skipped by base_url resolution: {err}")),
+                    selection_method: Some(dc::SELECTION_METHOD_FILTERED),
+                    reason_code: None,
+                    attempt_started_ms: Some(started.elapsed().as_millis()),
+                    attempt_duration_ms: Some(0),
+                    circuit_state_before: None,
+                    circuit_state_after: None,
+                    circuit_failure_count: None,
+                    circuit_failure_threshold: None,
+                });
+                continue;
+            }
+        };
+
+        tracing::debug!(
+            trace_id = %input.trace_id,
+            cli_key = %input.cli_key,
+            provider_id = provider_id,
+            provider_name = %provider_name_base,
+            auth_mode = %provider.auth_mode,
+            base_url_resolved = %provider_base_url_base,
+            base_urls_count = provider.base_urls.len(),
+            "resolved provider base_url for request"
+        );
+
+        // Detect Codex ChatGPT backend for special handling.
+        let use_codex_chatgpt_backend =
+            is_codex_chatgpt_backend(&input.cli_key, provider, &provider_base_url_base);
+        let codex_chatgpt_account_id = if use_codex_chatgpt_backend {
+            // Extract ChatGPT account ID from id_token JWT.
+            // The official Codex CLI requires this header for API calls.
+            let details = crate::providers::get_oauth_details(&input.state.db, provider.id).ok();
+            let account_id = details.and_then(|d| {
+                // Try oauth_id_token first, then fall back to oauth_access_token
+                // (legacy providers might have id_token stored in oauth_access_token).
+                let result = parse_codex_chatgpt_account_id(d.oauth_id_token.as_deref())
+                    .or_else(|| parse_codex_chatgpt_account_id(Some(&d.oauth_access_token)));
+                tracing::debug!(
+                    provider_id = provider.id,
+                    has_oauth_id_token = d.oauth_id_token.is_some(),
+                    parsed_account_id = ?result,
+                    "codex chatgpt account_id extraction"
+                );
+                result
+            });
+            account_id
+        } else {
+            None
+        };
+        let oauth_adapter = if provider.auth_mode == "oauth" {
+            match resolve_oauth_adapter_for_provider(
+                &input.cli_key,
+                provider.id,
+                provider.oauth_provider_type.as_deref(),
+            ) {
+                Ok(adapter) => Some(adapter),
+                Err(err) => {
+                    let err_text = err.to_string();
+                    tracing::warn!(
+                        trace_id = %input.trace_id,
+                        cli_key = %input.cli_key,
+                        provider_id = provider_id,
+                        provider_name = %provider_name_base,
+                        "provider skipped by oauth adapter mismatch: {}",
+                        err_text
+                    );
+                    attempts.push(FailoverAttempt {
+                        provider_id,
+                        provider_name: provider_name_base.clone(),
+                        base_url: provider_base_url_display.clone(),
+                        outcome: "skipped".to_string(),
+                        status: None,
+                        provider_index: None,
+                        retry_index: None,
+                        session_reuse: None,
+                        error_category: Some("auth"),
+                        error_code: Some(GatewayErrorCode::InternalError.as_str()),
+                        decision: Some("skip"),
+                        reason: Some(format!(
+                            "provider skipped by oauth adapter mismatch: {err_text}"
+                        )),
+                        selection_method: Some(dc::SELECTION_METHOD_FILTERED),
+                        reason_code: None,
+                        attempt_started_ms: Some(started.elapsed().as_millis()),
+                        attempt_duration_ms: Some(0),
+                        circuit_state_before: None,
+                        circuit_state_after: None,
+                        circuit_failure_count: None,
+                        circuit_failure_threshold: None,
+                    });
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
 
         let mut circuit_snapshot = gate_allow.circuit_after;
 
@@ -296,7 +843,18 @@ pub(super) async fn run(mut input: RequestContext) -> Response {
             },
         );
 
-        for retry_index in 1..=input.max_attempts_per_provider {
+        // Codex ChatGPT backend: normalize path and enforce store=false.
+        if use_codex_chatgpt_backend {
+            upstream_forwarded_path =
+                normalize_codex_chatgpt_forwarded_path(&upstream_forwarded_path);
+            maybe_enforce_codex_chatgpt_store_false(
+                &upstream_forwarded_path,
+                &mut upstream_body_bytes,
+                &mut strip_request_content_encoding,
+            );
+        }
+
+        for retry_index in 1..=provider_max_attempts {
             let attempt_index = attempts.len().saturating_add(1) as u32;
             let attempt_started_ms = started.elapsed().as_millis();
             let attempt_started = Instant::now();
@@ -316,6 +874,15 @@ pub(super) async fn run(mut input: RequestContext) -> Response {
             ) {
                 Ok(u) => u,
                 Err(err) => {
+                    tracing::warn!(
+                        trace_id = %input.trace_id,
+                        cli_key = %input.cli_key,
+                        provider_id = provider_id,
+                        provider_name = %provider_name_base,
+                        base_url = %provider_base_url_base,
+                        forwarded_path = %upstream_forwarded_path,
+                        "build_target_url failed: {err}"
+                    );
                     let category = ErrorCategory::SystemError;
                     let error_code = GatewayErrorCode::InternalError.as_str();
                     let decision = FailoverDecision::SwitchProvider;
@@ -384,12 +951,80 @@ pub(super) async fn run(mut input: RequestContext) -> Response {
             let mut headers = input.base_headers.clone();
             ensure_cli_required_headers(&input.cli_key, &mut headers);
 
-            // Always override auth headers to avoid leaking any official OAuth tokens to a third-party relay base_url.
-            inject_provider_auth(
-                &input.cli_key,
-                provider.api_key_plaintext.trim(),
-                &mut headers,
-            );
+            // Always clear all auth headers from base_headers first to prevent
+            // client-sent tokens leaking to upstream (fail-closed, not fail-open).
+            headers.remove(header::AUTHORIZATION);
+            headers.remove("x-api-key");
+            headers.remove("x-goog-api-key");
+            headers.remove("x-goog-api-client");
+
+            // For OAuth providers, use the adapter's inject_upstream_headers which adds
+            // provider-specific headers (e.g., originator for Codex, anthropic-beta for Claude).
+            // For api_key providers, use the legacy inject_provider_auth.
+            if provider.auth_mode == "oauth" {
+                let cred_trimmed = effective_credential.trim();
+                tracing::debug!(
+                    provider_id = provider.id,
+                    cli_key = %input.cli_key,
+                    oauth_provider_type = ?provider.oauth_provider_type,
+                    credential_len = cred_trimmed.len(),
+                    "injecting OAuth upstream headers"
+                );
+                match oauth_adapter {
+                    Some(adapter) => {
+                        if let Err(e) = adapter.inject_upstream_headers(&mut headers, cred_trimmed)
+                        {
+                            // Adapter injection failure = skip this provider, not silently proceed
+                            // with no auth header (which would give upstream a wrong 401 anyway).
+                            tracing::warn!(
+                                provider_id = provider.id,
+                                cli_key = %input.cli_key,
+                                "OAuth inject_upstream_headers failed, skipping provider: {e}"
+                            );
+                            attempts.push(FailoverAttempt {
+                                provider_id,
+                                provider_name: provider_name_base.clone(),
+                                base_url: provider_base_url_display.clone(),
+                                outcome: format!("oauth_inject_failed: {e}"),
+                                status: Some(500),
+                                provider_index: Some(attempt_index),
+                                retry_index: Some(retry_index),
+                                session_reuse: None,
+                                error_category: Some("auth"),
+                                error_code: Some(GatewayErrorCode::InternalError.as_str()),
+                                decision: Some("switch"),
+                                reason: Some(format!("OAuth header injection failed: {e}")),
+                                selection_method: None,
+                                reason_code: None,
+                                attempt_started_ms: Some(attempt_started_ms),
+                                attempt_duration_ms: Some(0),
+                                circuit_state_before: Some(circuit_before.state.as_str()),
+                                circuit_state_after: None,
+                                circuit_failure_count: Some(circuit_before.failure_count),
+                                circuit_failure_threshold: Some(circuit_before.failure_threshold),
+                            });
+                            break; // break retry loop, switch provider
+                        }
+                    }
+                    None => {
+                        // oauth_adapter=None means adapter mismatch was already caught above;
+                        // we should not reach here. Treat as skip.
+                        tracing::warn!(
+                            provider_id = provider.id,
+                            "oauth_adapter is None at injection point (should have been skipped earlier)"
+                        );
+                        break;
+                    }
+                }
+            } else {
+                inject_provider_auth(&input.cli_key, effective_credential.trim(), &mut headers);
+            }
+            if use_codex_chatgpt_backend {
+                maybe_inject_codex_chatgpt_headers(
+                    &mut headers,
+                    codex_chatgpt_account_id.as_deref(),
+                );
+            }
             if strip_request_content_encoding {
                 headers.remove(header::CONTENT_ENCODING);
             }
@@ -457,6 +1092,45 @@ pub(super) async fn run(mut input: RequestContext) -> Response {
                             LoopControl::ContinueRetry => continue,
                             LoopControl::BreakRetry => break,
                             LoopControl::Return(resp) => return resp,
+                        }
+                    }
+
+                    // OAuth 401 reactive refresh: if we get a 401 on an OAuth provider,
+                    // try refreshing the token once and retry.
+                    if status.as_u16() == 401
+                        && provider.auth_mode == "oauth"
+                        && !oauth_reactive_refreshed_once
+                    {
+                        oauth_reactive_refreshed_once = true;
+                        tracing::info!(
+                            provider_id = provider.id,
+                            cli_key = %input.cli_key,
+                            "oauth 401 detected, attempting reactive token refresh"
+                        );
+                        match refresh_oauth_credential_after_401(
+                            &input.state,
+                            &input.cli_key,
+                            provider,
+                        )
+                        .await
+                        {
+                            Ok(refreshed_credential) => {
+                                effective_credential = refreshed_credential;
+                                tracing::info!(
+                                    provider_id = provider.id,
+                                    cli_key = %input.cli_key,
+                                    "oauth 401 reactive refresh succeeded, retrying"
+                                );
+                                continue;
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    provider_id = provider.id,
+                                    cli_key = %input.cli_key,
+                                    "oauth reactive refresh failed: {}",
+                                    err
+                                );
+                            }
                         }
                     }
 

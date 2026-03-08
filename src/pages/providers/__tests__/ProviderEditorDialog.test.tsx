@@ -36,6 +36,11 @@ function makeProvider(partial: Partial<ProviderSummary> = {}): ProviderSummary {
     note: "",
     created_at: 0,
     updated_at: 0,
+    auth_mode: "api_key",
+    oauth_provider_type: null,
+    oauth_email: null,
+    oauth_expires_at: null,
+    oauth_last_error: null,
     ...partial,
   };
 }

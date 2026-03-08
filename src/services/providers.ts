@@ -1,4 +1,5 @@
 import { invokeService } from "./invokeServiceCommand";
+import { invokeTauriOrNull } from "./tauriInvoke";
 
 export type CliKey = "claude" | "codex" | "gemini";
 
@@ -31,6 +32,11 @@ export type ProviderSummary = {
   note: string;
   created_at: number;
   updated_at: number;
+  auth_mode: string;
+  oauth_provider_type: string | null;
+  oauth_email: string | null;
+  oauth_expires_at: number | null;
+  oauth_last_error: string | null;
 };
 
 export async function providersList(cliKey: CliKey) {
@@ -43,6 +49,7 @@ export async function providerUpsert(input: {
   name: string;
   base_urls: string[];
   base_url_mode: "order" | "ping";
+  auth_mode?: "api_key" | "oauth" | null;
   api_key?: string | null;
   enabled: boolean;
   cost_multiplier: number;
@@ -64,6 +71,7 @@ export async function providerUpsert(input: {
     name: input.name,
     baseUrls: input.base_urls,
     baseUrlMode: input.base_url_mode,
+    authMode: input.auth_mode ?? null,
     apiKey: input.api_key ?? null,
     enabled: input.enabled,
     costMultiplier: input.cost_multiplier,
@@ -113,4 +121,56 @@ export async function providerClaudeTerminalLaunchCommand(providerId: number) {
     "provider_claude_terminal_launch_command",
     { providerId }
   );
+}
+
+export async function providerOAuthStartFlow(
+  cliKey: string,
+  providerId: number
+): Promise<{ success: boolean; provider_type?: string; expires_at?: number } | null> {
+  return invokeTauriOrNull<{ success: boolean; provider_type?: string; expires_at?: number }>(
+    "provider_oauth_start_flow",
+    { cliKey, providerId }
+  );
+}
+
+export async function providerOAuthRefresh(
+  providerId: number
+): Promise<{ success: boolean; expires_at?: number } | null> {
+  return invokeTauriOrNull<{ success: boolean; expires_at?: number }>("provider_oauth_refresh", {
+    providerId,
+  });
+}
+
+export async function providerOAuthDisconnect(
+  providerId: number
+): Promise<{ success: boolean } | null> {
+  return invokeTauriOrNull<{ success: boolean }>("provider_oauth_disconnect", { providerId });
+}
+
+export async function providerOAuthStatus(providerId: number): Promise<{
+  connected: boolean;
+  provider_type?: string;
+  email?: string;
+  expires_at?: number;
+  has_refresh_token?: boolean;
+} | null> {
+  return invokeTauriOrNull<{
+    connected: boolean;
+    provider_type?: string;
+    email?: string;
+    expires_at?: number;
+    has_refresh_token?: boolean;
+  }>("provider_oauth_status", { providerId });
+}
+
+export type OAuthLimitsResult = {
+  limit_5h_text?: string | null;
+  limit_weekly_text?: string | null;
+  raw_json?: Record<string, unknown> | null;
+};
+
+export async function providerOAuthFetchLimits(
+  providerId: number
+): Promise<OAuthLimitsResult | null> {
+  return invokeTauriOrNull<OAuthLimitsResult>("provider_oauth_fetch_limits", { providerId });
 }

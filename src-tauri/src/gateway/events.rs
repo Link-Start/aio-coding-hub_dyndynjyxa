@@ -156,7 +156,7 @@ pub(super) struct GatewayLogEvent {
     pub(super) base_url: String,
 }
 
-pub(super) fn emit_gateway_log(
+pub(crate) fn emit_gateway_log(
     app: &tauri::AppHandle,
     level: &'static str,
     error_code: &'static str,

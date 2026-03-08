@@ -400,8 +400,9 @@ fn build_claude_settings_json(
     base_url: &str,
 ) -> crate::shared::error::AppResult<Vec<u8>> {
     let root = match current {
+        Some(bytes) if bytes.is_empty() => serde_json::json!({}),
         Some(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
-            .unwrap_or_else(|_| serde_json::json!({})),
+            .map_err(|e| format!("CLI_PROXY_INVALID_SETTINGS_JSON: failed to parse JSON: {e}"))?,
         None => serde_json::json!({}),
     };
 
@@ -639,10 +640,24 @@ fn build_codex_config_toml(
     Ok(out.into_bytes())
 }
 
-fn build_codex_auth_json(_current: Option<Vec<u8>>) -> crate::shared::error::AppResult<Vec<u8>> {
-    let value = serde_json::json!({
-        "OPENAI_API_KEY": PLACEHOLDER_KEY,
-    });
+fn build_codex_auth_json(current: Option<Vec<u8>>) -> crate::shared::error::AppResult<Vec<u8>> {
+    let mut value = match current {
+        Some(bytes) if bytes.is_empty() => serde_json::json!({}),
+        Some(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|e| format!("CLI_PROXY_INVALID_AUTH_JSON: failed to parse auth.json: {e}"))?,
+        None => serde_json::json!({}),
+    };
+
+    let obj = value.as_object_mut().ok_or_else(|| {
+        crate::shared::error::AppError::from(
+            "CLI_PROXY_INVALID_AUTH_JSON: auth.json root must be a JSON object",
+        )
+    })?;
+    obj.insert(
+        "OPENAI_API_KEY".to_string(),
+        serde_json::Value::String(PLACEHOLDER_KEY.to_string()),
+    );
+
     let mut out = serde_json::to_vec_pretty(&value)
         .map_err(|e| format!("failed to serialize auth.json: {e}"))?;
     out.push(b'\n');

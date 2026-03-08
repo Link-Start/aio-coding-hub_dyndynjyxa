@@ -19,6 +19,11 @@ import { logToConsole } from "../../services/consoleLog";
 import {
   providerGetApiKey,
   providerUpsert,
+  providerOAuthStartFlow,
+  providerOAuthRefresh,
+  providerOAuthDisconnect,
+  providerOAuthStatus,
+  providerOAuthFetchLimits,
   type ClaudeModels,
   type CliKey,
   type ProviderSummary,
@@ -33,6 +38,7 @@ import { Dialog } from "../../ui/Dialog";
 import { FormField } from "../../ui/FormField";
 import { Input } from "../../ui/Input";
 import { Switch } from "../../ui/Switch";
+import { TabList } from "../../ui/TabList";
 import { normalizeBaseUrlRows } from "./baseUrl";
 import { BaseUrlEditor } from "./BaseUrlEditor";
 import { LimitCard } from "./LimitCard";
@@ -69,6 +75,7 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
   const mode = props.mode;
   const cliKey = mode === "create" ? props.cliKey : props.provider.cli_key;
   const editingProviderId = mode === "edit" ? props.provider.id : null;
+  const editProvider = mode === "edit" ? props.provider : null;
 
   const baseUrlRowSeqRef = useRef(1);
   const newBaseUrlRow = (url = ""): BaseUrlRow => {
@@ -87,11 +94,25 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
   const [fetchingApiKey, setFetchingApiKey] = useState(false);
   const apiKeyFetchedRef = useRef(false);
 
+  const [authMode, setAuthMode] = useState<"api_key" | "oauth">(
+    editProvider?.auth_mode === "oauth" ? "oauth" : "api_key"
+  );
+
+  const [oauthStatus, setOauthStatus] = useState<{
+    connected: boolean;
+    provider_type?: string;
+    email?: string;
+    expires_at?: number;
+    has_refresh_token?: boolean;
+  } | null>(null);
+  const [oauthLoading, setOauthLoading] = useState(false);
+
   const schema = useMemo(() => createProviderEditorDialogSchema({ mode }), [mode]);
   const form = useForm<ProviderEditorDialogFormInput>({
     defaultValues: {
       name: "",
       api_key: "",
+      auth_mode: "api_key",
       cost_multiplier: "1.0",
       limit_5h_usd: "",
       limit_daily_usd: "",
@@ -134,9 +155,12 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
       setTags([]);
       setTagInput("");
       setShowApiKey(false);
+      setAuthMode("api_key");
+      setOauthStatus(null);
       reset({
         name: "",
         api_key: "",
+        auth_mode: "api_key",
         cost_multiplier: "1.0",
         limit_5h_usd: "",
         limit_daily_usd: "",
@@ -151,6 +175,9 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
       return;
     }
 
+    const initialAuthMode = props.provider.auth_mode === "oauth" ? "oauth" : "api_key";
+    setAuthMode(initialAuthMode);
+    setOauthStatus(null);
     setBaseUrlMode(props.provider.base_url_mode);
     setBaseUrlRows(props.provider.base_urls.map((url) => newBaseUrlRow(url)));
     setPingingAll(false);
@@ -161,6 +188,7 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
     reset({
       name: props.provider.name,
       api_key: "",
+      auth_mode: initialAuthMode,
       cost_multiplier: String(props.provider.cost_multiplier ?? 1.0),
       limit_5h_usd: props.provider.limit_5h_usd != null ? String(props.provider.limit_5h_usd) : "",
       limit_daily_usd:
@@ -181,6 +209,21 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
     // when the provider object reference changes from a background query refetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cliKey, editingProviderId, mode, open, reset]);
+
+  useEffect(() => {
+    if (editProvider?.id && editProvider.auth_mode === "oauth") {
+      providerOAuthStatus(editProvider.id)
+        .then(setOauthStatus)
+        .catch((err) => {
+          logToConsole("error", `加载 OAuth 状态失败：${editProvider.name}`, {
+            provider_id: editProvider.id,
+            cli_key: editProvider.cli_key,
+            error: String(err),
+          });
+          toast(`加载 OAuth 状态失败：${String(err)}`);
+        });
+    }
+  }, [editProvider]);
 
   const setBaseUrlRowsFromUser: Dispatch<SetStateAction<BaseUrlRow[]>> = (action) => {
     setBaseUrlRows(action);
@@ -243,7 +286,8 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
   async function save() {
     if (saving) return;
 
-    const parsed = schema.safeParse(form.getValues());
+    const formValues = form.getValues();
+    const parsed = schema.safeParse({ ...formValues, auth_mode: authMode });
     if (!parsed.success) {
       toastFirstSchemaIssue(parsed.error.issues);
       return;
@@ -251,13 +295,46 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
 
     const values: ProviderEditorDialogFormOutput = parsed.data;
 
-    const normalized = normalizeBaseUrlRows(baseUrlRows);
-    if (!normalized.ok) {
-      toast(normalized.message);
-      return;
+    let finalBaseUrls: string[] = [];
+    let finalBaseUrlMode = baseUrlMode;
+    let effectiveOauthStatus = oauthStatus;
+
+    if (authMode === "oauth") {
+      // OAuth providers don't use base URLs — the gateway routes to the
+      // provider's official API endpoint based on the OAuth adapter.
+      finalBaseUrls = [];
+      finalBaseUrlMode = "order";
+
+      // Avoid stale UI race: refresh OAuth status once before enforcing save-time gate.
+      if (!effectiveOauthStatus?.connected && editingProviderId) {
+        try {
+          const latestStatus = await providerOAuthStatus(editingProviderId);
+          setOauthStatus(latestStatus);
+          effectiveOauthStatus = latestStatus;
+        } catch (err) {
+          logToConsole("warn", "保存前刷新 OAuth 状态失败", {
+            cli_key: cliKey,
+            provider_id: editingProviderId,
+            error: String(err),
+          });
+        }
+      }
+
+      // Validate OAuth is actually connected before saving.
+      if (!effectiveOauthStatus?.connected) {
+        toast("请先完成 OAuth 登录");
+        return;
+      }
+    } else {
+      const normalized = normalizeBaseUrlRows(baseUrlRows);
+      if (!normalized.ok) {
+        toast(normalized.message);
+        return;
+      }
+      finalBaseUrls = normalized.baseUrls;
     }
 
-    if (cliKey === "claude") {
+    if (cliKey === "claude" && authMode !== "oauth") {
       const modelError = validateProviderClaudeModels(claudeModels);
       if (modelError) {
         toast(modelError);
@@ -271,9 +348,10 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
         ...(mode === "edit" ? { provider_id: props.provider.id } : {}),
         cli_key: cliKey,
         name: values.name,
-        base_urls: normalized.baseUrls,
-        base_url_mode: baseUrlMode,
-        api_key: values.api_key,
+        base_urls: finalBaseUrls,
+        base_url_mode: finalBaseUrlMode,
+        auth_mode: authMode,
+        api_key: authMode === "oauth" ? null : values.api_key,
         enabled: values.enabled,
         cost_multiplier: values.cost_multiplier,
         limit_5h_usd: values.limit_5h_usd,
@@ -285,7 +363,7 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
         limit_total_usd: values.limit_total_usd,
         tags,
         note: values.note,
-        ...(cliKey === "claude" ? { claude_models: claudeModels } : {}),
+        ...(cliKey === "claude" && authMode !== "oauth" ? { claude_models: claudeModels } : {}),
       });
 
       if (!saved) {
@@ -337,6 +415,178 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
         }).length
       : 0;
 
+  async function handleOAuthLogin() {
+    setOauthLoading(true);
+    try {
+      let targetProviderId = editingProviderId;
+
+      // In create mode, auto-save the provider first to obtain an ID.
+      if (!targetProviderId) {
+        const formValues = form.getValues();
+        if (!formValues.name?.trim()) {
+          toast("请先填写 Provider 名称");
+          return;
+        }
+        const saved = await providerUpsert({
+          cli_key: cliKey,
+          name: formValues.name.trim(),
+          base_urls: [],
+          base_url_mode: "order",
+          auth_mode: "oauth",
+          api_key: null,
+          enabled: formValues.enabled,
+          cost_multiplier: Number(formValues.cost_multiplier) || 1.0,
+          limit_5h_usd: formValues.limit_5h_usd ? Number(formValues.limit_5h_usd) : null,
+          limit_daily_usd: formValues.limit_daily_usd ? Number(formValues.limit_daily_usd) : null,
+          daily_reset_mode: formValues.daily_reset_mode ?? "fixed",
+          daily_reset_time: formValues.daily_reset_time ?? "00:00:00",
+          limit_weekly_usd: formValues.limit_weekly_usd
+            ? Number(formValues.limit_weekly_usd)
+            : null,
+          limit_monthly_usd: formValues.limit_monthly_usd
+            ? Number(formValues.limit_monthly_usd)
+            : null,
+          limit_total_usd: formValues.limit_total_usd ? Number(formValues.limit_total_usd) : null,
+        });
+        if (!saved) {
+          toast("自动保存 Provider 失败");
+          return;
+        }
+        targetProviderId = saved.id;
+      }
+
+      const result = await providerOAuthStartFlow(cliKey, targetProviderId);
+      if (result?.success) {
+        const status = await providerOAuthStatus(targetProviderId);
+        setOauthStatus(status);
+
+        let limits: Awaited<ReturnType<typeof providerOAuthFetchLimits>> = null;
+        try {
+          limits = await providerOAuthFetchLimits(targetProviderId);
+          if (!limits) {
+            toast("OAuth 登录成功，但获取用量失败，可稍后重试");
+            logToConsole(
+              "warn",
+              `OAuth 登录后获取用量失败：${form.getValues().name || "OAuth Provider"}`,
+              {
+                cli_key: cliKey,
+                provider_id: targetProviderId,
+                provider_type: result.provider_type,
+                email: status?.email,
+              }
+            );
+          }
+        } catch (err) {
+          toast("OAuth 登录成功，但获取用量失败，可稍后重试");
+          logToConsole(
+            "warn",
+            `OAuth 登录后获取用量异常：${form.getValues().name || "OAuth Provider"}`,
+            {
+              cli_key: cliKey,
+              provider_id: targetProviderId,
+              provider_type: result.provider_type,
+              email: status?.email,
+              error: String(err),
+            }
+          );
+        }
+
+        toast("OAuth 登录成功");
+        logToConsole("info", `OAuth 登录成功：${form.getValues().name || "OAuth Provider"}`, {
+          cli_key: cliKey,
+          provider_id: targetProviderId,
+          provider_type: result.provider_type,
+          email: status?.email,
+          expires_at: result.expires_at,
+          limit_5h: limits?.limit_5h_text,
+          limit_weekly: limits?.limit_weekly_text,
+        });
+        // If we auto-saved (create mode), notify parent and close dialog.
+        if (!editingProviderId) {
+          onSaved(cliKey);
+          onOpenChange(false);
+        }
+      } else {
+        toast("OAuth 登录失败");
+        logToConsole("warn", `OAuth 登录失败：${form.getValues().name || "OAuth Provider"}`, {
+          cli_key: cliKey,
+          provider_id: targetProviderId,
+        });
+      }
+    } catch (err) {
+      toast(`OAuth 登录失败：${String(err)}`);
+      logToConsole("error", `OAuth 登录异常：${form.getValues().name || "OAuth Provider"}`, {
+        cli_key: cliKey,
+        error: String(err),
+      });
+    } finally {
+      setOauthLoading(false);
+    }
+  }
+
+  async function handleOAuthRefresh() {
+    if (!editingProviderId) return;
+    setOauthLoading(true);
+    try {
+      const result = await providerOAuthRefresh(editingProviderId);
+      if (result?.success) {
+        const status = await providerOAuthStatus(editingProviderId);
+        setOauthStatus(status);
+        toast("Token 刷新成功");
+        logToConsole("info", `OAuth Token 刷新成功：${form.getValues().name}`, {
+          provider_id: editingProviderId,
+          expires_at: result.expires_at,
+        });
+      } else {
+        toast("Token 刷新失败");
+        logToConsole("warn", `OAuth Token 刷新失败：${form.getValues().name}`, {
+          provider_id: editingProviderId,
+        });
+      }
+    } catch (err) {
+      toast(`Token 刷新失败：${String(err)}`);
+      logToConsole("error", `OAuth Token 刷新异常：${form.getValues().name}`, {
+        provider_id: editingProviderId,
+        error: String(err),
+      });
+    } finally {
+      setOauthLoading(false);
+    }
+  }
+
+  async function handleOAuthDisconnect() {
+    if (!editingProviderId) return;
+    setOauthLoading(true);
+    try {
+      const result = await providerOAuthDisconnect(editingProviderId);
+      if (result?.success) {
+        setOauthStatus(null);
+        toast("已断开 OAuth 连接");
+        logToConsole("info", `OAuth 已断开连接：${form.getValues().name}`, {
+          provider_id: editingProviderId,
+        });
+      } else {
+        toast("断开 OAuth 连接失败");
+        logToConsole("warn", `OAuth 断开连接失败：${form.getValues().name}`, {
+          provider_id: editingProviderId,
+        });
+      }
+    } catch (err) {
+      toast(`断开 OAuth 连接失败：${String(err)}`);
+      logToConsole("error", `OAuth 断开连接异常：${form.getValues().name}`, {
+        provider_id: editingProviderId,
+        error: String(err),
+      });
+    } finally {
+      setOauthLoading(false);
+    }
+  }
+
+  function formatExpiresAt(expiresAt: number | undefined) {
+    if (!expiresAt) return null;
+    return new Date(expiresAt * 1000).toLocaleString("zh-CN");
+  }
+
   return (
     <Dialog
       open={open}
@@ -349,120 +599,211 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
       className="max-w-4xl"
     >
       <div className="space-y-4">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <FormField label="名称">
-            <Input placeholder="default" {...register("name")} />
-          </FormField>
-
-          <FormField label="Base URL 模式">
-            <RadioButtonGroup<ProviderBaseUrlMode>
-              items={[
-                { value: "order", label: "顺序" },
-                { value: "ping", label: "Ping" },
-              ]}
-              ariaLabel="Base URL 模式"
-              value={baseUrlMode}
-              onChange={setBaseUrlMode}
-              disabled={saving}
-            />
-          </FormField>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <FormField label="标签" hint="按 Enter 添加标签">
-            <div className="flex min-h-10 flex-wrap items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 shadow-sm dark:border-slate-600 dark:bg-slate-800 dark:shadow-none">
-              {tags.map((tag) => (
-                <span
-                  key={tag}
-                  className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent"
-                >
-                  {tag}
-                  <button
-                    type="button"
-                    onClick={() => setTags((prev) => prev.filter((t) => t !== tag))}
-                    className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full hover:bg-accent/20"
-                    disabled={saving}
-                    aria-label={`移除标签 ${tag}`}
-                  >
-                    <X className="h-2.5 w-2.5" />
-                  </button>
-                </span>
-              ))}
-              <input
-                type="text"
-                value={tagInput}
-                onChange={(e) => setTagInput(e.currentTarget.value)}
-                onKeyDown={(e) => {
-                  if (e.key !== "Enter") return;
-                  e.preventDefault();
-                  const trimmed = tagInput.trim();
-                  if (!trimmed) return;
-                  if (tags.includes(trimmed)) {
-                    setTagInput("");
-                    return;
-                  }
-                  setTags((prev) => [...prev, trimmed]);
-                  setTagInput("");
-                }}
-                placeholder={tags.length === 0 ? "输入标签后按 Enter" : ""}
-                className="min-w-[80px] flex-1 border-none bg-transparent text-sm outline-none placeholder:text-slate-400"
-                disabled={saving}
-              />
-            </div>
-          </FormField>
-
-          <FormField label="备注" hint="供应商列表中显示">
-            <Input placeholder="可选备注信息" disabled={saving} {...register("note")} />
-          </FormField>
-        </div>
-
-        <FormField label="Base URLs">
-          <BaseUrlEditor
-            rows={baseUrlRows}
-            setRows={setBaseUrlRowsFromUser}
-            pingingAll={pingingAll}
-            setPingingAll={setPingingAll}
-            newRow={newBaseUrlRow}
-            placeholder="中转 endpoint（例如：https://example.com/v1）"
-            disabled={saving}
+        {/* ── Auth mode selector at the very top ── */}
+        <FormField label="认证方式" hint="选择后下方表单会相应变化">
+          <TabList<"api_key" | "oauth">
+            ariaLabel="认证方式"
+            items={[
+              { key: "api_key", label: "API 密钥" },
+              { key: "oauth", label: "OAuth 登录" },
+            ]}
+            value={authMode}
+            onChange={(next) => {
+              setAuthMode(next);
+              setValue("auth_mode", next, { shouldDirty: true });
+            }}
           />
         </FormField>
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <FormField
-            label="API Key / Token"
-            hint={mode === "edit" ? "留空保持不变" : "保存后不回显"}
-          >
-            <div className="flex items-center gap-2">
-              <Input
-                type={showApiKey ? "text" : "password"}
-                placeholder="sk-…"
-                autoComplete="off"
-                {...register("api_key")}
-              />
-              <button
-                type="button"
-                onClick={toggleApiKeyVisibility}
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
-                tabIndex={-1}
-                disabled={fetchingApiKey}
-                aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}
-              >
-                {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
-            </div>
-          </FormField>
+        {authMode === "oauth" ? (
+          /* ── OAuth mode: simplified form ── */
+          <>
+            <FormField label="名称">
+              <Input placeholder="default" {...register("name")} />
+            </FormField>
 
-          <FormField label="价格倍率">
-            <Input
-              type="number"
-              min="0"
-              step="0.01"
-              placeholder="1.0"
-              {...register("cost_multiplier")}
-            />
-          </FormField>
-        </div>
+            <FormField label="OAuth 连接">
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/50">
+                {oauthLoading ? (
+                  <div className="flex items-center gap-2 text-sm text-slate-500">
+                    <span className="animate-spin">⏳</span>
+                    <span>处理中...</span>
+                  </div>
+                ) : oauthStatus?.connected ? (
+                  <div className="space-y-2">
+                    {oauthStatus.email && (
+                      <p className="text-sm text-slate-700 dark:text-slate-300">
+                        <span className="font-medium">账号：</span>
+                        {oauthStatus.email}
+                      </p>
+                    )}
+                    {oauthStatus.expires_at && (
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        <span className="font-medium">到期：</span>
+                        {formatExpiresAt(oauthStatus.expires_at)}
+                      </p>
+                    )}
+                    <div className="flex items-center gap-2">
+                      <Button
+                        onClick={handleOAuthRefresh}
+                        variant="secondary"
+                        disabled={saving || oauthLoading}
+                      >
+                        刷新 Token
+                      </Button>
+                      <Button
+                        onClick={handleOAuthDisconnect}
+                        variant="secondary"
+                        disabled={saving || oauthLoading}
+                      >
+                        断开连接
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-sm text-slate-500 dark:text-slate-400">未连接 OAuth</p>
+                    <Button
+                      onClick={handleOAuthLogin}
+                      variant="primary"
+                      disabled={saving || oauthLoading}
+                    >
+                      OAuth 登录
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </FormField>
+
+            <FormField label="价格倍率">
+              <Input
+                type="number"
+                min="0.0001"
+                step="0.01"
+                placeholder="1.0"
+                {...register("cost_multiplier")}
+              />
+            </FormField>
+          </>
+        ) : (
+          /* ── API Key mode: full form ── */
+          <>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <FormField label="名称">
+                <Input placeholder="default" {...register("name")} />
+              </FormField>
+
+              <FormField label="Base URL 模式">
+                <RadioButtonGroup<ProviderBaseUrlMode>
+                  items={[
+                    { value: "order", label: "顺序" },
+                    { value: "ping", label: "Ping" },
+                  ]}
+                  ariaLabel="Base URL 模式"
+                  value={baseUrlMode}
+                  onChange={setBaseUrlMode}
+                  disabled={saving}
+                />
+              </FormField>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <FormField label="标签" hint="按 Enter 添加标签">
+                <div className="flex min-h-10 flex-wrap items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 shadow-sm dark:border-slate-600 dark:bg-slate-800 dark:shadow-none">
+                  {tags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent"
+                    >
+                      {tag}
+                      <button
+                        type="button"
+                        onClick={() => setTags((prev) => prev.filter((t) => t !== tag))}
+                        className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full hover:bg-accent/20"
+                        disabled={saving}
+                        aria-label={`移除标签 ${tag}`}
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </span>
+                  ))}
+                  <input
+                    type="text"
+                    value={tagInput}
+                    onChange={(e) => setTagInput(e.currentTarget.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter") return;
+                      e.preventDefault();
+                      const trimmed = tagInput.trim();
+                      if (!trimmed) return;
+                      if (tags.includes(trimmed)) {
+                        setTagInput("");
+                        return;
+                      }
+                      setTags((prev) => [...prev, trimmed]);
+                      setTagInput("");
+                    }}
+                    placeholder={tags.length === 0 ? "输入标签后按 Enter" : ""}
+                    className="min-w-[80px] flex-1 border-none bg-transparent text-sm outline-none placeholder:text-slate-400"
+                    disabled={saving}
+                  />
+                </div>
+              </FormField>
+
+              <FormField label="备注" hint="供应商列表中显示">
+                <Input placeholder="可选备注信息" disabled={saving} {...register("note")} />
+              </FormField>
+            </div>
+
+            <FormField label="Base URLs">
+              <BaseUrlEditor
+                rows={baseUrlRows}
+                setRows={setBaseUrlRowsFromUser}
+                pingingAll={pingingAll}
+                setPingingAll={setPingingAll}
+                newRow={newBaseUrlRow}
+                placeholder="中转 endpoint（例如：https://example.com/v1）"
+                disabled={saving}
+              />
+            </FormField>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <FormField
+                label="API Key / Token"
+                hint={mode === "edit" ? "留空保持不变" : "保存后不回显"}
+              >
+                <div className="flex items-center gap-2">
+                  <Input
+                    type={showApiKey ? "text" : "password"}
+                    placeholder="sk-…"
+                    autoComplete="off"
+                    {...register("api_key")}
+                  />
+                  <button
+                    type="button"
+                    onClick={toggleApiKeyVisibility}
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
+                    tabIndex={-1}
+                    disabled={fetchingApiKey}
+                    aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}
+                  >
+                    {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+              </FormField>
+
+              <FormField label="价格倍率">
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="1.0"
+                  {...register("cost_multiplier")}
+                />
+              </FormField>
+            </div>
+          </>
+        )}
 
         <details className="group rounded-xl border border-slate-200 bg-gradient-to-br from-slate-50/80 to-white shadow-sm open:ring-2 open:ring-accent/10 transition-all dark:border-slate-700 dark:from-slate-800/80 dark:to-slate-900">
           <summary className="flex cursor-pointer items-center justify-between px-5 py-4 select-none">
@@ -607,7 +948,7 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
           </div>
         </details>
 
-        {cliKey === "claude" ? (
+        {cliKey === "claude" && authMode !== "oauth" ? (
           <details className="group rounded-xl border border-slate-200 bg-white shadow-sm open:ring-2 open:ring-accent/10 transition-all dark:border-slate-700 dark:bg-slate-800">
             <summary className="flex cursor-pointer items-center justify-between px-4 py-3 select-none">
               <div className="flex items-center gap-3">

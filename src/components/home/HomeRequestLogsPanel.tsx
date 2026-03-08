@@ -52,6 +52,54 @@ const VIRTUALIZATION_THRESHOLD = 30;
 // Module-level stable reference: pure function, no need to recreate per render.
 const formatUnixSecondsStable = (ts: number) => formatRelativeTimeFromUnixSeconds(ts);
 
+function requestLogCreatedAtMs(log: RequestLogSummary) {
+  const ms = log.created_at_ms ?? 0;
+  if (Number.isFinite(ms) && ms > 0) return ms;
+  return log.created_at * 1000;
+}
+
+function mergeTraceWithRequestLog(
+  trace: TraceSession,
+  requestLog: RequestLogSummary | undefined
+): TraceSession {
+  if (!requestLog) return trace;
+
+  const summary = trace.summary;
+  const mergedSummary = {
+    trace_id: trace.trace_id,
+    cli_key: trace.cli_key,
+    method: trace.method,
+    path: trace.path,
+    query: trace.query,
+    status: summary?.status ?? requestLog.status ?? null,
+    error_category: summary?.error_category ?? null,
+    error_code: summary?.error_code ?? requestLog.error_code ?? null,
+    duration_ms: summary?.duration_ms ?? requestLog.duration_ms ?? 0,
+    ttfb_ms: summary?.ttfb_ms ?? requestLog.ttfb_ms ?? null,
+    attempts: summary?.attempts ?? [],
+    input_tokens: summary?.input_tokens ?? requestLog.input_tokens ?? null,
+    output_tokens: summary?.output_tokens ?? requestLog.output_tokens ?? null,
+    total_tokens: summary?.total_tokens ?? requestLog.total_tokens ?? null,
+    cache_read_input_tokens:
+      summary?.cache_read_input_tokens ?? requestLog.cache_read_input_tokens ?? null,
+    cache_creation_input_tokens:
+      summary?.cache_creation_input_tokens ?? requestLog.cache_creation_input_tokens ?? null,
+    cache_creation_5m_input_tokens:
+      summary?.cache_creation_5m_input_tokens ?? requestLog.cache_creation_5m_input_tokens ?? null,
+    cache_creation_1h_input_tokens:
+      summary?.cache_creation_1h_input_tokens ?? requestLog.cache_creation_1h_input_tokens ?? null,
+    cost_usd: summary?.cost_usd ?? requestLog.cost_usd ?? null,
+    cost_multiplier: summary?.cost_multiplier ?? requestLog.cost_multiplier ?? null,
+  };
+
+  return {
+    ...trace,
+    requested_model: trace.requested_model ?? requestLog.requested_model ?? null,
+    summary: mergedSummary,
+    last_seen_ms: Math.max(trace.last_seen_ms, requestLogCreatedAtMs(requestLog)),
+  };
+}
+
 type RequestLogCardProps = {
   log: RequestLogSummary;
   isSelected: boolean;
@@ -109,26 +157,26 @@ const RequestLogCard = memo(function RequestLogCard({
   const rawCostUsdText = formatUsdRaw(log.cost_usd);
 
   const cacheWrite = (() => {
-    // 优先 5m，其次 1h，最后用 cache_creation_input_tokens 汇总
+    // 优先展示有值的 TTL 桶；若都为 0，则仍展示 0 而不是 "—"。
     if (log.cache_creation_5m_input_tokens != null && log.cache_creation_5m_input_tokens > 0) {
-      return {
-        tokens: log.cache_creation_5m_input_tokens,
-        ttl: "5m" as const,
-      };
+      return { tokens: log.cache_creation_5m_input_tokens, ttl: "5m" as const };
     }
     if (log.cache_creation_1h_input_tokens != null && log.cache_creation_1h_input_tokens > 0) {
-      return {
-        tokens: log.cache_creation_1h_input_tokens,
-        ttl: "1h" as const,
-      };
+      return { tokens: log.cache_creation_1h_input_tokens, ttl: "1h" as const };
     }
     if (log.cache_creation_input_tokens != null && log.cache_creation_input_tokens > 0) {
-      return {
-        tokens: log.cache_creation_input_tokens,
-        ttl: null,
-      };
+      return { tokens: log.cache_creation_input_tokens, ttl: null };
     }
-    return { tokens: null, ttl: null };
+    if (log.cache_creation_5m_input_tokens != null) {
+      return { tokens: log.cache_creation_5m_input_tokens, ttl: "5m" as const };
+    }
+    if (log.cache_creation_1h_input_tokens != null) {
+      return { tokens: log.cache_creation_1h_input_tokens, ttl: "1h" as const };
+    }
+    if (log.cache_creation_input_tokens != null) {
+      return { tokens: log.cache_creation_input_tokens, ttl: null };
+    }
+    return { tokens: null as number | null, ttl: null as "5m" | "1h" | null };
   })();
 
   const effectiveInputTokens = computeEffectiveInputTokens(
@@ -262,12 +310,12 @@ const RequestLogCard = memo(function RequestLogCard({
               </div>
               <div className="flex items-center gap-1 h-4" title="Cache Write">
                 <span className="text-slate-400 dark:text-slate-500 shrink-0">缓存创建</span>
-                {cacheWrite.tokens ? (
+                {cacheWrite.tokens != null ? (
                   <>
                     <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300 truncate">
                       {formatInteger(cacheWrite.tokens)}
                     </span>
-                    {cacheWrite.ttl && (
+                    {cacheWrite.ttl && cacheWrite.tokens > 0 && (
                       <span className="text-slate-400 dark:text-slate-500 text-[10px]">
                         ({cacheWrite.ttl})
                       </span>
@@ -302,7 +350,7 @@ const RequestLogCard = memo(function RequestLogCard({
               </div>
               <div className="flex items-center gap-1 h-4" title="Cache Read">
                 <span className="text-slate-400 dark:text-slate-500 shrink-0">缓存读取</span>
-                {log.cache_read_input_tokens ? (
+                {log.cache_read_input_tokens != null ? (
                   <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300 truncate">
                     {formatInteger(log.cache_read_input_tokens)}
                   </span>
@@ -319,11 +367,13 @@ const RequestLogCard = memo(function RequestLogCard({
               <div
                 className="flex items-center gap-1 h-4"
                 title={
-                  outputTokensPerSecond ? formatTokensPerSecond(outputTokensPerSecond) : undefined
+                  outputTokensPerSecond != null
+                    ? formatTokensPerSecond(outputTokensPerSecond)
+                    : undefined
                 }
               >
                 <span className="text-slate-400 dark:text-slate-500 shrink-0">速率</span>
-                {outputTokensPerSecond ? (
+                {outputTokensPerSecond != null ? (
                   <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300 truncate">
                     {formatTokensPerSecondShort(outputTokensPerSecond)}
                   </span>
@@ -371,12 +421,20 @@ export function HomeRequestLogsPanel({
 }: HomeRequestLogsPanelProps) {
   const navigate = useNavigate();
   const realtimeTraceCandidates = useMemo(() => {
+    const logsByTraceId = new Map<string, RequestLogSummary>();
+    for (const log of requestLogs) {
+      const traceId = log.trace_id?.trim();
+      if (!traceId || logsByTraceId.has(traceId)) continue;
+      logsByTraceId.set(traceId, log);
+    }
+
     const nowMs = Date.now();
     return traces
+      .map((trace) => mergeTraceWithRequestLog(trace, logsByTraceId.get(trace.trace_id)))
       .filter((t) => nowMs - t.first_seen_ms < 15 * 60 * 1000)
       .sort((a, b) => b.first_seen_ms - a.first_seen_ms)
       .slice(0, 20);
-  }, [traces]);
+  }, [requestLogs, traces]);
 
   return (
     <Card padding="sm" className="flex flex-col gap-3 lg:col-span-7 h-full">

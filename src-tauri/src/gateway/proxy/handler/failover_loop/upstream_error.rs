@@ -511,6 +511,17 @@ pub(super) async fn handle_reqwest_error(
     loop_state: LoopState<'_>,
     err: reqwest::Error,
 ) -> LoopControl {
+    tracing::warn!(
+        trace_id = %ctx.trace_id,
+        cli_key = %ctx.cli_key,
+        provider_id = provider_ctx.provider_id,
+        provider_name = %provider_ctx.provider_name_base,
+        base_url = %provider_ctx.provider_base_url_base,
+        is_connect = err.is_connect(),
+        is_timeout = err.is_timeout(),
+        is_request = err.is_request(),
+        "reqwest upstream error: {err}"
+    );
     if err.is_connect() {
         let error_code = GatewayErrorCode::UpstreamConnectFailed.as_str();
         let decision = FailoverDecision::SwitchProvider;

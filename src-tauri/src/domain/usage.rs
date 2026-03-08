@@ -289,6 +289,23 @@ pub fn parse_usage_from_json_bytes(body: &[u8]) -> Option<UsageExtract> {
     })
 }
 
+pub fn parse_usage_from_json_or_sse_bytes(cli_key: &str, body: &[u8]) -> Option<UsageExtract> {
+    parse_usage_from_json_bytes(body).or_else(|| {
+        let mut tracker = SseUsageTracker::new(cli_key);
+        tracker.ingest_chunk(body);
+        tracker.finalize()
+    })
+}
+
+pub fn parse_model_from_json_or_sse_bytes(cli_key: &str, body: &[u8]) -> Option<String> {
+    parse_model_from_json_bytes(body).or_else(|| {
+        let mut tracker = SseUsageTracker::new(cli_key);
+        tracker.ingest_chunk(body);
+        let _ = tracker.finalize();
+        tracker.best_effort_model()
+    })
+}
+
 fn merge_metrics(base: &UsageMetrics, patch: &UsageMetrics) -> UsageMetrics {
     UsageMetrics {
         input_tokens: patch.input_tokens.or(base.input_tokens),
@@ -336,6 +353,67 @@ fn trim_ascii(bytes: &[u8]) -> &[u8] {
     }
 
     &bytes[start..end]
+}
+
+fn eq_ignore_ascii_case_bytes(left: &[u8], right: &[u8]) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn normalize_ascii_lower(input: &str) -> String {
+    input.trim().to_ascii_lowercase()
+}
+
+fn is_completion_event_name(event: &[u8]) -> bool {
+    let event = trim_ascii(event);
+    [
+        b"done".as_slice(),
+        b"completed".as_slice(),
+        b"message_stop".as_slice(),
+        b"response.completed".as_slice(),
+        b"response.done".as_slice(),
+        b"message.completed".as_slice(),
+    ]
+    .iter()
+    .any(|candidate| eq_ignore_ascii_case_bytes(event, candidate))
+}
+
+fn is_terminal_error_event_name(event: &[u8]) -> bool {
+    let event = trim_ascii(event);
+    eq_ignore_ascii_case_bytes(event, b"error")
+        || eq_ignore_ascii_case_bytes(event, b"response.error")
+}
+
+fn is_completion_event_type(event_type: &str) -> bool {
+    let normalized = normalize_ascii_lower(event_type);
+    matches!(
+        normalized.as_str(),
+        "done"
+            | "completed"
+            | "response.done"
+            | "response.completed"
+            | "message.done"
+            | "message.completed"
+            | "message.stop"
+    ) || normalized.ends_with(".completed")
+}
+
+fn is_terminal_error_event_type(event_type: &str) -> bool {
+    let normalized = normalize_ascii_lower(event_type);
+    matches!(normalized.as_str(), "error" | "response.error") || normalized.ends_with(".error")
+}
+
+fn is_completion_status(status: &str) -> bool {
+    matches!(
+        normalize_ascii_lower(status).as_str(),
+        "done" | "completed" | "finished_successfully" | "succeeded" | "success"
+    )
+}
+
+fn is_terminal_error_status(status: &str) -> bool {
+    matches!(
+        normalize_ascii_lower(status).as_str(),
+        "error" | "failed" | "cancelled" | "canceled" | "aborted" | "timed_out" | "timeout"
+    )
 }
 
 impl SseUsageTracker {
@@ -447,17 +525,53 @@ impl SseUsageTracker {
     }
 
     fn ingest_event(&mut self, event: &[u8], data: &Value) {
-        if event == b"error" {
+        if is_completion_event_name(event) {
+            self.completion_seen = true;
+        }
+        if is_terminal_error_event_name(event) {
             self.terminal_error_seen = true;
         }
 
         if let Some(event_type) = data.get("type").and_then(|v| v.as_str()) {
-            if event_type == "response.completed" {
+            if is_completion_event_type(event_type) {
                 self.completion_seen = true;
             }
-            if event_type == "error" || event_type == "response.error" {
+            if is_terminal_error_event_type(event_type) {
                 self.terminal_error_seen = true;
             }
+        }
+
+        let status_fields = [
+            data.get("status").and_then(|v| v.as_str()),
+            data.get("response")
+                .and_then(|v| v.get("status"))
+                .and_then(|v| v.as_str()),
+            data.get("message")
+                .and_then(|v| v.get("status"))
+                .and_then(|v| v.as_str()),
+        ];
+        for status in status_fields.into_iter().flatten() {
+            if is_completion_status(status) {
+                self.completion_seen = true;
+            }
+            if is_terminal_error_status(status) {
+                self.terminal_error_seen = true;
+            }
+        }
+
+        let done_like = [
+            data.get("done").and_then(|v| v.as_bool()),
+            data.get("is_done").and_then(|v| v.as_bool()),
+            data.get("is_final").and_then(|v| v.as_bool()),
+            data.get("response")
+                .and_then(|v| v.get("done"))
+                .and_then(|v| v.as_bool()),
+            data.get("message")
+                .and_then(|v| v.get("done"))
+                .and_then(|v| v.as_bool()),
+        ];
+        if done_like.into_iter().flatten().any(|v| v) {
+            self.completion_seen = true;
         }
 
         if let Some(model) = extract_model_from_json_value(data) {

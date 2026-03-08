@@ -340,9 +340,9 @@ fn base_urls_from_row_deduplicates() {
 }
 
 #[test]
-fn base_urls_from_row_returns_empty_string_vec_when_all_empty() {
+fn base_urls_from_row_returns_empty_vec_when_all_empty() {
     let result = base_urls_from_row("", "[]");
-    assert_eq!(result, vec![""]);
+    assert!(result.is_empty());
 }
 
 // -- claude_models_from_json --
@@ -363,4 +363,151 @@ fn claude_models_from_json_invalid_returns_default() {
 fn claude_models_from_json_empty_object() {
     let models = claude_models_from_json("{}");
     assert!(!models.has_any());
+}
+
+fn create_oauth_provider_for_cas_test(db: &crate::db::Db, name: &str) -> i64 {
+    upsert(
+        db,
+        None,
+        "codex",
+        name,
+        vec![],
+        "order",
+        Some("oauth"),
+        None,
+        true,
+        1.0,
+        Some(100),
+        None,
+        None,
+        None,
+        Some("fixed"),
+        Some("00:00:00"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("create oauth provider")
+    .id
+}
+
+#[test]
+fn update_oauth_tokens_cas_rejects_stale_writer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_oauth_cas_stale.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let provider_id = create_oauth_provider_for_cas_test(&db, "oauth-cas-stale");
+    update_oauth_tokens(
+        &db,
+        provider_id,
+        "oauth",
+        "codex_oauth",
+        "seed_access",
+        Some("seed_refresh"),
+        Some("seed_id"),
+        "https://auth.openai.com/oauth/token",
+        "client_seed",
+        None,
+        Some(2_000_000_000),
+        Some("seed@example.com"),
+    )
+    .expect("seed oauth tokens");
+
+    let details = get_oauth_details(&db, provider_id).expect("get oauth details");
+    let expected_last_refreshed_at = details.oauth_last_refreshed_at;
+    assert!(expected_last_refreshed_at.is_some());
+
+    let first = update_oauth_tokens_if_last_refreshed_matches(
+        &db,
+        provider_id,
+        "oauth",
+        "codex_oauth",
+        "access_first",
+        Some("refresh_first"),
+        Some("id_first"),
+        "https://auth.openai.com/oauth/token",
+        "client_first",
+        None,
+        Some(2_000_000_100),
+        Some("first@example.com"),
+        expected_last_refreshed_at,
+    )
+    .expect("first cas update");
+    assert!(first);
+
+    let second = update_oauth_tokens_if_last_refreshed_matches(
+        &db,
+        provider_id,
+        "oauth",
+        "codex_oauth",
+        "access_second",
+        Some("refresh_second"),
+        Some("id_second"),
+        "https://auth.openai.com/oauth/token",
+        "client_second",
+        None,
+        Some(2_000_000_200),
+        Some("second@example.com"),
+        expected_last_refreshed_at,
+    )
+    .expect("second cas update");
+    assert!(!second);
+
+    let after = get_oauth_details(&db, provider_id).expect("get oauth details after cas");
+    assert_eq!(after.oauth_access_token, "access_first");
+    assert_eq!(after.oauth_refresh_token.as_deref(), Some("refresh_first"));
+}
+
+#[test]
+fn update_oauth_tokens_cas_allows_initial_null_then_blocks_repeat_null() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_oauth_cas_null.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let provider_id = create_oauth_provider_for_cas_test(&db, "oauth-cas-null");
+    let details = get_oauth_details(&db, provider_id).expect("get oauth details");
+    assert_eq!(details.oauth_last_refreshed_at, None);
+
+    let first = update_oauth_tokens_if_last_refreshed_matches(
+        &db,
+        provider_id,
+        "oauth",
+        "codex_oauth",
+        "null_first_access",
+        Some("null_first_refresh"),
+        Some("null_first_id"),
+        "https://auth.openai.com/oauth/token",
+        "null_first_client",
+        None,
+        Some(2_000_000_300),
+        Some("nullfirst@example.com"),
+        None,
+    )
+    .expect("first cas from null");
+    assert!(first);
+
+    let second = update_oauth_tokens_if_last_refreshed_matches(
+        &db,
+        provider_id,
+        "oauth",
+        "codex_oauth",
+        "null_second_access",
+        Some("null_second_refresh"),
+        Some("null_second_id"),
+        "https://auth.openai.com/oauth/token",
+        "null_second_client",
+        None,
+        Some(2_000_000_400),
+        Some("nullsecond@example.com"),
+        None,
+    )
+    .expect("second cas from null");
+    assert!(!second);
+
+    let after = get_oauth_details(&db, provider_id).expect("get oauth details after null cas");
+    assert_eq!(after.oauth_access_token, "null_first_access");
+    assert!(after.oauth_last_refreshed_at.is_some());
 }

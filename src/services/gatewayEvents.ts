@@ -33,6 +33,8 @@ export type GatewayRequestEvent = {
   cache_creation_input_tokens?: number | null;
   cache_creation_5m_input_tokens?: number | null;
   cache_creation_1h_input_tokens?: number | null;
+  cost_usd?: number | null;
+  cost_multiplier?: number | null;
 };
 
 export type GatewayRequestStartEvent = {

@@ -1,15 +1,24 @@
 import { useEffect, useState } from "react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { FlaskConical, Pencil, Terminal, Trash2 } from "lucide-react";
+import { FlaskConical, Pencil, RefreshCw, Terminal, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { logToConsole } from "../../services/consoleLog";
 import type { GatewayProviderCircuitStatus } from "../../services/gateway";
-import type { ProviderSummary } from "../../services/providers";
+import {
+  providerOAuthFetchLimits,
+  type OAuthLimitsResult,
+  type ProviderSummary,
+} from "../../services/providers";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
 import { Switch } from "../../ui/Switch";
 import { cn } from "../../utils/cn";
 import { formatCountdownSeconds, formatUnixSeconds, formatUsdRaw } from "../../utils/formatters";
 import { providerBaseUrlSummary } from "./baseUrl";
+
+/** Module-level cache so OAuth limits survive tab switches / re-renders. */
+const oauthLimitsCache = new Map<number, OAuthLimitsResult>();
 
 export type SortableProviderCardProps = {
   provider: ProviderSummary;
@@ -92,6 +101,53 @@ export function SortableProviderCard({
   const unavailableCountdown =
     unavailableRemaining != null ? formatCountdownSeconds(unavailableRemaining) : null;
 
+  const isOAuth = provider.auth_mode === "oauth";
+  const [oauthLimits, setOauthLimits] = useState<OAuthLimitsResult | null>(
+    () => oauthLimitsCache.get(provider.id) ?? null
+  );
+  const [limitsLoading, setLimitsLoading] = useState(false);
+
+  useEffect(() => {
+    // Disconnect switches auth_mode back to api_key; drop stale OAuth limits cache.
+    if (isOAuth) return;
+    oauthLimitsCache.delete(provider.id);
+    setOauthLimits(null);
+  }, [isOAuth, provider.id]);
+
+  async function fetchLimits() {
+    if (!isOAuth) return;
+    setLimitsLoading(true);
+    try {
+      const result = await providerOAuthFetchLimits(provider.id);
+      if (!result) {
+        const value: OAuthLimitsResult = { limit_5h_text: null, limit_weekly_text: null };
+        oauthLimitsCache.set(provider.id, value);
+        setOauthLimits(value);
+        toast("获取 OAuth 用量失败");
+        logToConsole("warn", `获取 OAuth 用量失败：${provider.name}`, {
+          provider_id: provider.id,
+          cli_key: provider.cli_key,
+        });
+        return;
+      }
+      const value = result;
+      oauthLimitsCache.set(provider.id, value);
+      setOauthLimits(value);
+    } catch (err) {
+      const value: OAuthLimitsResult = { limit_5h_text: null, limit_weekly_text: null };
+      oauthLimitsCache.set(provider.id, value);
+      setOauthLimits(value);
+      toast(`获取 OAuth 用量失败：${String(err)}`);
+      logToConsole("error", `获取 OAuth 用量异常：${provider.name}`, {
+        provider_id: provider.id,
+        cli_key: provider.cli_key,
+        error: String(err),
+      });
+    } finally {
+      setLimitsLoading(false);
+    }
+  }
+
   return (
     <div ref={setNodeRef} style={style} className="relative">
       <Card
@@ -130,6 +186,41 @@ export function SortableProviderCard({
               <span className="shrink-0 rounded-full bg-slate-50 px-2 py-0.5 font-mono text-[10px] text-slate-700 dark:bg-slate-700 dark:text-slate-300">
                 倍率 {provider.cost_multiplier}x
               </span>
+              {provider.auth_mode === "oauth" ? (
+                <span
+                  className={cn(
+                    "shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px]",
+                    provider.oauth_last_error
+                      ? "bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400"
+                      : "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                  )}
+                  title={
+                    provider.oauth_last_error
+                      ? `OAuth 错误: ${provider.oauth_last_error}`
+                      : provider.oauth_email
+                        ? `OAuth: ${provider.oauth_email}`
+                        : "OAuth 已连接"
+                  }
+                >
+                  OAuth{provider.oauth_email ? ` (${provider.oauth_email})` : ""}
+                </span>
+              ) : null}
+              {isOAuth ? (
+                <span
+                  className="shrink-0 rounded-full bg-sky-50 px-2 py-0.5 font-mono text-[10px] text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
+                  title="OAuth 账号 5h 限额"
+                >
+                  5h {oauthLimits?.limit_5h_text ?? "未获取"}
+                </span>
+              ) : null}
+              {isOAuth ? (
+                <span
+                  className="shrink-0 rounded-full bg-sky-50 px-2 py-0.5 font-mono text-[10px] text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
+                  title="OAuth 账号每周限额"
+                >
+                  周 {oauthLimits?.limit_weekly_text ?? "未获取"}
+                </span>
+              ) : null}
               {provider.cli_key === "claude" && hasClaudeModels ? (
                 <span
                   className="shrink-0 rounded-full bg-sky-50 px-2 py-0.5 font-mono text-[10px] text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
@@ -220,6 +311,19 @@ export function SortableProviderCard({
             <Trash2 className="h-4 w-4" />
             删除
           </Button>
+
+          {isOAuth ? (
+            <Button
+              onClick={fetchLimits}
+              variant="secondary"
+              size="sm"
+              disabled={limitsLoading}
+              title="刷新 OAuth 用量"
+            >
+              <RefreshCw className={cn("h-3.5 w-3.5", limitsLoading && "animate-spin")} />
+              {limitsLoading ? "加载中…" : "用量"}
+            </Button>
+          ) : null}
         </div>
       </Card>
     </div>

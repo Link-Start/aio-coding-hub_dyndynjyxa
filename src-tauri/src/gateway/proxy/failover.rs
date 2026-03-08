@@ -103,23 +103,78 @@ pub(super) fn select_next_provider_id_from_order(
 
 const PROVIDER_BASE_URL_PING_TIMEOUT_MS: u64 = 2000;
 
+pub(super) fn resolve_primary_provider_base_url(
+    provider: &providers::ProviderForGateway,
+    cli_key: &str,
+) -> Result<String, String> {
+    if provider.auth_mode == "oauth" {
+        let registry = crate::gateway::oauth::registry::global_registry();
+        let provider_type = provider
+            .oauth_provider_type
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default();
+        let adapter = if provider_type.is_empty() {
+            registry.get_by_cli_key(cli_key).ok_or_else(|| {
+                format!(
+                    "SEC_INVALID_INPUT: no OAuth adapter for cli_key={cli_key} (provider_id={})",
+                    provider.id
+                )
+            })?
+        } else {
+            registry.get_by_provider_type(provider_type).ok_or_else(|| {
+                format!(
+                    "SEC_INVALID_INPUT: no OAuth adapter for provider_type={provider_type} (provider_id={}, cli_key={cli_key})",
+                    provider.id
+                )
+            })?
+        };
+
+        if adapter.cli_key() != cli_key {
+            return Err(format!(
+                "SEC_INVALID_STATE: oauth adapter mismatch for provider_id={} (cli_key={cli_key}, provider_type={}, resolved_cli_key={})",
+                provider.id,
+                if provider_type.is_empty() {
+                    "<empty>"
+                } else {
+                    provider_type
+                },
+                adapter.cli_key()
+            ));
+        }
+
+        return Ok(adapter.default_base_url().to_string());
+    }
+
+    // Skip empty strings — legacy DB rows may store base_url="" which causes
+    // `build_target_url` to fail with "relative URL without a base".
+    Ok(provider
+        .base_urls
+        .iter()
+        .find(|u| !u.trim().is_empty())
+        .cloned()
+        .unwrap_or_default())
+}
+
 pub(super) async fn select_provider_base_url_for_request(
     state: &GatewayAppState,
     provider: &providers::ProviderForGateway,
+    cli_key: &str,
     cache_ttl_seconds: u32,
-) -> String {
-    let primary = provider
-        .base_urls
-        .first()
-        .cloned()
-        .unwrap_or_else(String::new);
+) -> Result<String, String> {
+    let primary = resolve_primary_provider_base_url(provider, cli_key)?;
+
+    // OAuth providers always use adapter.default_base_url(); ignore legacy/base-url mode.
+    if provider.auth_mode == "oauth" {
+        return Ok(primary);
+    }
 
     if !matches!(provider.base_url_mode, providers::ProviderBaseUrlMode::Ping) {
-        return primary;
+        return Ok(primary);
     }
 
     if provider.base_urls.len() <= 1 {
-        return primary;
+        return Ok(primary);
     }
 
     let now_unix_ms = now_unix_millis();
@@ -128,7 +183,7 @@ pub(super) async fn select_provider_base_url_for_request(
         if let Some(best) =
             cache.get_valid_best_base_url(provider.id, now_unix_ms, &provider.base_urls)
         {
-            return best;
+            return Ok(best);
         }
     }
 
@@ -162,7 +217,7 @@ pub(super) async fn select_provider_base_url_for_request(
     }
 
     let Some((best_base_url, _best_latency_ms)) = best else {
-        return primary;
+        return Ok(primary);
     };
 
     {
@@ -170,7 +225,7 @@ pub(super) async fn select_provider_base_url_for_request(
         cache.put_best_base_url(provider.id, best_base_url.clone(), expires_at_unix_ms);
     }
 
-    best_base_url
+    Ok(best_base_url)
 }
 
 #[cfg(test)]

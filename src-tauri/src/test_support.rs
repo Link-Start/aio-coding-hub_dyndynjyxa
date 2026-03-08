@@ -190,6 +190,7 @@ pub fn provider_upsert_json<R: tauri::Runtime>(
         name,
         base_urls,
         base_url_mode,
+        None, // auth_mode — default to api_key
         api_key,
         enabled,
         cost_multiplier,

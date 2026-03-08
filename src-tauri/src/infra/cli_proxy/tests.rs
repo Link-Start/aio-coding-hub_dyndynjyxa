@@ -127,3 +127,45 @@ requires_openai_auth = true
         .expect("nested table exists");
     assert!(base_idx < nested_idx, "base must appear before nested: {s}");
 }
+
+#[test]
+fn codex_proxy_auth_json_preserves_existing_oauth_fields() {
+    let input = r#"{
+  "oauth_access_token": "tok-123",
+  "oauth_refresh_token": "ref-456",
+  "OPENAI_API_KEY": "old-key"
+}"#;
+
+    let out = build_codex_auth_json(Some(input.as_bytes().to_vec())).expect("build auth");
+    let value: serde_json::Value = serde_json::from_slice(&out).expect("parse output");
+
+    assert_eq!(
+        value.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
+        Some("aio-coding-hub")
+    );
+    assert_eq!(
+        value.get("oauth_access_token").and_then(|v| v.as_str()),
+        Some("tok-123")
+    );
+    assert_eq!(
+        value.get("oauth_refresh_token").and_then(|v| v.as_str()),
+        Some("ref-456")
+    );
+}
+
+#[test]
+fn codex_proxy_auth_json_rejects_non_object_root() {
+    let input = r#"["not", "an", "object"]"#;
+    let err = build_codex_auth_json(Some(input.as_bytes().to_vec())).expect_err("must fail");
+    assert!(err
+        .to_string()
+        .contains("auth.json root must be a JSON object"));
+}
+
+#[test]
+fn claude_proxy_settings_json_rejects_invalid_json() {
+    let input = br#"{"env": "#.to_vec();
+    let err = build_claude_settings_json(Some(input), "http://127.0.0.1:1717/claude")
+        .expect_err("must fail");
+    assert!(err.to_string().contains("CLI_PROXY_INVALID_SETTINGS_JSON"));
+}

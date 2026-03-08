@@ -57,6 +57,11 @@ function makeProvider(
     note: partial.note ?? "",
     created_at: partial.created_at ?? 0,
     updated_at: partial.updated_at ?? 0,
+    auth_mode: partial.auth_mode ?? "api_key",
+    oauth_provider_type: partial.oauth_provider_type ?? null,
+    oauth_email: partial.oauth_email ?? null,
+    oauth_expires_at: partial.oauth_expires_at ?? null,
+    oauth_last_error: partial.oauth_last_error ?? null,
   };
 }
 

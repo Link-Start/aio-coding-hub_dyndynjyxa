@@ -26,12 +26,16 @@ struct RunningGateway {
     task: tauri::async_runtime::JoinHandle<()>,
     log_task: tauri::async_runtime::JoinHandle<()>,
     circuit_task: tauri::async_runtime::JoinHandle<()>,
+    oauth_refresh_shutdown: tokio::sync::watch::Sender<bool>,
+    oauth_refresh_task: tauri::async_runtime::JoinHandle<()>,
 }
 
 type RunningGatewayHandles = (
     oneshot::Sender<()>,
     tauri::async_runtime::JoinHandle<()>,
     tauri::async_runtime::JoinHandle<()>,
+    tauri::async_runtime::JoinHandle<()>,
+    tokio::sync::watch::Sender<bool>,
     tauri::async_runtime::JoinHandle<()>,
 );
 
@@ -243,7 +247,7 @@ impl GatewayManager {
 
         let state = GatewayAppState {
             app: app.clone(),
-            db,
+            db: db.clone(),
             client,
             log_tx,
             circuit,
@@ -255,6 +259,11 @@ impl GatewayManager {
 
         let app = build_router(state);
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+        // Spawn the background OAuth token refresh loop.
+        let (oauth_refresh_shutdown_tx, oauth_refresh_shutdown_rx) =
+            tokio::sync::watch::channel(false);
+        let oauth_refresh_task = super::oauth::refresh_loop::spawn(db, oauth_refresh_shutdown_rx);
 
         let task = tauri::async_runtime::spawn(async move {
             let listener = match tokio::net::TcpListener::from_std(std_listener) {
@@ -284,6 +293,8 @@ impl GatewayManager {
             task,
             log_task,
             circuit_task,
+            oauth_refresh_shutdown: oauth_refresh_shutdown_tx,
+            oauth_refresh_task,
         });
 
         Ok(self.status())
@@ -412,9 +423,18 @@ impl GatewayManager {
     }
 
     pub fn take_running(&mut self) -> Option<RunningGatewayHandles> {
-        self.running
-            .take()
-            .map(|r| (r.shutdown, r.task, r.log_task, r.circuit_task))
+        self.running.take().map(|r| {
+            // Signal the OAuth refresh loop to stop.
+            let _ = r.oauth_refresh_shutdown.send(true);
+            (
+                r.shutdown,
+                r.task,
+                r.log_task,
+                r.circuit_task,
+                r.oauth_refresh_shutdown,
+                r.oauth_refresh_task,
+            )
+        })
     }
 }
 
@@ -437,6 +457,8 @@ mod tests {
         ));
 
         let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        let (oauth_refresh_shutdown_tx, _oauth_refresh_shutdown_rx) =
+            tokio::sync::watch::channel(false);
         RunningGateway {
             port: 1,
             base_url: "http://127.0.0.1:1".to_string(),
@@ -447,6 +469,8 @@ mod tests {
             task: tauri::async_runtime::JoinHandle::Tokio(rt.spawn(async {})),
             log_task: tauri::async_runtime::JoinHandle::Tokio(rt.spawn(async {})),
             circuit_task: tauri::async_runtime::JoinHandle::Tokio(rt.spawn(async {})),
+            oauth_refresh_shutdown: oauth_refresh_shutdown_tx,
+            oauth_refresh_task: tauri::async_runtime::JoinHandle::Tokio(rt.spawn(async {})),
         }
     }
 

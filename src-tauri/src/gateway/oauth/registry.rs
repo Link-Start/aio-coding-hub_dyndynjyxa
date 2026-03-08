@@ -1,0 +1,50 @@
+//! Usage: Global singleton registry mapping cli_key → OAuthProvider adapter.
+
+use super::adapters;
+use super::provider_trait::OAuthProvider;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+pub(crate) struct OAuthProviderRegistry {
+    by_cli_key: HashMap<&'static str, Box<dyn OAuthProvider>>,
+    by_provider_type: HashMap<&'static str, &'static str>,
+}
+
+impl OAuthProviderRegistry {
+    fn new() -> Self {
+        let mut by_cli_key: HashMap<&'static str, Box<dyn OAuthProvider>> = HashMap::new();
+        let mut by_provider_type: HashMap<&'static str, &'static str> = HashMap::new();
+
+        let claude = adapters::claude::ClaudeOAuthProvider::new();
+        by_provider_type.insert(claude.provider_type(), claude.cli_key());
+        by_cli_key.insert(claude.cli_key(), Box::new(claude));
+
+        let codex = adapters::codex::CodexOAuthProvider::new();
+        by_provider_type.insert(codex.provider_type(), codex.cli_key());
+        by_cli_key.insert(codex.cli_key(), Box::new(codex));
+
+        let gemini = adapters::gemini::GeminiOAuthProvider::new();
+        by_provider_type.insert(gemini.provider_type(), gemini.cli_key());
+        by_cli_key.insert(gemini.cli_key(), Box::new(gemini));
+
+        Self {
+            by_cli_key,
+            by_provider_type,
+        }
+    }
+
+    pub(crate) fn get_by_cli_key(&self, cli_key: &str) -> Option<&dyn OAuthProvider> {
+        self.by_cli_key.get(cli_key).map(|v| v.as_ref())
+    }
+
+    pub(crate) fn get_by_provider_type(&self, provider_type: &str) -> Option<&dyn OAuthProvider> {
+        let cli_key = self.by_provider_type.get(provider_type)?;
+        self.get_by_cli_key(cli_key)
+    }
+}
+
+static REGISTRY: OnceLock<OAuthProviderRegistry> = OnceLock::new();
+
+pub(crate) fn global_registry() -> &'static OAuthProviderRegistry {
+    REGISTRY.get_or_init(OAuthProviderRegistry::new)
+}

@@ -85,7 +85,7 @@ describe("utils/formatters", () => {
     expect(formatBytes(2_000_000_000)).toContain("GB");
     expect(formatIsoDateTime("")).toBe("—");
     expect(formatIsoDateTime("not-a-date")).toBe("not-a-date");
-    expect(formatIsoDateTime("2020-01-02T03:04:05Z")).toContain("2020-01-02");
+    expect(formatIsoDateTime("2020-01-02T12:00:00Z")).toContain("2020-01-02");
   });
 
   it("compact formatters", () => {

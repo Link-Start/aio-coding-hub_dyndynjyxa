@@ -268,6 +268,11 @@ pub struct ProviderSummary {
     pub note: String,
     pub created_at: i64,
     pub updated_at: i64,
+    pub auth_mode: String,
+    pub oauth_provider_type: Option<String>,
+    pub oauth_email: Option<String>,
+    pub oauth_expires_at: Option<i64>,
+    pub oauth_last_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -285,6 +290,8 @@ pub(crate) struct ProviderForGateway {
     pub limit_weekly_usd: Option<f64>,
     pub limit_monthly_usd: Option<f64>,
     pub limit_total_usd: Option<f64>,
+    pub auth_mode: String,
+    pub oauth_provider_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -295,6 +302,8 @@ pub(crate) struct GatewayProvidersSelection {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ClaudeTerminalLaunchContext {
+    /// The credential to pass as ANTHROPIC_API_KEY to `claude` CLI.
+    /// For `api_key` mode this is the stored api_key; for `oauth` mode it is the OAuth access token.
     pub api_key_plaintext: String,
 }
 
@@ -317,8 +326,19 @@ fn normalize_base_urls(base_urls: Vec<String>) -> crate::shared::error::AppResul
         }
 
         // Validate URL early to avoid runtime proxy errors.
-        reqwest::Url::parse(trimmed)
+        let parsed = reqwest::Url::parse(trimmed)
             .map_err(|e| format!("SEC_INVALID_INPUT: invalid base_url={trimmed}: {e}"))?;
+
+        // Only http and https schemes are allowed.
+        match parsed.scheme() {
+            "http" | "https" => {}
+            scheme => {
+                return Err(format!(
+                    "SEC_INVALID_INPUT: base_url must use http or https scheme, got '{scheme}': {trimmed}"
+                )
+                .into());
+            }
+        }
 
         out.push(trimmed.to_string());
     }
@@ -346,7 +366,7 @@ fn base_urls_from_row(base_url_fallback: &str, base_urls_json: &str) -> Vec<Stri
     if parsed.is_empty() {
         let fallback = base_url_fallback.trim();
         if fallback.is_empty() {
-            return vec![String::new()];
+            return Vec::new();
         }
         return vec![fallback.to_string()];
     }
@@ -394,6 +414,13 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> Result<ProviderSummary, rusqlite::
         note: row.get("note")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        auth_mode: row
+            .get::<_, Option<String>>("auth_mode")?
+            .unwrap_or_else(|| "api_key".to_string()),
+        oauth_provider_type: row.get("oauth_provider_type")?,
+        oauth_email: row.get("oauth_email")?,
+        oauth_expires_at: row.get("oauth_expires_at")?,
+        oauth_last_error: row.get("oauth_last_error")?,
     })
 }
 
@@ -434,7 +461,12 @@ SELECT
   limit_monthly_usd,
   limit_total_usd,
   created_at,
-  updated_at
+  updated_at,
+  auth_mode,
+  oauth_provider_type,
+  oauth_email,
+  oauth_expires_at,
+  oauth_last_error
 FROM providers
 WHERE id = ?1
 "#,
@@ -455,24 +487,43 @@ pub(crate) fn claude_terminal_launch_context(
     }
 
     let conn = db.open_connection()?;
-    let row: Option<(String, String, String, String)> = conn
+    let row: Option<(String, String, String, String, String, Option<String>)> = conn
         .query_row(
             r#"
 SELECT
   cli_key,
   base_url,
   base_urls_json,
-  api_key_plaintext
+  api_key_plaintext,
+  auth_mode,
+  oauth_access_token
 FROM providers
 WHERE id = ?1
 "#,
             params![provider_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
         )
         .optional()
         .map_err(|e| db_err!("failed to query provider for launch context: {e}"))?;
 
-    let Some((cli_key, base_url_fallback, base_urls_json, api_key_plaintext)) = row else {
+    let Some((
+        cli_key,
+        base_url_fallback,
+        base_urls_json,
+        api_key_plaintext,
+        auth_mode,
+        oauth_access_token,
+    )) = row
+    else {
         return Err("DB_NOT_FOUND: provider not found".to_string().into());
     };
 
@@ -480,22 +531,42 @@ WHERE id = ?1
         return Err(format!("SEC_INVALID_INPUT: provider_id={provider_id} is not claude").into());
     }
 
-    let base_url = base_urls_from_row(&base_url_fallback, &base_urls_json)
-        .into_iter()
-        .find(|v| !v.trim().is_empty())
-        .ok_or_else(|| "SEC_INVALID_INPUT: provider base_url is empty".to_string())?;
+    // For OAuth mode, base_url may legitimately be empty (the gateway handles routing).
+    // For api_key mode, base_url is still required.
+    if auth_mode != "oauth" {
+        let base_url = base_urls_from_row(&base_url_fallback, &base_urls_json)
+            .into_iter()
+            .find(|v| !v.trim().is_empty())
+            .ok_or_else(|| "SEC_INVALID_INPUT: provider base_url is empty".to_string())?;
 
-    reqwest::Url::parse(&base_url)
-        .map_err(|e| format!("SEC_INVALID_INPUT: invalid base_url={base_url}: {e}"))?;
-
-    let api_key_plaintext = api_key_plaintext.trim().to_string();
-    if api_key_plaintext.is_empty() {
-        return Err("SEC_INVALID_INPUT: provider api_key is empty"
-            .to_string()
-            .into());
+        reqwest::Url::parse(&base_url)
+            .map_err(|e| format!("SEC_INVALID_INPUT: invalid base_url={base_url}: {e}"))?;
     }
 
-    Ok(ClaudeTerminalLaunchContext { api_key_plaintext })
+    // Resolve the credential based on auth_mode.
+    let effective_credential = if auth_mode == "oauth" {
+        let token = oauth_access_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| {
+                "SEC_INVALID_INPUT: provider OAuth access token is empty — please re-authenticate"
+                    .to_string()
+            })?;
+        token.to_string()
+    } else {
+        let key = api_key_plaintext.trim().to_string();
+        if key.is_empty() {
+            return Err("SEC_INVALID_INPUT: provider api_key is empty"
+                .to_string()
+                .into());
+        }
+        key
+    };
+
+    Ok(ClaudeTerminalLaunchContext {
+        api_key_plaintext: effective_credential,
+    })
 }
 
 /// Returns the raw API key for any provider (not limited to Claude).
@@ -562,6 +633,26 @@ pub fn names_by_id(
     Ok(out)
 }
 
+pub(crate) fn cli_key_by_id(
+    db: &db::Db,
+    provider_id: i64,
+) -> crate::shared::error::AppResult<Option<String>> {
+    if provider_id <= 0 {
+        return Err(format!("SEC_INVALID_INPUT: invalid provider_id={provider_id}").into());
+    }
+
+    let conn = db.open_connection()?;
+    let cli_key = conn
+        .query_row(
+            "SELECT cli_key FROM providers WHERE id = ?1",
+            params![provider_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| db_err!("failed to query provider cli_key: {e}"))?;
+    Ok(cli_key)
+}
+
 pub fn list_by_cli(
     db: &db::Db,
     cli_key: &str,
@@ -593,7 +684,12 @@ SELECT
   limit_monthly_usd,
   limit_total_usd,
   created_at,
-  updated_at
+  updated_at,
+  auth_mode,
+  oauth_provider_type,
+  oauth_email,
+  oauth_expires_at,
+  oauth_last_error
 FROM providers
 WHERE cli_key = ?1
 ORDER BY sort_order ASC, id DESC
@@ -648,6 +744,10 @@ fn map_gateway_provider_row(
         limit_weekly_usd: row.get("limit_weekly_usd")?,
         limit_monthly_usd: row.get("limit_monthly_usd")?,
         limit_total_usd: row.get("limit_total_usd")?,
+        auth_mode: row
+            .get::<_, Option<String>>("auth_mode")?
+            .unwrap_or_else(|| "api_key".to_string()),
+        oauth_provider_type: row.get("oauth_provider_type")?,
     })
 }
 
@@ -674,7 +774,9 @@ SELECT
   p.daily_reset_time,
   p.limit_weekly_usd,
   p.limit_monthly_usd,
-  p.limit_total_usd
+  p.limit_total_usd,
+  p.auth_mode,
+  p.oauth_provider_type
 FROM sort_mode_providers mp
 JOIN providers p ON p.id = mp.provider_id
 WHERE mp.mode_id = ?1
@@ -721,7 +823,9 @@ SELECT
   daily_reset_time,
   limit_weekly_usd,
   limit_monthly_usd,
-  limit_total_usd
+  limit_total_usd,
+  auth_mode,
+  oauth_provider_type
 FROM providers
 WHERE cli_key = ?1
   AND enabled = 1
@@ -808,6 +912,7 @@ pub fn upsert(
     name: &str,
     base_urls: Vec<String>,
     base_url_mode: &str,
+    auth_mode: Option<&str>,
     api_key: Option<&str>,
     enabled: bool,
     cost_multiplier: f64,
@@ -833,7 +938,25 @@ pub fn upsert(
             .into());
     }
 
-    let base_urls = normalize_base_urls(base_urls)?;
+    let requested_auth_mode = auth_mode.map(str::trim).unwrap_or("api_key");
+    if !matches!(requested_auth_mode, "api_key" | "oauth") {
+        return Err("SEC_INVALID_INPUT: auth_mode must be 'api_key' or 'oauth'"
+            .to_string()
+            .into());
+    }
+    let is_oauth = requested_auth_mode == "oauth";
+
+    let base_urls = if is_oauth {
+        // OAuth providers don't need base URLs — the adapter knows the endpoint.
+        let filtered: Vec<String> = base_urls
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        filtered
+    } else {
+        normalize_base_urls(base_urls)?
+    };
     let base_url_primary = base_urls.first().cloned().unwrap_or_default();
 
     let base_url_mode = ProviderBaseUrlMode::parse(base_url_mode)
@@ -865,8 +988,12 @@ pub fn upsert(
     match provider_id {
         None => {
             let priority = priority.unwrap_or(DEFAULT_PRIORITY);
-            let api_key =
-                api_key.ok_or_else(|| "SEC_INVALID_INPUT: api_key is required".to_string())?;
+            let api_key = match is_oauth {
+                true => api_key.unwrap_or(""),
+                false => {
+                    api_key.ok_or_else(|| "SEC_INVALID_INPUT: api_key is required".to_string())?
+                }
+            };
             let sort_order = next_sort_order(&conn, cli_key)?;
 
             let claude_models = if cli_key == "claude" {
@@ -910,6 +1037,7 @@ INSERT INTO providers(
   base_url,
   base_urls_json,
   base_url_mode,
+  auth_mode,
   claude_models_json,
   supported_models_json,
   model_mapping_json,
@@ -929,7 +1057,7 @@ INSERT INTO providers(
   note,
   created_at,
   updated_at
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}', '{}', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '{}', '{}', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
 "#,
                 params![
                     cli_key,
@@ -937,6 +1065,7 @@ INSERT INTO providers(
                     base_url_primary,
                     base_urls_json,
                     base_url_mode.as_str(),
+                    requested_auth_mode,
                     claude_models_json,
                     api_key,
                     sort_order,
@@ -975,12 +1104,22 @@ INSERT INTO providers(
                 .transaction()
                 .map_err(|e| db_err!("failed to start transaction: {e}"))?;
 
-            #[allow(clippy::type_complexity)]
-            let existing: Option<(String, String, i64, String, String, String, String, String)> = tx
+            type ExistingProviderRow = (
+                String,
+                String,
+                i64,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+            );
+            let existing: Option<ExistingProviderRow> = tx
                 .query_row(
-                    "SELECT cli_key, api_key_plaintext, priority, claude_models_json, daily_reset_mode, daily_reset_time, tags_json, note FROM providers WHERE id = ?1",
+                    "SELECT cli_key, api_key_plaintext, priority, claude_models_json, auth_mode, daily_reset_mode, daily_reset_time, tags_json, note FROM providers WHERE id = ?1",
                     params![id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
                 )
                 .optional()
                 .map_err(|e| db_err!("failed to query provider: {e}"))?;
@@ -990,6 +1129,7 @@ INSERT INTO providers(
                 existing_api_key,
                 existing_priority,
                 existing_claude_models_json,
+                existing_auth_mode_raw,
                 existing_daily_reset_mode_raw,
                 existing_daily_reset_time_raw,
                 existing_tags_json,
@@ -1003,7 +1143,22 @@ INSERT INTO providers(
                 return Err("SEC_INVALID_INPUT: cli_key mismatch".to_string().into());
             }
 
+            // Resolve auth_mode: use requested if provided, else keep existing.
+            let next_auth_mode = auth_mode
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(existing_auth_mode_raw.as_str());
+            if !matches!(next_auth_mode, "api_key" | "oauth") {
+                return Err("SEC_INVALID_INPUT: auth_mode must be 'api_key' or 'oauth'"
+                    .to_string()
+                    .into());
+            }
+            let next_is_oauth = next_auth_mode == "oauth";
+
             let next_api_key = api_key.unwrap_or(existing_api_key.as_str());
+            if !next_is_oauth && next_api_key.trim().is_empty() {
+                return Err("SEC_INVALID_INPUT: api_key is required".to_string().into());
+            }
             let next_priority = priority.unwrap_or(existing_priority);
 
             let existing_claude_models = if cli_key == "claude" {
@@ -1079,30 +1234,32 @@ SET
   base_url = ?2,
   base_urls_json = ?3,
   base_url_mode = ?4,
-  claude_models_json = ?5,
+  auth_mode = ?5,
+  claude_models_json = ?6,
   supported_models_json = '{}',
   model_mapping_json = '{}',
-  api_key_plaintext = ?6,
-  enabled = ?7,
-  cost_multiplier = ?8,
-  priority = ?9,
-  limit_5h_usd = ?10,
-  limit_daily_usd = ?11,
-  daily_reset_mode = ?12,
-  daily_reset_time = ?13,
-  limit_weekly_usd = ?14,
-  limit_monthly_usd = ?15,
-  limit_total_usd = ?16,
-  tags_json = ?17,
-  note = ?18,
-  updated_at = ?19
-WHERE id = ?20
+  api_key_plaintext = ?7,
+  enabled = ?8,
+  cost_multiplier = ?9,
+  priority = ?10,
+  limit_5h_usd = ?11,
+  limit_daily_usd = ?12,
+  daily_reset_mode = ?13,
+  daily_reset_time = ?14,
+  limit_weekly_usd = ?15,
+  limit_monthly_usd = ?16,
+  limit_total_usd = ?17,
+  tags_json = ?18,
+  note = ?19,
+  updated_at = ?20
+WHERE id = ?21
 "#,
                 params![
                     name,
                     base_url_primary,
                     base_urls_json,
                     base_url_mode.as_str(),
+                    next_auth_mode,
                     next_claude_models_json,
                     next_api_key,
                     enabled_to_int(enabled),
@@ -1240,6 +1397,286 @@ pub fn reorder(
         .map_err(|e| db_err!("failed to commit transaction: {e}"))?;
 
     list_by_cli(db, cli_key)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_oauth_tokens(
+    db: &crate::db::Db,
+    provider_id: i64,
+    auth_mode: &str,
+    oauth_provider_type: &str,
+    access_token: &str,
+    refresh_token: Option<&str>,
+    id_token: Option<&str>,
+    token_uri: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    expires_at: Option<i64>,
+    email: Option<&str>,
+) -> crate::shared::error::AppResult<()> {
+    let conn = db.open_connection()?;
+    let now = crate::shared::time::now_unix_seconds();
+    conn.execute(
+        r#"
+UPDATE providers SET
+  auth_mode = ?1,
+  oauth_provider_type = ?2,
+  oauth_access_token = ?3,
+  oauth_refresh_token = ?4,
+  oauth_id_token = ?5,
+  oauth_token_uri = ?6,
+  oauth_client_id = ?7,
+  oauth_client_secret = ?8,
+  oauth_expires_at = ?9,
+  oauth_email = ?10,
+  oauth_last_refreshed_at = ?11,
+  oauth_last_error = NULL,
+  updated_at = ?11
+WHERE id = ?12
+"#,
+        rusqlite::params![
+            auth_mode,
+            oauth_provider_type,
+            access_token,
+            refresh_token,
+            id_token,
+            token_uri,
+            client_id,
+            client_secret,
+            expires_at,
+            email,
+            now,
+            provider_id,
+        ],
+    )
+    .map_err(|e| crate::shared::error::db_err!("failed to update OAuth tokens: {e}"))?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_oauth_tokens_if_last_refreshed_matches(
+    db: &crate::db::Db,
+    provider_id: i64,
+    auth_mode: &str,
+    oauth_provider_type: &str,
+    access_token: &str,
+    refresh_token: Option<&str>,
+    id_token: Option<&str>,
+    token_uri: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    expires_at: Option<i64>,
+    email: Option<&str>,
+    expected_last_refreshed_at: Option<i64>,
+) -> crate::shared::error::AppResult<bool> {
+    let conn = db.open_connection()?;
+    let now = crate::shared::time::now_unix_seconds();
+    // Ensure CAS token advances even if two updates happen in the same second.
+    let refreshed_at = match expected_last_refreshed_at {
+        Some(expected) if expected >= now => expected.saturating_add(1),
+        _ => now,
+    };
+
+    let rows = conn
+        .execute(
+            r#"
+UPDATE providers SET
+  auth_mode = ?1,
+  oauth_provider_type = ?2,
+  oauth_access_token = ?3,
+  oauth_refresh_token = ?4,
+  oauth_id_token = ?5,
+  oauth_token_uri = ?6,
+  oauth_client_id = ?7,
+  oauth_client_secret = ?8,
+  oauth_expires_at = ?9,
+  oauth_email = ?10,
+  oauth_last_refreshed_at = ?11,
+  oauth_last_error = NULL,
+  updated_at = ?11
+WHERE id = ?12
+  AND auth_mode = 'oauth'
+  AND (
+    (?13 IS NULL AND oauth_last_refreshed_at IS NULL)
+    OR oauth_last_refreshed_at = ?13
+  )
+"#,
+            rusqlite::params![
+                auth_mode,
+                oauth_provider_type,
+                access_token,
+                refresh_token,
+                id_token,
+                token_uri,
+                client_id,
+                client_secret,
+                expires_at,
+                email,
+                refreshed_at,
+                provider_id,
+                expected_last_refreshed_at,
+            ],
+        )
+        .map_err(|e| crate::shared::error::db_err!("failed to CAS-update OAuth tokens: {e}"))?;
+    Ok(rows == 1)
+}
+
+pub(crate) fn clear_oauth(
+    db: &crate::db::Db,
+    provider_id: i64,
+) -> crate::shared::error::AppResult<()> {
+    let conn = db.open_connection()?;
+    let now = crate::shared::time::now_unix_seconds();
+    conn.execute(
+        r#"
+UPDATE providers SET
+  auth_mode = 'api_key',
+  oauth_provider_type = NULL,
+  oauth_access_token = NULL,
+  oauth_refresh_token = NULL,
+  oauth_id_token = NULL,
+  oauth_token_uri = NULL,
+  oauth_client_id = NULL,
+  oauth_client_secret = NULL,
+  oauth_expires_at = NULL,
+  oauth_email = NULL,
+  oauth_last_refreshed_at = NULL,
+  oauth_last_error = NULL,
+  updated_at = ?1
+WHERE id = ?2
+"#,
+        rusqlite::params![now, provider_id],
+    )
+    .map_err(|e| crate::shared::error::db_err!("failed to clear OAuth: {e}"))?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProviderOAuthDetails {
+    pub id: i64,
+    pub cli_key: String,
+    pub oauth_provider_type: String,
+    pub oauth_access_token: String,
+    pub oauth_refresh_token: Option<String>,
+    pub oauth_id_token: Option<String>,
+    pub oauth_token_uri: Option<String>,
+    pub oauth_client_id: Option<String>,
+    pub oauth_client_secret: Option<String>,
+    pub oauth_expires_at: Option<i64>,
+    pub oauth_email: Option<String>,
+    pub oauth_refresh_lead_s: i64,
+    pub oauth_last_refreshed_at: Option<i64>,
+}
+
+pub(crate) fn get_oauth_details(
+    db: &crate::db::Db,
+    provider_id: i64,
+) -> crate::shared::error::AppResult<ProviderOAuthDetails> {
+    let conn = db.open_connection()?;
+    conn.query_row(
+        r#"
+SELECT id, cli_key, oauth_provider_type, oauth_access_token, oauth_refresh_token,
+       oauth_id_token, oauth_token_uri, oauth_client_id, oauth_client_secret,
+       oauth_expires_at, oauth_email, oauth_refresh_lead_s, oauth_last_refreshed_at
+FROM providers WHERE id = ?1 AND auth_mode = 'oauth'
+"#,
+        rusqlite::params![provider_id],
+        |row| {
+            Ok(ProviderOAuthDetails {
+                id: row.get(0)?,
+                cli_key: row.get(1)?,
+                oauth_provider_type: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                oauth_access_token: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                oauth_refresh_token: row.get(4)?,
+                oauth_id_token: row.get(5)?,
+                oauth_token_uri: row.get(6)?,
+                oauth_client_id: row.get(7)?,
+                oauth_client_secret: row.get(8)?,
+                oauth_expires_at: row.get(9)?,
+                oauth_email: row.get(10)?,
+                oauth_refresh_lead_s: row.get(11)?,
+                oauth_last_refreshed_at: row.get(12)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| crate::shared::error::db_err!("failed to query OAuth details: {e}"))?
+    .ok_or_else(|| {
+        crate::shared::error::AppError::from("DB_NOT_FOUND: provider not found or not OAuth")
+    })
+}
+
+/// Lists all OAuth providers whose tokens are approaching or past expiry.
+///
+/// Returns providers where `auth_mode = 'oauth'` AND the refresh token is present
+/// AND `oauth_expires_at` is within `oauth_refresh_lead_s` seconds from now (or already expired).
+/// Also includes providers with `oauth_expires_at IS NULL` that have refresh tokens
+/// (they might need a proactive refresh to populate expiry).
+pub(crate) fn list_oauth_providers_needing_refresh(
+    db: &crate::db::Db,
+) -> crate::shared::error::AppResult<Vec<ProviderOAuthDetails>> {
+    let conn = db.open_connection()?;
+    let now = crate::shared::time::now_unix_seconds();
+    let mut stmt = conn
+        .prepare(
+            r#"
+SELECT id, cli_key, oauth_provider_type, oauth_access_token, oauth_refresh_token,
+       oauth_id_token, oauth_token_uri, oauth_client_id, oauth_client_secret,
+       oauth_expires_at, oauth_email, oauth_refresh_lead_s, oauth_last_refreshed_at
+FROM providers
+WHERE auth_mode = 'oauth'
+  AND oauth_refresh_token IS NOT NULL
+  AND oauth_refresh_token != ''
+  AND enabled = 1
+  AND (
+    oauth_expires_at IS NULL
+    OR oauth_expires_at <= (?1 + oauth_refresh_lead_s)
+  )
+"#,
+        )
+        .map_err(|e| db_err!("prepare list_oauth_providers_needing_refresh: {e}"))?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![now], |row| {
+            Ok(ProviderOAuthDetails {
+                id: row.get(0)?,
+                cli_key: row.get(1)?,
+                oauth_provider_type: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                oauth_access_token: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                oauth_refresh_token: row.get(4)?,
+                oauth_id_token: row.get(5)?,
+                oauth_token_uri: row.get(6)?,
+                oauth_client_id: row.get(7)?,
+                oauth_client_secret: row.get(8)?,
+                oauth_expires_at: row.get(9)?,
+                oauth_email: row.get(10)?,
+                oauth_refresh_lead_s: row.get(11)?,
+                oauth_last_refreshed_at: row.get(12)?,
+            })
+        })
+        .map_err(|e| db_err!("query list_oauth_providers_needing_refresh: {e}"))?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| db_err!("read oauth provider row: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Update the `oauth_last_error` column for a provider (e.g. when background refresh fails).
+pub(crate) fn set_oauth_last_error(
+    db: &crate::db::Db,
+    provider_id: i64,
+    error_msg: &str,
+) -> crate::shared::error::AppResult<()> {
+    let conn = db.open_connection()?;
+    let now = crate::shared::time::now_unix_seconds();
+    conn.execute(
+        "UPDATE providers SET oauth_last_error = ?1, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![error_msg, now, provider_id],
+    )
+    .map_err(|e| db_err!("failed to set oauth_last_error: {e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]

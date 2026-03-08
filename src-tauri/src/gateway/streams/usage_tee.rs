@@ -13,6 +13,66 @@ use super::super::util::now_unix_seconds;
 use super::request_end::emit_request_event_and_spawn_request_log;
 use super::{RelayBodyStream, StreamFinalizeCtx};
 
+fn is_codex_responses_path(cli_key: &str, path: &str) -> bool {
+    if cli_key != "codex" {
+        return false;
+    }
+    matches!(path.trim_end_matches('/'), "/v1/responses" | "/responses")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn is_codex_client_abort_successish(
+    cli_key: &str,
+    path: &str,
+    status: u16,
+    saw_stream_output: bool,
+    completion_seen: bool,
+    usage_seen: bool,
+    terminal_error_seen: bool,
+    upstream_ended_normally: bool,
+) -> bool {
+    is_codex_responses_path(cli_key, path)
+        && (200..300).contains(&status)
+        && saw_stream_output
+        // For codex, downstream disconnect can race with trailing markers.
+        // If completion/usage is already observed, do not downgrade to 499.
+        && (usage_seen
+            || completion_seen
+            // If downstream disconnected and upstream never naturally ended, trailing terminal
+            // markers are often disconnect side-effects and should not force a 499.
+            || !terminal_error_seen
+            || !upstream_ended_normally)
+}
+
+fn is_codex_drop_successish(
+    cli_key: &str,
+    path: &str,
+    status: u16,
+    saw_stream_output: bool,
+    completion_seen: bool,
+    usage_seen: bool,
+    terminal_error_seen: bool,
+) -> bool {
+    is_codex_responses_path(cli_key, path)
+        && (200..300).contains(&status)
+        && saw_stream_output
+        // If completion/usage is observed, tolerate terminal markers during teardown.
+        && (usage_seen || completion_seen || !terminal_error_seen)
+}
+
+fn is_codex_body_buffer_drop_successish(
+    cli_key: &str,
+    path: &str,
+    status: u16,
+    saw_stream_output: bool,
+    usage_seen: bool,
+) -> bool {
+    is_codex_responses_path(cli_key, path)
+        && (200..300).contains(&status)
+        && saw_stream_output
+        && usage_seen
+}
+
 struct NextFuture<'a, S: Stream + Unpin>(&'a mut S);
 
 impl<'a, S: Stream + Unpin> Future for NextFuture<'a, S> {
@@ -147,7 +207,27 @@ where
 {
     fn drop(&mut self) {
         if !self.finalized {
-            self.finalize(Some(GatewayErrorCode::StreamAborted.as_str()));
+            // Best-effort flush for trailing partial SSE data before deciding abort/success.
+            let usage = self.tracker.finalize();
+            let usage_seen = usage.is_some();
+            let completion_seen = self.tracker.completion_seen();
+            let terminal_error_seen = self.tracker.terminal_error_seen();
+
+            let codex_successish = is_codex_drop_successish(
+                &self.ctx.cli_key,
+                &self.ctx.path,
+                self.ctx.status,
+                self.first_byte_ms.is_some(),
+                completion_seen,
+                usage_seen,
+                terminal_error_seen,
+            );
+
+            if codex_successish {
+                self.finalize(None);
+            } else {
+                self.finalize(Some(GatewayErrorCode::StreamAborted.as_str()));
+            }
         }
     }
 }
@@ -171,18 +251,92 @@ where
     tokio::spawn(async move {
         let mut forwarded_chunks: i64 = 0;
         let mut forwarded_bytes: i64 = 0;
+        let mut drained_chunks: i64 = 0;
+        let mut drained_bytes: i64 = 0;
         let mut client_abort_detected_by: Option<&'static str> = None;
+        let mut downstream_closed = false;
+        let mut upstream_ended_normally = false;
+
+        let is_codex_responses = is_codex_responses_path(&tee.ctx.cli_key, &tee.ctx.path);
+        let mut drain_deadline: Option<tokio::time::Instant> = None;
+        let drain_grace = {
+            // Codex ChatGPT backend: response.completed (carrying usage) may arrive
+            // several seconds after the last output chunk; use a longer drain window.
+            let cap = if is_codex_responses {
+                Duration::from_secs(15)
+            } else {
+                Duration::from_secs(5)
+            };
+            let floor = Duration::from_millis(500);
+            match idle_timeout {
+                Some(d) if d < floor => floor,
+                Some(d) if d > cap => cap,
+                Some(d) => d,
+                None => {
+                    if is_codex_responses {
+                        Duration::from_secs(10)
+                    } else {
+                        Duration::from_secs(2)
+                    }
+                }
+            }
+        };
 
         loop {
+            if downstream_closed {
+                if !is_codex_responses {
+                    break;
+                }
+                // Keep draining until completion/deadline/end-of-stream.
+                // Some Codex backend flows can emit transient error-like markers before
+                // `response.completed` (with usage) arrives.
+                if tee.tracker.completion_seen() {
+                    break;
+                }
+                let Some(deadline) = drain_deadline else {
+                    break;
+                };
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+
+                let remaining = deadline.saturating_duration_since(now);
+                match tokio::time::timeout(remaining, next_item(&mut tee)).await {
+                    Ok(Some(Ok(chunk))) => {
+                        let chunk_len = chunk.len().min(i64::MAX as usize) as i64;
+                        drained_chunks = drained_chunks.saturating_add(1);
+                        drained_bytes = drained_bytes.saturating_add(chunk_len);
+                    }
+                    Ok(Some(Err(_))) => {
+                        break;
+                    }
+                    Ok(None) => {
+                        upstream_ended_normally = true;
+                        break;
+                    }
+                    Err(_) => {
+                        break;
+                    }
+                }
+                continue;
+            }
+
             tokio::select! {
                 // 如果客户端提前断开，但上游短时间没有新 chunk，就会卡在 next_item().await。
                 // 这里通过监听 rx 端被 drop 来更早感知断开，避免误记 GW_STREAM_ABORTED。
                 _ = tx.closed() => {
                     client_abort_detected_by = Some("rx_closed");
+                    downstream_closed = true;
+                    if is_codex_responses {
+                        drain_deadline = Some(tokio::time::Instant::now() + drain_grace);
+                        continue;
+                    }
                     break;
                 }
                 item = next_item(&mut tee) => {
                     let Some(item) = item else {
+                        upstream_ended_normally = true;
                         break;
                     };
 
@@ -192,6 +346,11 @@ where
 
                             if tx.send(Ok(chunk)).await.is_err() {
                                 client_abort_detected_by = Some("send_failed");
+                                downstream_closed = true;
+                                if is_codex_responses {
+                                    drain_deadline = Some(tokio::time::Instant::now() + drain_grace);
+                                    continue;
+                                }
                                 break;
                             }
 
@@ -216,7 +375,16 @@ where
                 }
                 Some(v.min(i64::MAX as u128) as i64)
             });
+            // Flush pending partial SSE data before deciding abort/success.
+            let usage = tee.tracker.finalize();
+            let usage_seen = usage.is_some();
             let completion_seen = tee.tracker.completion_seen();
+            let terminal_error_seen = tee.tracker.terminal_error_seen();
+            let saw_stream_output = tee.first_byte_ms.is_some()
+                || forwarded_chunks > 0
+                || forwarded_bytes > 0
+                || drained_chunks > 0
+                || drained_bytes > 0;
 
             if let Ok(mut guard) = tee.ctx.special_settings.lock() {
                 guard.push(serde_json::json!({
@@ -228,15 +396,30 @@ where
                     "ttfb_ms": ttfb_ms,
                     "forwarded_chunks": forwarded_chunks,
                     "forwarded_bytes": forwarded_bytes,
+                    "drained_chunks": drained_chunks,
+                    "drained_bytes": drained_bytes,
+                    "upstream_ended_normally": upstream_ended_normally,
                     "completion_seen": completion_seen,
+                    "terminal_error_seen": terminal_error_seen,
+                    "saw_stream_output": saw_stream_output,
                     "ts": now_unix_seconds() as i64,
                 }));
             }
 
-            // Codex SSE（/v1/responses）：如果已观测到完成信号（response.completed / [DONE]），
-            // 则把“客户端断开”视为正常收尾，避免误记为 499（GW_STREAM_ABORTED）。
-            let is_codex_responses = tee.ctx.cli_key == "codex" && tee.ctx.path == "/v1/responses";
-            if is_codex_responses && completion_seen && (200..300).contains(&tee.ctx.status) {
+            // Codex SSE: 2xx + saw output + no terminal error => treat client disconnect as success.
+            // Do NOT require completion_seen: ChatGPT backend's response.completed may arrive
+            // after the client disconnects and the drain window may not capture it.
+            let codex_successish = is_codex_client_abort_successish(
+                &tee.ctx.cli_key,
+                &tee.ctx.path,
+                tee.ctx.status,
+                saw_stream_output,
+                completion_seen,
+                usage_seen,
+                terminal_error_seen,
+                upstream_ended_normally,
+            );
+            if codex_successish {
                 tee.finalize(None);
             } else {
                 tee.finalize(Some(GatewayErrorCode::StreamAborted.as_str()));
@@ -297,14 +480,14 @@ where
         let usage = if self.truncated || self.buffer.is_empty() {
             None
         } else {
-            usage::parse_usage_from_json_bytes(&self.buffer)
+            usage::parse_usage_from_json_or_sse_bytes(&self.ctx.cli_key, &self.buffer)
         };
         let usage_metrics = usage.as_ref().map(|u| u.metrics.clone());
         let requested_model = self.ctx.requested_model.clone().or_else(|| {
             if self.truncated || self.buffer.is_empty() {
                 None
             } else {
-                usage::parse_model_from_json_bytes(&self.buffer)
+                usage::parse_model_from_json_or_sse_bytes(&self.ctx.cli_key, &self.buffer)
             }
         });
 
@@ -381,7 +564,180 @@ where
 {
     fn drop(&mut self) {
         if !self.finalized {
-            self.finalize(Some(GatewayErrorCode::StreamAborted.as_str()));
+            let usage_seen = !self.truncated
+                && !self.buffer.is_empty()
+                && usage::parse_usage_from_json_or_sse_bytes(&self.ctx.cli_key, &self.buffer)
+                    .is_some();
+
+            let codex_successish = is_codex_body_buffer_drop_successish(
+                &self.ctx.cli_key,
+                &self.ctx.path,
+                self.ctx.status,
+                self.first_byte_ms.is_some(),
+                usage_seen,
+            );
+
+            if codex_successish {
+                self.finalize(None);
+            } else {
+                self.finalize(Some(GatewayErrorCode::StreamAborted.as_str()));
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_codex_body_buffer_drop_successish, is_codex_client_abort_successish,
+        is_codex_drop_successish, is_codex_responses_path,
+    };
+
+    #[test]
+    fn codex_responses_path_accepts_v1_and_backend_style_paths() {
+        assert!(is_codex_responses_path("codex", "/v1/responses"));
+        assert!(is_codex_responses_path("codex", "/responses"));
+        assert!(is_codex_responses_path("codex", "/v1/responses/"));
+        assert!(!is_codex_responses_path("claude", "/v1/responses"));
+        assert!(!is_codex_responses_path("codex", "/v1/chat/completions"));
+    }
+
+    #[test]
+    fn codex_client_abort_successish_allows_terminal_marker_when_upstream_not_ended() {
+        assert!(is_codex_client_abort_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            false,
+            false,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn codex_client_abort_successish_allows_completion_or_usage_when_upstream_ended() {
+        assert!(is_codex_client_abort_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            true,
+            false,
+            true,
+            true
+        ));
+        assert!(is_codex_client_abort_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            false,
+            true,
+            true,
+            true
+        ));
+        assert!(is_codex_client_abort_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            false,
+            false,
+            false,
+            true
+        ));
+        assert!(!is_codex_client_abort_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            false,
+            false,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn codex_drop_successish_allows_completion_or_usage_with_terminal_marker() {
+        assert!(is_codex_drop_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            true,
+            false,
+            true
+        ));
+        assert!(is_codex_drop_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            false,
+            true,
+            true
+        ));
+        assert!(!is_codex_drop_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            false,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn codex_body_buffer_drop_successish_when_usage_seen() {
+        assert!(is_codex_body_buffer_drop_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            true
+        ));
+        assert!(is_codex_body_buffer_drop_successish(
+            "codex",
+            "/responses",
+            204,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn codex_body_buffer_drop_successish_requires_usage_and_stream_output() {
+        assert!(!is_codex_body_buffer_drop_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            false
+        ));
+        assert!(!is_codex_body_buffer_drop_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            false,
+            true
+        ));
+        assert!(!is_codex_body_buffer_drop_successish(
+            "claude",
+            "/v1/responses",
+            200,
+            true,
+            true
+        ));
+        assert!(!is_codex_body_buffer_drop_successish(
+            "codex",
+            "/v1/chat/completions",
+            200,
+            true,
+            true
+        ));
     }
 }

@@ -10,6 +10,7 @@ export function providerPrimaryBaseUrl(provider: ProviderSummary | null | undefi
 export function providerBaseUrlSummary(provider: ProviderSummary | null | undefined) {
   if (!provider) return "—";
   const primary = providerPrimaryBaseUrl(provider);
+  if (primary === "—" && provider.auth_mode === "oauth") return "OAuth (自动)";
   const extraCount = Math.max(0, (provider.base_urls?.length ?? 0) - 1);
   return extraCount > 0 ? `${primary} (+${extraCount})` : primary;
 }

@@ -263,7 +263,11 @@ pub(super) async fn handle_success_event_stream(
             );
         }
 
-        let use_sse_relay = common.cli_key == "codex" && common.forwarded_path == "/v1/responses";
+        let use_sse_relay = common.cli_key == "codex"
+            && matches!(
+                common.forwarded_path.trim_end_matches('/'),
+                "/v1/responses" | "/responses"
+            );
 
         let body = match (enable_response_fixer_for_this_response, should_gunzip) {
             (true, true) => {

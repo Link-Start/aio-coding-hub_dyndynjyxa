@@ -39,6 +39,7 @@ pub(crate) async fn provider_upsert(
     name: String,
     base_urls: Vec<String>,
     base_url_mode: String,
+    auth_mode: Option<String>,
     api_key: Option<String>,
     enabled: bool,
     cost_multiplier: f64,
@@ -66,6 +67,7 @@ pub(crate) async fn provider_upsert(
             &name,
             base_urls,
             &base_url_mode,
+            auth_mode.as_deref(),
             api_key.as_deref(),
             enabled,
             cost_multiplier,
@@ -393,6 +395,482 @@ pub(crate) async fn base_url_ping_ms(base_url: String) -> Result<u64, String> {
         .build()
         .map_err(|e| format!("PING_HTTP_CLIENT_INIT: {e}"))?;
     base_url_probe::probe_base_url_ms(&client, &base_url, std::time::Duration::from_secs(3)).await
+}
+
+fn urlencoding_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() * 3);
+    for b in input.as_bytes() {
+        let c = *b as char;
+        if matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '.' | '_' | '~') {
+            out.push(c);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{:02X}", b));
+        }
+    }
+    out
+}
+
+fn resolve_oauth_adapter_for_details(
+    details: &providers::ProviderOAuthDetails,
+) -> Result<&'static dyn crate::gateway::oauth::provider_trait::OAuthProvider, String> {
+    let registry = crate::gateway::oauth::registry::global_registry();
+    let provider_type = details.oauth_provider_type.trim();
+    let adapter = if provider_type.is_empty() {
+        registry
+            .get_by_cli_key(&details.cli_key)
+            .ok_or_else(|| format!("no adapter for cli_key={}", details.cli_key))?
+    } else {
+        registry
+            .get_by_provider_type(provider_type)
+            .ok_or_else(|| format!("no adapter for provider_type={provider_type}"))?
+    };
+
+    if adapter.cli_key() != details.cli_key {
+        return Err(format!(
+            "SEC_INVALID_STATE: OAuth provider mismatch for provider_id={} (cli_key={}, provider_type={}, resolved_cli_key={})",
+            details.id,
+            details.cli_key,
+            if provider_type.is_empty() {
+                "<empty>"
+            } else {
+                provider_type
+            },
+            adapter.cli_key()
+        ));
+    }
+
+    Ok(adapter)
+}
+
+#[tauri::command]
+pub(crate) async fn provider_oauth_start_flow(
+    app: tauri::AppHandle,
+    db_state: tauri::State<'_, DbInitState>,
+    cli_key: String,
+    provider_id: i64,
+) -> Result<serde_json::Value, String> {
+    let db = ensure_db_ready(app.clone(), db_state.inner()).await?;
+    let provider_cli_key = blocking::run("provider_oauth_start_flow_load_provider_cli_key", {
+        let db = db.clone();
+        move || {
+            providers::cli_key_by_id(&db, provider_id)?.ok_or_else(|| {
+                crate::shared::error::AppError::from("DB_NOT_FOUND: provider not found".to_string())
+            })
+        }
+    })
+    .await
+    .map_err(Into::<String>::into)?;
+
+    if provider_cli_key != cli_key {
+        return Err(format!(
+            "SEC_INVALID_INPUT: provider cli_key mismatch for provider_id={provider_id} (expected={provider_cli_key}, got={cli_key})"
+        ));
+    }
+
+    // 1. Lookup OAuth provider adapter from registry
+    let adapter = crate::gateway::oauth::registry::global_registry()
+        .get_by_cli_key(&provider_cli_key)
+        .ok_or_else(|| format!("no OAuth adapter for cli_key={provider_cli_key}"))?;
+
+    let endpoints = adapter.endpoints();
+
+    // 2. Generate PKCE pair
+    let pkce = crate::gateway::oauth::pkce::generate_pkce_pair();
+
+    // 3. Generate random state
+    use rand::RngCore;
+    let mut state_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut state_bytes);
+    let oauth_state = base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        state_bytes,
+    );
+
+    // 4. Bind callback listener
+    let listener = crate::gateway::oauth::callback_server::bind_callback_listener(
+        endpoints.default_callback_port,
+    )
+    .await
+    .map_err(|e| format!("failed to bind callback listener: {e}"))?;
+
+    let redirect_uri =
+        crate::gateway::oauth::provider_trait::make_redirect_uri(endpoints, listener.port);
+
+    // 5. Build authorize URL
+    let scopes = endpoints.scopes.join(" ");
+    let mut authorize_url = format!(
+        "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
+        endpoints.auth_url,
+        urlencoding_encode(&endpoints.client_id),
+        urlencoding_encode(&redirect_uri),
+        urlencoding_encode(&scopes),
+        urlencoding_encode(&oauth_state),
+        urlencoding_encode(&pkce.code_challenge),
+    );
+
+    for (key, value) in adapter.extra_authorize_params() {
+        authorize_url.push('&');
+        authorize_url.push_str(&urlencoding_encode(key));
+        authorize_url.push('=');
+        authorize_url.push_str(&urlencoding_encode(value));
+    }
+
+    // 6. Open browser
+    let _ = tauri_plugin_opener::open_url(&authorize_url, None::<&str>);
+
+    // 7. Wait for callback (300s timeout)
+    let callback = listener
+        .wait_for_callback(&oauth_state, 300)
+        .await
+        .map_err(|e| format!("OAuth callback failed: {e}"))?;
+
+    let code = callback
+        .code
+        .ok_or("OAuth callback missing authorization code")?;
+
+    // 8. Exchange code for tokens
+    let client = crate::gateway::oauth::build_oauth_http_client("codex_cli_rs/0.76.0", 30, 15)?;
+    let token_set = crate::gateway::oauth::token_exchange::exchange_authorization_code(
+        &client,
+        &crate::gateway::oauth::token_exchange::TokenExchangeRequest {
+            token_uri: endpoints.token_url.to_string(),
+            client_id: endpoints.client_id.clone(),
+            client_secret: endpoints.client_secret.clone(),
+            code,
+            redirect_uri,
+            code_verifier: pkce.code_verifier,
+        },
+    )
+    .await
+    .map_err(|e| format!("token exchange failed: {e}"))?;
+
+    // 9. Resolve effective token
+    let (effective_token, id_token) = adapter.resolve_effective_token(&token_set, None);
+    let token_expires_at = token_set.expires_at;
+    let provider_type = adapter.provider_type();
+
+    // 10. Save to provider
+    let app_handle = app.clone();
+    blocking::run("provider_oauth_start_flow_save", move || {
+        crate::providers::update_oauth_tokens(
+            &db,
+            provider_id,
+            "oauth",
+            provider_type,
+            &effective_token,
+            token_set.refresh_token.as_deref(),
+            id_token.as_deref(),
+            endpoints.token_url,
+            &endpoints.client_id,
+            endpoints.client_secret.as_deref(),
+            token_expires_at,
+            None,
+        )
+    })
+    .await
+    .map_err(Into::<String>::into)?;
+
+    crate::gateway::events::emit_gateway_log(
+        &app_handle,
+        "info",
+        "OAUTH_LOGIN_OK",
+        format!("OAuth 登录成功：provider_id={provider_id} type={provider_type}"),
+    );
+
+    Ok(serde_json::json!({
+        "success": true,
+        "provider_id": provider_id,
+        "provider_type": provider_type,
+        "expires_at": token_expires_at,
+    }))
+}
+
+#[tauri::command]
+pub(crate) async fn provider_oauth_refresh(
+    app: tauri::AppHandle,
+    db_state: tauri::State<'_, DbInitState>,
+    provider_id: i64,
+) -> Result<serde_json::Value, String> {
+    let db = ensure_db_ready(app, db_state.inner()).await?;
+
+    let details = blocking::run("provider_oauth_refresh_load", {
+        let db = db.clone();
+        move || crate::providers::get_oauth_details(&db, provider_id)
+    })
+    .await
+    .map_err(Into::<String>::into)?;
+
+    let token_uri = details
+        .oauth_token_uri
+        .as_deref()
+        .ok_or("provider missing token_uri")?
+        .to_string();
+    let client_id = details
+        .oauth_client_id
+        .as_deref()
+        .ok_or("provider missing client_id")?
+        .to_string();
+    let refresh_token = details
+        .oauth_refresh_token
+        .as_deref()
+        .ok_or("provider missing refresh_token")?
+        .to_string();
+
+    let client = crate::gateway::oauth::build_oauth_http_client("codex_cli_rs/0.76.0", 30, 15)?;
+    let token_set = crate::gateway::oauth::refresh::refresh_provider_token_with_retry(
+        &client,
+        &token_uri,
+        &client_id,
+        details.oauth_client_secret.as_deref(),
+        &refresh_token,
+    )
+    .await
+    .map_err(|e| format!("token refresh failed: {e}"))?;
+
+    // Resolve effective token via validated adapter.
+    let adapter = resolve_oauth_adapter_for_details(&details)?;
+    let (effective_token, id_token) =
+        adapter.resolve_effective_token(&token_set, details.oauth_id_token.as_deref());
+
+    let new_refresh_token = token_set
+        .refresh_token
+        .as_deref()
+        .or(Some(refresh_token.as_str()))
+        .map(str::to_string);
+    let oauth_provider_type = if details.oauth_provider_type.trim().is_empty() {
+        adapter.provider_type().to_string()
+    } else {
+        details.oauth_provider_type.clone()
+    };
+    let oauth_client_secret = details.oauth_client_secret.clone();
+    let oauth_email = details.oauth_email.clone();
+    let expires_at = token_set.expires_at;
+    let expected_last_refreshed_at = details.oauth_last_refreshed_at;
+
+    let persisted = blocking::run("provider_oauth_refresh_save", move || {
+        crate::providers::update_oauth_tokens_if_last_refreshed_matches(
+            &db,
+            provider_id,
+            "oauth",
+            &oauth_provider_type,
+            &effective_token,
+            new_refresh_token.as_deref(),
+            id_token.as_deref(),
+            &token_uri,
+            &client_id,
+            oauth_client_secret.as_deref(),
+            expires_at,
+            oauth_email.as_deref(),
+            expected_last_refreshed_at,
+        )
+    })
+    .await
+    .map_err(Into::<String>::into)?;
+    if !persisted {
+        return Err(format!(
+            "OAUTH_REFRESH_CONFLICT: provider_id={provider_id} tokens updated concurrently; retry refresh"
+        ));
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "expires_at": token_set.expires_at,
+    }))
+}
+
+#[tauri::command]
+pub(crate) async fn provider_oauth_disconnect(
+    app: tauri::AppHandle,
+    db_state: tauri::State<'_, DbInitState>,
+    provider_id: i64,
+) -> Result<serde_json::Value, String> {
+    let db = ensure_db_ready(app, db_state.inner()).await?;
+    blocking::run("provider_oauth_disconnect", move || {
+        crate::providers::clear_oauth(&db, provider_id)
+    })
+    .await
+    .map_err(Into::<String>::into)?;
+    Ok(serde_json::json!({ "success": true }))
+}
+
+#[tauri::command]
+pub(crate) async fn provider_oauth_status(
+    app: tauri::AppHandle,
+    db_state: tauri::State<'_, DbInitState>,
+    provider_id: i64,
+) -> Result<serde_json::Value, String> {
+    let db = ensure_db_ready(app, db_state.inner()).await?;
+    let result = blocking::run("provider_oauth_status", move || {
+        crate::providers::get_oauth_details(&db, provider_id)
+    })
+    .await;
+
+    match result {
+        Ok(details) => Ok(serde_json::json!({
+            "connected": true,
+            "provider_type": details.oauth_provider_type,
+            "email": details.oauth_email,
+            "expires_at": details.oauth_expires_at,
+            "has_refresh_token": details.oauth_refresh_token.is_some(),
+        })),
+        Err(e) => {
+            let err_str = e.to_string();
+            // DB_NOT_FOUND = provider exists but has no OAuth tokens → expected disconnected state.
+            // Any other error (DB_ERROR, INTERNAL_ERROR) is a real failure that must surface.
+            if err_str.starts_with("DB_NOT_FOUND") {
+                Ok(serde_json::json!({ "connected": false }))
+            } else {
+                tracing::warn!(
+                    provider_id,
+                    "provider_oauth_status unexpected error: {err_str}"
+                );
+                Err(format!("provider_oauth_status failed: {err_str}"))
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn provider_oauth_fetch_limits(
+    app: tauri::AppHandle,
+    db_state: tauri::State<'_, DbInitState>,
+    provider_id: i64,
+) -> Result<serde_json::Value, String> {
+    let db = ensure_db_ready(app, db_state.inner()).await?;
+    let details = blocking::run("provider_oauth_fetch_limits_load", {
+        let db = db.clone();
+        move || crate::providers::get_oauth_details(&db, provider_id)
+    })
+    .await
+    .map_err(Into::<String>::into)?;
+
+    let token = details.oauth_access_token.trim().to_string();
+    if token.is_empty() {
+        return Err("OAuth access token is empty".to_string());
+    }
+
+    let adapter = resolve_oauth_adapter_for_details(&details)?;
+
+    let client = crate::gateway::oauth::build_oauth_http_client(
+        &format!("aio-coding-hub-oauth-command/{}", env!("CARGO_PKG_VERSION")),
+        15,
+        10,
+    )?;
+    let limits = adapter
+        .fetch_limits(&client, &token)
+        .await
+        .map_err(|e| format!("fetch_limits failed: {e}"))?;
+
+    // If the adapter already parsed limit texts, use them directly.
+    // Otherwise, try to parse from raw_json based on cli_key.
+    let (limit_5h_text, limit_weekly_text) =
+        if limits.limit_5h_text.is_some() || limits.limit_weekly_text.is_some() {
+            (
+                limits.limit_5h_text.clone(),
+                limits.limit_weekly_text.clone(),
+            )
+        } else if let Some(ref raw) = limits.raw_json {
+            let cli_key = adapter.cli_key();
+            match cli_key {
+                "codex" => parse_codex_limits(raw),
+                "claude" => parse_claude_limits(raw),
+                _ => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
+    Ok(serde_json::json!({
+        "limit_5h_text": limit_5h_text,
+        "limit_weekly_text": limit_weekly_text,
+        "raw_json": limits.raw_json,
+    }))
+}
+
+fn parse_remaining_percent_from_window(window: &serde_json::Value) -> Option<f64> {
+    if !window.is_object() {
+        return None;
+    }
+    if let Some(used) = window
+        .get("used_percent")
+        .and_then(serde_json::Value::as_f64)
+        .or_else(|| {
+            window
+                .get("usedPercent")
+                .and_then(serde_json::Value::as_f64)
+        })
+    {
+        let remaining = (100.0 - used).clamp(0.0, 100.0);
+        return Some(remaining);
+    }
+    let remaining = window
+        .get("remaining_count")
+        .and_then(serde_json::Value::as_f64)
+        .or_else(|| {
+            window
+                .get("remainingCount")
+                .and_then(serde_json::Value::as_f64)
+        });
+    let total = window
+        .get("total_count")
+        .and_then(serde_json::Value::as_f64)
+        .or_else(|| window.get("totalCount").and_then(serde_json::Value::as_f64));
+    match (remaining, total) {
+        (Some(rem), Some(t)) if t > 0.0 => Some((rem / t * 100.0).clamp(0.0, 100.0)),
+        _ => None,
+    }
+}
+
+fn format_percent_label(value: f64) -> String {
+    format!("{:.0}%", value.clamp(0.0, 100.0))
+}
+
+fn parse_codex_limits(body: &serde_json::Value) -> (Option<String>, Option<String>) {
+    let rate_limit = body.get("rate_limit").unwrap_or(body);
+    let primary = rate_limit
+        .get("primary_window")
+        .or_else(|| rate_limit.get("primaryWindow"))
+        .or_else(|| body.get("5_hour_window"))
+        .or_else(|| body.get("fiveHourWindow"));
+    let secondary = rate_limit
+        .get("secondary_window")
+        .or_else(|| rate_limit.get("secondaryWindow"))
+        .or_else(|| body.get("weekly_window"))
+        .or_else(|| body.get("weeklyWindow"));
+
+    let limit_5h = primary
+        .and_then(parse_remaining_percent_from_window)
+        .map(format_percent_label);
+    let limit_weekly = secondary
+        .and_then(parse_remaining_percent_from_window)
+        .map(format_percent_label);
+    (limit_5h, limit_weekly)
+}
+
+fn parse_claude_limits(body: &serde_json::Value) -> (Option<String>, Option<String>) {
+    fn extract_utilization(window: &serde_json::Value) -> Option<f64> {
+        window
+            .get("utilization")
+            .and_then(serde_json::Value::as_f64)
+            .or_else(|| {
+                window
+                    .get("utilization")
+                    .and_then(serde_json::Value::as_str)?
+                    .parse::<f64>()
+                    .ok()
+            })
+    }
+
+    let limit_5h = body
+        .get("five_hour")
+        .and_then(extract_utilization)
+        .map(|used| format_percent_label(100.0 - used));
+    let limit_weekly = body
+        .get("seven_day")
+        .and_then(extract_utilization)
+        .map(|used| format_percent_label(100.0 - used));
+    (limit_5h, limit_weekly)
 }
 
 #[cfg(test)]

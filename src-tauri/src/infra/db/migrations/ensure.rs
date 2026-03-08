@@ -11,6 +11,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 pub(super) fn apply_ensure_patches(conn: &mut Connection) -> crate::shared::error::AppResult<()> {
     ensure_workspace_cluster(conn)?;
     ensure_provider_limits(conn)?;
+    ensure_provider_oauth_columns(conn)?;
     ensure_sort_mode_providers_enabled(conn)?;
     ensure_usage_indexes(conn)?;
     ensure_provider_tags(conn)?;
@@ -389,6 +390,128 @@ fn ensure_provider_limits(conn: &mut Connection) -> Result<(), String> {
     if !ddl.is_empty() {
         tx.execute_batch(ddl.join("\n").as_str())
             .map_err(|e| format!("failed to ensure providers spend limit columns: {e}"))?;
+    }
+
+    tx.commit()
+        .map_err(|e| format!("failed to commit sqlite transaction: {e}"))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ensure_provider_oauth_columns (from v29_to_v30.rs)
+// ---------------------------------------------------------------------------
+fn ensure_provider_oauth_columns(conn: &mut Connection) -> Result<(), String> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("failed to start sqlite transaction: {e}"))?;
+
+    let has_providers_table: bool = tx
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'providers' LIMIT 1",
+            [],
+            |_| Ok(true),
+        )
+        .optional()
+        .map_err(|e| format!("failed to query sqlite_master: {e}"))?
+        .unwrap_or(false);
+
+    if !has_providers_table {
+        tx.commit()
+            .map_err(|e| format!("failed to commit sqlite transaction: {e}"))?;
+        return Ok(());
+    }
+
+    let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
+    {
+        let mut stmt = tx
+            .prepare("PRAGMA table_info(providers)")
+            .map_err(|e| format!("failed to prepare providers table_info query: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("failed to query providers table_info: {e}"))?;
+
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("failed to read providers table_info row: {e}"))?
+        {
+            let name: String = row
+                .get(1)
+                .map_err(|e| format!("failed to read providers column name: {e}"))?;
+            existing.insert(name);
+        }
+    }
+
+    let mut ddl: Vec<&'static str> = Vec::new();
+    let adding_auth_mode = !existing.contains("auth_mode");
+    let adding_oauth_refresh_lead_s = !existing.contains("oauth_refresh_lead_s");
+
+    if adding_auth_mode {
+        ddl.push("ALTER TABLE providers ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'api_key';");
+    }
+    if !existing.contains("oauth_provider_type") {
+        ddl.push("ALTER TABLE providers ADD COLUMN oauth_provider_type TEXT;");
+    }
+    if !existing.contains("oauth_access_token") {
+        ddl.push("ALTER TABLE providers ADD COLUMN oauth_access_token TEXT;");
+    }
+    if !existing.contains("oauth_refresh_token") {
+        ddl.push("ALTER TABLE providers ADD COLUMN oauth_refresh_token TEXT;");
+    }
+    if !existing.contains("oauth_id_token") {
+        ddl.push("ALTER TABLE providers ADD COLUMN oauth_id_token TEXT;");
+    }
+    if !existing.contains("oauth_token_uri") {
+        ddl.push("ALTER TABLE providers ADD COLUMN oauth_token_uri TEXT;");
+    }
+    if !existing.contains("oauth_client_id") {
+        ddl.push("ALTER TABLE providers ADD COLUMN oauth_client_id TEXT;");
+    }
+    if !existing.contains("oauth_client_secret") {
+        ddl.push("ALTER TABLE providers ADD COLUMN oauth_client_secret TEXT;");
+    }
+    if !existing.contains("oauth_expires_at") {
+        ddl.push("ALTER TABLE providers ADD COLUMN oauth_expires_at INTEGER;");
+    }
+    if !existing.contains("oauth_email") {
+        ddl.push("ALTER TABLE providers ADD COLUMN oauth_email TEXT;");
+    }
+    if !existing.contains("oauth_last_refreshed_at") {
+        ddl.push("ALTER TABLE providers ADD COLUMN oauth_last_refreshed_at INTEGER;");
+    }
+    if !existing.contains("oauth_last_error") {
+        ddl.push("ALTER TABLE providers ADD COLUMN oauth_last_error TEXT;");
+    }
+    if adding_oauth_refresh_lead_s {
+        ddl.push(
+            "ALTER TABLE providers ADD COLUMN oauth_refresh_lead_s INTEGER NOT NULL DEFAULT 3600;",
+        );
+    }
+
+    if !ddl.is_empty() {
+        tx.execute_batch(ddl.join("\n").as_str())
+            .map_err(|e| format!("failed to ensure providers oauth columns: {e}"))?;
+    }
+
+    if existing.contains("auth_mode") || adding_auth_mode {
+        tx.execute_batch(
+            r#"
+UPDATE providers
+SET auth_mode = 'api_key'
+WHERE auth_mode IS NULL OR TRIM(auth_mode) = '';
+"#,
+        )
+        .map_err(|e| format!("failed to backfill providers.auth_mode: {e}"))?;
+    }
+
+    if existing.contains("oauth_refresh_lead_s") || adding_oauth_refresh_lead_s {
+        tx.execute_batch(
+            r#"
+UPDATE providers
+SET oauth_refresh_lead_s = 3600
+WHERE oauth_refresh_lead_s IS NULL OR oauth_refresh_lead_s <= 0;
+"#,
+        )
+        .map_err(|e| format!("failed to backfill providers.oauth_refresh_lead_s: {e}"))?;
     }
 
     tx.commit()

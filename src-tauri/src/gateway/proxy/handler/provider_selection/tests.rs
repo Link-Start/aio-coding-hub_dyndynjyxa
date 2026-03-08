@@ -15,6 +15,7 @@ fn insert_provider(db: &crate::db::Db, name: &str, enabled: bool) -> providers::
         name,
         vec!["https://example.com".to_string()],
         "order",
+        None, // auth_mode
         Some("k"),
         enabled,
         1.0,

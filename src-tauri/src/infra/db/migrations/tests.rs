@@ -418,6 +418,107 @@ PRAGMA user_version = 29;
 }
 
 #[test]
+fn ensure_patch_backfills_oauth_columns_for_legacy_v30_schema() {
+    let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .expect("enable foreign_keys");
+
+    conn.execute_batch(
+        r#"
+CREATE TABLE providers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cli_key TEXT NOT NULL,
+  name TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  base_urls_json TEXT NOT NULL DEFAULT '[]',
+  base_url_mode TEXT NOT NULL DEFAULT 'order',
+  claude_models_json TEXT NOT NULL DEFAULT '{}',
+  api_key_plaintext TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  priority INTEGER NOT NULL DEFAULT 100,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  cost_multiplier REAL NOT NULL DEFAULT 1.0
+);
+
+CREATE TABLE prompts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+PRAGMA user_version = 30;
+"#,
+    )
+    .expect("create legacy v30 schema without oauth columns");
+
+    conn.execute(
+        r#"
+INSERT INTO providers(
+  cli_key,
+  name,
+  base_url,
+  base_urls_json,
+  base_url_mode,
+  claude_models_json,
+  api_key_plaintext,
+  enabled,
+  priority,
+  created_at,
+  updated_at,
+  sort_order,
+  cost_multiplier
+) VALUES ('claude', 'legacy', 'https://example.com', '[]', 'order', '{}', 'sk-test', 1, 100, 1, 1, 0, 1.0)
+"#,
+        [],
+    )
+    .expect("insert legacy provider");
+
+    apply_migrations(&mut conn).expect("apply migrations");
+
+    let user_version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("read user_version");
+    assert_eq!(user_version, 30);
+
+    for column in [
+        "auth_mode",
+        "oauth_provider_type",
+        "oauth_access_token",
+        "oauth_refresh_token",
+        "oauth_id_token",
+        "oauth_token_uri",
+        "oauth_client_id",
+        "oauth_client_secret",
+        "oauth_expires_at",
+        "oauth_email",
+        "oauth_last_refreshed_at",
+        "oauth_last_error",
+        "oauth_refresh_lead_s",
+    ] {
+        assert!(test_has_column(&conn, "providers", column));
+    }
+
+    let (auth_mode, oauth_refresh_lead_s): (String, i64) = conn
+        .query_row(
+            "SELECT auth_mode, oauth_refresh_lead_s FROM providers WHERE name = 'legacy'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read oauth defaults");
+    assert_eq!(auth_mode, "api_key");
+    assert_eq!(oauth_refresh_lead_s, 3600);
+
+    // Idempotent: second run should succeed.
+    apply_migrations(&mut conn).expect("apply migrations twice");
+}
+
+#[test]
 fn strict_v29_patch_migrates_legacy_workspace_cluster_tables() {
     let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
     conn.execute_batch("PRAGMA foreign_keys = ON;")
@@ -639,7 +740,7 @@ INSERT INTO skills(
     let user_version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(user_version, 29);
+    assert_eq!(user_version, 30);
 
     assert!(test_has_column(&conn, "workspaces", "cli_key"));
     assert!(test_has_column(&conn, "workspace_active", "workspace_id"));
@@ -759,7 +860,7 @@ fn baseline_v25_creates_complete_schema_for_fresh_install() {
     let user_version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(user_version, 29);
+    assert_eq!(user_version, 30);
 
     // Verify all tables exist
     let tables: Vec<String> = {
@@ -975,7 +1076,7 @@ PRAGMA user_version = 33;
     let user_version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(user_version, 29);
+    assert_eq!(user_version, 30);
 
     assert!(test_has_column(&conn, "providers", "limit_5h_usd"));
     assert!(test_has_column(&conn, "providers", "limit_daily_usd"));

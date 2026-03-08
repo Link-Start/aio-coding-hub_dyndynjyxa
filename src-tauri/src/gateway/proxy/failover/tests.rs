@@ -1,9 +1,68 @@
-use super::{retry_backoff_delay, select_next_provider_id_from_order, should_reuse_provider};
+use super::{
+    resolve_primary_provider_base_url, retry_backoff_delay, select_next_provider_id_from_order,
+    should_reuse_provider,
+};
+use crate::providers;
 use serde_json::json;
 use std::collections::HashSet;
 
 fn set(ids: &[i64]) -> HashSet<i64> {
     ids.iter().copied().collect()
+}
+
+fn provider_for_base_url_test(
+    auth_mode: &str,
+    base_urls: Vec<&str>,
+    oauth_provider_type: Option<&str>,
+) -> providers::ProviderForGateway {
+    providers::ProviderForGateway {
+        id: 1,
+        name: "test".to_string(),
+        base_urls: base_urls.into_iter().map(str::to_string).collect(),
+        base_url_mode: providers::ProviderBaseUrlMode::Order,
+        api_key_plaintext: "sk-test".to_string(),
+        claude_models: providers::ClaudeModels::default(),
+        limit_5h_usd: None,
+        limit_daily_usd: None,
+        daily_reset_mode: providers::DailyResetMode::Fixed,
+        daily_reset_time: "00:00:00".to_string(),
+        limit_weekly_usd: None,
+        limit_monthly_usd: None,
+        limit_total_usd: None,
+        auth_mode: auth_mode.to_string(),
+        oauth_provider_type: oauth_provider_type.map(str::to_string),
+    }
+}
+
+#[test]
+fn oauth_primary_base_url_uses_adapter_default_even_with_legacy_base_urls() {
+    let provider = provider_for_base_url_test(
+        "oauth",
+        vec!["/legacy/relative/path", "https://another.example.com/v1"],
+        Some("codex_oauth"),
+    );
+
+    let base = resolve_primary_provider_base_url(&provider, "codex").expect("oauth base url");
+
+    assert_eq!(base, "https://chatgpt.com/backend-api/codex");
+}
+
+#[test]
+fn api_key_primary_base_url_keeps_first_non_empty_configured_base_url() {
+    let provider = provider_for_base_url_test(
+        "api_key",
+        vec![
+            "",
+            "   ",
+            "https://api.example.com/v1",
+            "https://backup.example.com/v1",
+        ],
+        None,
+    );
+
+    let base = resolve_primary_provider_base_url(&provider, "codex").expect("api key base url");
+
+    assert_eq!(base, "https://api.example.com/v1");
 }
 
 #[test]

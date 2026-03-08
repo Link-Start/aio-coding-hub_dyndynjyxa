@@ -4,6 +4,7 @@
 
 import { memo, useEffect, useMemo, useState } from "react";
 import { cliBadgeTone, cliShortLabel } from "../../constants/clis";
+import { GatewayErrorCodes } from "../../constants/gatewayErrorCodes";
 import type { TraceSession } from "../../services/traceStore";
 import { cn } from "../../utils/cn";
 import {
@@ -12,6 +13,7 @@ import {
   formatInteger,
   formatTokensPerSecond,
   formatTokensPerSecondShort,
+  formatUsdRaw,
   sanitizeTtfbMs,
 } from "../../utils/formatters";
 import { Clock, Server, Loader2, Cpu, Terminal, CheckCircle2, XCircle } from "lucide-react";
@@ -28,7 +30,7 @@ export type RealtimeTraceCardsProps = {
   showCustomTooltip: boolean;
 };
 
-const REALTIME_TRACE_EXIT_START_MS = 200;
+const REALTIME_TRACE_EXIT_START_MS = 2200;
 const REALTIME_TRACE_EXIT_ANIM_MS = 700;
 const REALTIME_TRACE_EXIT_TOTAL_MS =
   REALTIME_TRACE_EXIT_START_MS + REALTIME_TRACE_EXIT_ANIM_MS + 100;
@@ -173,6 +175,11 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
           inProgress: isInProgress,
           hasFailover,
         });
+        const isClientAbort =
+          statusBadge.isClientAbort ||
+          summaryStatus === 499 ||
+          summaryErrorCode === GatewayErrorCodes.REQUEST_ABORTED ||
+          summaryErrorCode === GatewayErrorCodes.STREAM_ABORTED;
         const hasSessionReuse = (trace.attempts ?? []).some(
           (attempt) => attempt.session_reuse === true
         );
@@ -204,21 +211,24 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
             };
           // 优先 5m，其次 1h，最后用 cache_creation_input_tokens 汇总
           if (s.cache_creation_5m_input_tokens != null && s.cache_creation_5m_input_tokens > 0) {
-            return {
-              tokens: s.cache_creation_5m_input_tokens,
-              ttl: "5m" as const,
-            };
+            return { tokens: s.cache_creation_5m_input_tokens, ttl: "5m" as const };
           }
           if (s.cache_creation_1h_input_tokens != null && s.cache_creation_1h_input_tokens > 0) {
-            return {
-              tokens: s.cache_creation_1h_input_tokens,
-              ttl: "1h" as const,
-            };
+            return { tokens: s.cache_creation_1h_input_tokens, ttl: "1h" as const };
           }
           if (s.cache_creation_input_tokens != null && s.cache_creation_input_tokens > 0) {
             return { tokens: s.cache_creation_input_tokens, ttl: null };
           }
-          return { tokens: null, ttl: null };
+          if (s.cache_creation_5m_input_tokens != null) {
+            return { tokens: s.cache_creation_5m_input_tokens, ttl: "5m" as const };
+          }
+          if (s.cache_creation_1h_input_tokens != null) {
+            return { tokens: s.cache_creation_1h_input_tokens, ttl: "1h" as const };
+          }
+          if (s.cache_creation_input_tokens != null) {
+            return { tokens: s.cache_creation_input_tokens, ttl: null };
+          }
+          return { tokens: null as number | null, ttl: null as "5m" | "1h" | null };
         })();
 
         const ttfbMs = trace.summary
@@ -230,14 +240,19 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
           trace.summary?.input_tokens ?? null,
           trace.summary?.cache_read_input_tokens ?? null
         );
+        const displayInputTokens = effectiveInputTokens ?? (isClientAbort ? 0 : null);
+        const displayOutputTokens = trace.summary?.output_tokens ?? (isClientAbort ? 0 : null);
+        const displayCacheReadTokens =
+          trace.summary?.cache_read_input_tokens ?? (isClientAbort ? 0 : null);
+        const displayCacheWriteTokens = cacheWrite.tokens ?? (isClientAbort ? 0 : null);
+        const displayCostUsd = trace.summary?.cost_usd ?? (isClientAbort ? 0 : null);
+        const displayCostText = displayCostUsd == null ? "—" : formatUsdRaw(displayCostUsd);
 
         const outputTokensPerSecond = trace.summary
-          ? computeOutputTokensPerSecond(
-              trace.summary.output_tokens ?? null,
-              trace.summary.duration_ms,
-              ttfbMs
-            )
+          ? computeOutputTokensPerSecond(displayOutputTokens, trace.summary.duration_ms, ttfbMs)
           : null;
+        const displayOutputTokensPerSecond =
+          outputTokensPerSecond ?? (isClientAbort && displayOutputTokens === 0 ? 0 : null);
 
         return (
           <div
@@ -367,17 +382,17 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
                     <div className="flex items-center gap-1 h-4" title="Input Tokens">
                       <span className="text-slate-400 dark:text-slate-500 shrink-0">输入</span>
                       <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300 truncate">
-                        {formatInteger(effectiveInputTokens)}
+                        {formatInteger(displayInputTokens)}
                       </span>
                     </div>
                     <div className="flex items-center gap-1 h-4" title="Cache Write">
                       <span className="text-slate-400 dark:text-slate-500 shrink-0">缓存创建</span>
-                      {cacheWrite.tokens ? (
+                      {displayCacheWriteTokens != null ? (
                         <>
                           <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300 truncate">
-                            {formatInteger(cacheWrite.tokens)}
+                            {formatInteger(displayCacheWriteTokens)}
                           </span>
-                          {cacheWrite.ttl && (
+                          {cacheWrite.ttl && displayCacheWriteTokens > 0 && (
                             <span className="text-slate-400 dark:text-slate-500 text-[10px]">
                               ({cacheWrite.ttl})
                             </span>
@@ -395,21 +410,23 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
                     </div>
                     <div className="flex items-center gap-1 h-4" title="Cost">
                       <span className="text-slate-400 dark:text-slate-500 shrink-0">花费</span>
-                      <span className="text-slate-300 dark:text-slate-600 truncate">—</span>
+                      <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300 truncate">
+                        {displayCostText}
+                      </span>
                     </div>
 
                     {/* Row 2: 输出 | 缓存读取 | 耗时 | 速率 */}
                     <div className="flex items-center gap-1 h-4" title="Output Tokens">
                       <span className="text-slate-400 dark:text-slate-500 shrink-0">输出</span>
                       <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300 truncate">
-                        {formatInteger(trace.summary?.output_tokens ?? null)}
+                        {formatInteger(displayOutputTokens)}
                       </span>
                     </div>
                     <div className="flex items-center gap-1 h-4" title="Cache Read">
                       <span className="text-slate-400 dark:text-slate-500 shrink-0">缓存读取</span>
-                      {trace.summary?.cache_read_input_tokens ? (
+                      {displayCacheReadTokens != null ? (
                         <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300 truncate">
-                          {formatInteger(trace.summary.cache_read_input_tokens)}
+                          {formatInteger(displayCacheReadTokens)}
                         </span>
                       ) : (
                         <span className="text-slate-300 dark:text-slate-600">—</span>
@@ -431,15 +448,15 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
                     <div
                       className="flex items-center gap-1 h-4"
                       title={
-                        outputTokensPerSecond
-                          ? formatTokensPerSecond(outputTokensPerSecond)
+                        displayOutputTokensPerSecond != null
+                          ? formatTokensPerSecond(displayOutputTokensPerSecond)
                           : undefined
                       }
                     >
                       <span className="text-slate-400 dark:text-slate-500 shrink-0">速率</span>
-                      {outputTokensPerSecond ? (
+                      {displayOutputTokensPerSecond != null ? (
                         <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300 truncate">
-                          {formatTokensPerSecondShort(outputTokensPerSecond)}
+                          {formatTokensPerSecondShort(displayOutputTokensPerSecond)}
                         </span>
                       ) : (
                         <span className="text-slate-300 dark:text-slate-600">—</span>
