@@ -26,39 +26,56 @@ vi.mock("../../consoleLog", async () => {
 
 describe("services/providers/providerLimitUsage", () => {
   it("rethrows invoke errors and logs", async () => {
-    vi.mocked(commands.providerLimitUsageV1).mockRejectedValueOnce(
-      new Error("provider limit usage boom")
-    );
+    vi.mocked(commands.providerLimitUsageV1).mockRejectedValueOnce(new Error("provider limit boom"));
 
-    await expect(providerLimitUsageV1("claude")).rejects.toThrow("provider limit usage boom");
+    await expect(providerLimitUsageV1("claude")).rejects.toThrow("provider limit boom");
     expect(logToConsole).toHaveBeenCalledWith(
       "error",
       "读取 Provider 限额用量失败",
       expect.objectContaining({
         cmd: "provider_limit_usage_v1",
-        error: expect.stringContaining("provider limit usage boom"),
+        error: expect.stringContaining("provider limit boom"),
       })
     );
   });
 
-  it("treats null invoke result as error with runtime", async () => {
-    vi.mocked(commands.providerLimitUsageV1).mockResolvedValueOnce(null as any);
+  it("maps generated rows and forwards nullable cliKey", async () => {
+    vi.mocked(commands.providerLimitUsageV1)
+      .mockResolvedValueOnce({
+        status: "ok",
+        data: [
+          {
+            cli_key: "claude",
+            provider_id: 1,
+            provider_name: "Fetch",
+            enabled: true,
+            limit_5h_usd: null,
+            limit_daily_usd: null,
+            daily_reset_mode: null,
+            daily_reset_time: null,
+            limit_weekly_usd: null,
+            limit_monthly_usd: null,
+            limit_total_usd: null,
+            usage_5h_usd: 0,
+            usage_daily_usd: 0,
+            usage_weekly_usd: 0,
+            usage_monthly_usd: 0,
+            usage_total_usd: 0,
+            window_5h_start_ts: 0,
+            window_daily_start_ts: 0,
+            window_weekly_start_ts: 0,
+            window_monthly_start_ts: 0,
+          },
+        ],
+      } as any)
+      .mockResolvedValueOnce({ status: "ok", data: [] } as any);
 
-    await expect(providerLimitUsageV1("claude")).rejects.toThrow(
-      "IPC_NULL_RESULT: provider_limit_usage_v1"
-    );
-  });
+    const rows = await providerLimitUsageV1("claude");
+    const allRows = await providerLimitUsageV1(null);
 
-  it("keeps argument mapping unchanged", async () => {
-    vi.mocked(commands.providerLimitUsageV1).mockResolvedValue({
-      status: "ok",
-      data: [] as any,
-    });
-
-    await providerLimitUsageV1("claude");
-    expect(commands.providerLimitUsageV1).toHaveBeenCalledWith("claude");
-
-    await providerLimitUsageV1(null);
-    expect(commands.providerLimitUsageV1).toHaveBeenCalledWith(null);
+    expect(rows?.[0]?.cli_key).toBe("claude");
+    expect(allRows).toEqual([]);
+    expect(commands.providerLimitUsageV1).toHaveBeenNthCalledWith(1, "claude");
+    expect(commands.providerLimitUsageV1).toHaveBeenNthCalledWith(2, null);
   });
 });

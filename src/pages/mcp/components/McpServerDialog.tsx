@@ -70,19 +70,19 @@ function buildSecretPatch(
     if (!key) {
       return {
         error: `${spec.label} 第 ${i + 1} 行：请填写 ${spec.keyLabel}`,
-        patch: { preserve_keys: [], replace: {} },
+        patch: { preserveKeys: [], replace: {} },
       };
     }
     if (!spec.keyPattern.test(key)) {
       return {
         error: `${spec.label} 第 ${i + 1} 行：${spec.keyLabel} 格式不正确`,
-        patch: { preserve_keys: [], replace: {} },
+        patch: { preserveKeys: [], replace: {} },
       };
     }
     if (seenKeys.has(key)) {
       return {
         error: `${spec.label} 第 ${i + 1} 行：${spec.keyLabel} ${key} 重复`,
-        patch: { preserve_keys: [], replace: {} },
+        patch: { preserveKeys: [], replace: {} },
       };
     }
     seenKeys.add(key);
@@ -91,7 +91,7 @@ function buildSecretPatch(
       if (!spec.existingKeys.has(key)) {
         return {
           error: `${spec.label} 第 ${i + 1} 行：新增 ${spec.keyLabel} 必须填写 ${spec.valueLabel}`,
-          patch: { preserve_keys: [], replace: {} },
+          patch: { preserveKeys: [], replace: {} },
         };
       }
       preserveKeys.push(key);
@@ -104,7 +104,7 @@ function buildSecretPatch(
   return {
     error: null,
     patch: {
-      preserve_keys: preserveKeys,
+      preserveKeys,
       replace,
     },
   };
@@ -499,10 +499,10 @@ export function McpServerDialog({
         transport,
         command: isStdio ? command : null,
         args: isStdio ? parseLines(argsText) : [],
-        env: isStdio ? patch : { preserve_keys: [], replace: {} },
+        env: isStdio ? patch : { preserveKeys: [], replace: {} },
         cwd: isStdio ? (cwd.trim() ? cwd : null) : null,
         url: !isStdio ? url : null,
-        headers: !isStdio ? patch : { preserve_keys: [], replace: {} },
+        headers: !isStdio ? patch : { preserveKeys: [], replace: {} },
       });
 
       if (!next) {

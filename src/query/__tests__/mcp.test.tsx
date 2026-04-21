@@ -270,7 +270,7 @@ describe("query/mcp", () => {
     const parsed = await mcpParseJson('{"mcpServers":{"fetch":{"command":"npx"}}}');
     expect(parsed?.servers.length).toBe(1);
 
-    const report = await mcpImportServers({ workspace_id: 1, servers: parsed?.servers ?? [] });
+    const report = await mcpImportServers({ workspaceId: 1, servers: parsed?.servers ?? [] });
     expect(report).toEqual(expect.objectContaining({ inserted: 1, updated: 0 }));
   });
 });

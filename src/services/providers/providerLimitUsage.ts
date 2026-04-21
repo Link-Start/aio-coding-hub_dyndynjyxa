@@ -1,35 +1,33 @@
 // Usage:
 // - Used by `src/components/home/HomeProviderLimitPanel.tsx` to load provider limit usage data.
 
-import { commands } from "../../generated/bindings";
-import { invokeGeneratedIpc, type GeneratedCommandResult } from "../generatedIpc";
+import {
+  commands,
+  type ProviderLimitUsageRow as GeneratedProviderLimitUsageRow,
+} from "../../generated/bindings";
+import { invokeGeneratedIpc, mapGeneratedCommandResponse } from "../generatedIpc";
+import { narrowGeneratedStringUnion, type Override } from "../generatedTypeUtils";
 import type { CliKey } from "./providers";
 
-export type ProviderLimitUsageRow = {
-  cli_key: CliKey;
-  provider_id: number;
-  provider_name: string;
-  enabled: boolean;
-  // Limits (null if not configured)
-  limit_5h_usd: number | null;
-  limit_daily_usd: number | null;
-  daily_reset_mode: string | null;
-  daily_reset_time: string | null;
-  limit_weekly_usd: number | null;
-  limit_monthly_usd: number | null;
-  limit_total_usd: number | null;
-  // Current usage for each window
-  usage_5h_usd: number;
-  usage_daily_usd: number;
-  usage_weekly_usd: number;
-  usage_monthly_usd: number;
-  usage_total_usd: number;
-  // Window start timestamps (unix seconds) for UI display
-  window_5h_start_ts: number;
-  window_daily_start_ts: number;
-  window_weekly_start_ts: number;
-  window_monthly_start_ts: number;
-};
+const CLI_KEY_VALUES = ["claude", "codex", "gemini"] as const satisfies readonly CliKey[];
+
+export type ProviderLimitUsageRow = Override<
+  GeneratedProviderLimitUsageRow,
+  {
+    cli_key: CliKey;
+  }
+>;
+
+function toProviderLimitUsageRow(value: GeneratedProviderLimitUsageRow): ProviderLimitUsageRow {
+  return {
+    ...value,
+    cli_key: narrowGeneratedStringUnion(
+      value.cli_key,
+      CLI_KEY_VALUES,
+      "provider_limit_usage_v1.cli_key"
+    ),
+  };
+}
 
 export async function providerLimitUsageV1(cliKey?: CliKey | null) {
   return invokeGeneratedIpc<ProviderLimitUsageRow[]>({
@@ -38,9 +36,9 @@ export async function providerLimitUsageV1(cliKey?: CliKey | null) {
     args: {
       cliKey: cliKey ?? null,
     },
-    invoke: () =>
-      commands.providerLimitUsageV1(cliKey ?? null) as Promise<
-        GeneratedCommandResult<ProviderLimitUsageRow[]>
-      >,
+    invoke: async () =>
+      mapGeneratedCommandResponse(await commands.providerLimitUsageV1(cliKey ?? null), (rows) =>
+        rows.map(toProviderLimitUsageRow)
+      ),
   });
 }

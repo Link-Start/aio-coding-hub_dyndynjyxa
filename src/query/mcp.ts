@@ -47,19 +47,7 @@ export function useMcpServerUpsertMutation(workspaceId: number) {
       cwd: string | null;
       url: string | null;
       headers?: McpSecretPatchInput;
-    }) =>
-      mcpServerUpsert({
-        server_id: input.serverId,
-        server_key: input.serverKey,
-        name: input.name,
-        transport: input.transport,
-        command: input.command,
-        args: input.args,
-        env: input.env,
-        cwd: input.cwd,
-        url: input.url,
-        headers: input.headers,
-      }),
+    }) => mcpServerUpsert(input),
     onSuccess: (next) => {
       if (!next) return;
       queryClient.setQueryData<McpServerSummary[]>(mcpKeys.serversList(workspaceId), (cur) => {
@@ -78,8 +66,8 @@ export function useMcpServerSetEnabledMutation(workspaceId: number) {
   return useMutation({
     mutationFn: async (input: { serverId: number; enabled: boolean }) =>
       mcpServerSetEnabled({
-        workspace_id: workspaceId,
-        server_id: input.serverId,
+        workspaceId,
+        serverId: input.serverId,
         enabled: input.enabled,
       }),
     onSuccess: (next) => {
@@ -110,7 +98,7 @@ export function useMcpImportServersMutation(workspaceId: number) {
 
   return useMutation({
     mutationFn: async (servers: McpImportServer[]) =>
-      mcpImportServers({ workspace_id: workspaceId, servers }),
+      mcpImportServers({ workspaceId, servers }),
     onSuccess: (report) => {
       if (!report) return;
       queryClient.invalidateQueries({ queryKey: mcpKeys.serversList(workspaceId) });

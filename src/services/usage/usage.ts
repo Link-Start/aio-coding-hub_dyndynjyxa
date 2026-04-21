@@ -1,110 +1,53 @@
-import { commands } from "../../generated/bindings";
-import { invokeGeneratedIpc, type GeneratedCommandResult } from "../generatedIpc";
+import {
+  commands,
+  type UsageDayRow,
+  type UsageHourlyRow,
+  type UsageLeaderboardRow,
+  type UsageProviderCacheRateTrendRowV1,
+  type UsageProviderRow as GeneratedUsageProviderRow,
+  type UsageQueryParams as GeneratedUsageQueryParams,
+  type UsageSummary,
+} from "../../generated/bindings";
+import { invokeGeneratedIpc, mapGeneratedCommandResponse } from "../generatedIpc";
+import {
+  narrowGeneratedStringUnion,
+  type OptionalNullableGeneratedFields,
+  type Override,
+} from "../generatedTypeUtils";
 import type { CliKey } from "../providers/providers";
+
+const CLI_KEY_VALUES = ["claude", "codex", "gemini"] as const satisfies readonly CliKey[];
 
 export type UsageRange = "today" | "last7" | "last30" | "month" | "all";
 export type UsageScope = "cli" | "provider" | "model";
 export type UsagePeriod = "daily" | "weekly" | "monthly" | "allTime" | "custom";
 
-export type UsageSummary = {
-  requests_total: number;
-  requests_with_usage: number;
-  requests_success: number;
-  requests_failed: number;
-  cost_covered_success: number;
-  avg_duration_ms: number | null;
-  avg_ttfb_ms: number | null;
-  avg_output_tokens_per_second: number | null;
-  input_tokens: number;
-  output_tokens: number;
-  io_total_tokens: number;
-  total_tokens: number;
-  cache_read_input_tokens: number;
-  cache_creation_input_tokens: number;
-  cache_creation_5m_input_tokens: number;
-};
+export type UsageProviderRow = Override<
+  GeneratedUsageProviderRow,
+  {
+    cli_key: CliKey;
+  }
+>;
 
-export type UsageProviderRow = {
-  cli_key: CliKey;
-  provider_id: number;
-  provider_name: string;
-  requests_total: number;
-  requests_success: number;
-  requests_failed: number;
-  avg_duration_ms: number | null;
-  avg_ttfb_ms: number | null;
-  avg_output_tokens_per_second: number | null;
-  input_tokens: number;
-  output_tokens: number;
-  total_tokens: number;
-  cache_read_input_tokens: number;
-  cache_creation_input_tokens: number;
-  cache_creation_5m_input_tokens: number;
-};
+type UsageQueryInputV2 = Omit<OptionalNullableGeneratedFields<GeneratedUsageQueryParams>, "period">;
 
-export type UsageDayRow = {
-  day: string;
-  requests_total: number;
-  input_tokens: number;
-  output_tokens: number;
-  total_tokens: number;
-  cache_read_input_tokens: number;
-  cache_creation_input_tokens: number;
-  cache_creation_5m_input_tokens: number;
-};
-
-export type UsageHourlyRow = {
-  day: string;
-  hour: number;
-  requests_total: number;
-  requests_with_usage: number;
-  requests_success: number;
-  requests_failed: number;
-  total_tokens: number;
-};
-
-export type UsageProviderCacheRateTrendRowV1 = {
-  day: string;
-  hour: number | null;
-  key: string;
-  name: string;
-  denom_tokens: number;
-  cache_read_input_tokens: number;
-  requests_success: number;
-};
-
-export type UsageLeaderboardRow = {
-  key: string;
-  name: string;
-  requests_total: number;
-  requests_success: number;
-  requests_failed: number;
-  total_tokens: number;
-  io_total_tokens: number;
-  input_tokens: number;
-  output_tokens: number;
-  cache_creation_input_tokens: number;
-  cache_read_input_tokens: number;
-  avg_duration_ms: number | null;
-  avg_ttfb_ms: number | null;
-  avg_output_tokens_per_second: number | null;
-  cost_usd: number | null;
-};
-
-type UsageQueryInputV2 = {
-  startTs?: number | null;
-  endTs?: number | null;
-  cliKey?: CliKey | null;
-  providerId?: number | null;
-};
-
-function buildQueryParamsV2(period: UsagePeriod, input?: UsageQueryInputV2) {
+function buildQueryParamsV2(
+  period: UsagePeriod,
+  input?: UsageQueryInputV2
+): GeneratedUsageQueryParams {
   return {
     period,
     startTs: input?.startTs ?? null,
     endTs: input?.endTs ?? null,
     cliKey: input?.cliKey ?? null,
     providerId: input?.providerId ?? null,
+  };
+}
+
+function toUsageProviderRow(value: GeneratedUsageProviderRow): UsageProviderRow {
+  return {
+    ...value,
+    cli_key: narrowGeneratedStringUnion(value.cli_key, CLI_KEY_VALUES, "usage_provider_row.cli_key"),
   };
 }
 
@@ -116,10 +59,7 @@ export async function usageSummary(range: UsageRange, input?: { cliKey?: CliKey 
       range,
       cliKey: input?.cliKey ?? null,
     },
-    invoke: () =>
-      commands.usageSummary(range, input?.cliKey ?? null) as Promise<
-        GeneratedCommandResult<UsageSummary>
-      >,
+    invoke: () => commands.usageSummary(range, input?.cliKey ?? null),
   });
 }
 
@@ -135,10 +75,11 @@ export async function usageLeaderboardProvider(
       cliKey: input?.cliKey ?? null,
       limit: input?.limit,
     },
-    invoke: () =>
-      commands.usageLeaderboardProvider(range, input?.cliKey ?? null, input?.limit ?? null) as Promise<
-        GeneratedCommandResult<UsageProviderRow[]>
-      >,
+    invoke: async () =>
+      mapGeneratedCommandResponse(
+        await commands.usageLeaderboardProvider(range, input?.cliKey ?? null, input?.limit ?? null),
+        (rows) => rows.map(toUsageProviderRow)
+      ),
   });
 }
 
@@ -154,10 +95,7 @@ export async function usageLeaderboardDay(
       cliKey: input?.cliKey ?? null,
       limit: input?.limit,
     },
-    invoke: () =>
-      commands.usageLeaderboardDay(range, input?.cliKey ?? null, input?.limit ?? null) as Promise<
-        GeneratedCommandResult<UsageDayRow[]>
-      >,
+    invoke: () => commands.usageLeaderboardDay(range, input?.cliKey ?? null, input?.limit ?? null),
   });
 }
 
@@ -166,8 +104,7 @@ export async function usageHourlySeries(days: number) {
     title: "读取小时用量序列失败",
     cmd: "usage_hourly_series",
     args: { days },
-    invoke: () =>
-      commands.usageHourlySeries(days) as Promise<GeneratedCommandResult<UsageHourlyRow[]>>,
+    invoke: () => commands.usageHourlySeries(days),
   });
 }
 
@@ -179,8 +116,7 @@ export async function usageSummaryV2(period: UsagePeriod, input?: UsageQueryInpu
     args: {
       params,
     },
-    invoke: () =>
-      commands.usageSummaryV2(params as any) as Promise<GeneratedCommandResult<UsageSummary>>,
+    invoke: () => commands.usageSummaryV2(params),
   });
 }
 
@@ -198,10 +134,7 @@ export async function usageLeaderboardV2(
       params,
       limit: input?.limit,
     },
-    invoke: () =>
-      commands.usageLeaderboardV2(scope, params as any, input?.limit ?? null) as Promise<
-        GeneratedCommandResult<UsageLeaderboardRow[]>
-      >,
+    invoke: () => commands.usageLeaderboardV2(scope, params, input?.limit ?? null),
   });
 }
 
@@ -217,9 +150,14 @@ export async function usageProviderCacheRateTrendV1(
       params,
       limit: input?.limit,
     },
-    invoke: () =>
-      commands.usageProviderCacheRateTrendV1(params as any, input?.limit ?? null) as Promise<
-        GeneratedCommandResult<UsageProviderCacheRateTrendRowV1[]>
-      >,
+    invoke: () => commands.usageProviderCacheRateTrendV1(params, input?.limit ?? null),
   });
 }
+
+export type {
+  UsageDayRow,
+  UsageHourlyRow,
+  UsageLeaderboardRow,
+  UsageProviderCacheRateTrendRowV1,
+  UsageSummary,
+};

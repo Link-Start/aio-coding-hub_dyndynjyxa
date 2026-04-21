@@ -158,7 +158,7 @@ describe("pages/SessionsMessagesPage", () => {
 
     await waitFor(() => {
       expect(cliSessionsMessagesGet).toHaveBeenCalledWith(
-        expect.objectContaining({ from_end: false })
+        expect.objectContaining({ fromEnd: false })
       );
     });
 

@@ -369,8 +369,8 @@ describe("pages/SessionsProjectPage", () => {
     await waitFor(() => {
       expect(cliSessionsSessionDelete).toHaveBeenCalledWith({
         source: "claude",
-        file_paths: ["/f2.json"],
-        wsl_distro: undefined,
+        filePaths: ["/f2.json"],
+        wslDistro: undefined,
       });
     });
   });

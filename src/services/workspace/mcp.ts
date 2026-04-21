@@ -1,54 +1,69 @@
 import {
   commands,
-  type McpImportReport as GeneratedMcpImportReport,
+  type McpImportReport,
   type McpImportServer as GeneratedMcpImportServer,
   type McpParseResult as GeneratedMcpParseResult,
-  type McpServerSummaryView,
+  type McpSecretPatchInput as GeneratedMcpSecretPatchInput,
+  type McpServerSummaryView as GeneratedMcpServerSummaryView,
+  type McpServerUpsertInput as GeneratedMcpServerUpsertInput,
 } from "../../generated/bindings";
-import { invokeGeneratedIpc, type GeneratedCommandResult } from "../generatedIpc";
+import { invokeGeneratedIpc, mapGeneratedCommandResponse } from "../generatedIpc";
+import {
+  narrowGeneratedStringUnion,
+  type OptionalNullableGeneratedFields,
+  type Override,
+} from "../generatedTypeUtils";
 
-export type McpTransport = "stdio" | "http" | "sse";
+const MCP_TRANSPORT_VALUES = ["stdio", "http", "sse"] as const;
 
-export type McpServerSummary = Omit<McpServerSummaryView, "transport"> & {
-  transport: McpTransport;
-};
+export type McpTransport = (typeof MCP_TRANSPORT_VALUES)[number];
+
+export type McpServerSummary = Override<
+  GeneratedMcpServerSummaryView,
+  {
+    transport: McpTransport;
+  }
+>;
 
 export type McpSecretPatchInput =
-  | {
-      preserve_keys?: string[];
-      replace?: Record<string, string>;
-    }
+  | OptionalNullableGeneratedFields<GeneratedMcpSecretPatchInput>
   | Record<string, string>;
 
-export type McpServerUpsertInput = {
-  server_id?: number | null;
-  server_key: string;
-  name: string;
-  transport: McpTransport;
-  command?: string | null;
-  args?: string[];
-  env?: McpSecretPatchInput;
-  cwd?: string | null;
-  url?: string | null;
-  headers?: McpSecretPatchInput;
-};
+type McpServerUpsertTransportInput =
+  OptionalNullableGeneratedFields<GeneratedMcpServerUpsertInput>;
 
-export type McpImportServer = Omit<GeneratedMcpImportServer, "transport"> & {
-  transport: McpTransport;
-};
+export type McpServerUpsertInput = Override<
+  McpServerUpsertTransportInput,
+  {
+    transport: McpTransport;
+    env?: McpSecretPatchInput;
+    headers?: McpSecretPatchInput;
+  }
+>;
 
-export type McpParseResult = {
-  servers: McpImportServer[];
-};
+export type McpImportServer = Override<
+  GeneratedMcpImportServer,
+  {
+    transport: McpTransport;
+  }
+>;
 
-export type McpImportReport = GeneratedMcpImportReport;
+export type McpParseResult = Override<
+  GeneratedMcpParseResult,
+  {
+    servers: McpImportServer[];
+  }
+>;
 
-type NormalizedMcpSecretPatch = {
-  preserveKeys: string[];
-  replace: Record<string, string>;
-};
+type McpSecretPatchDraft = OptionalNullableGeneratedFields<GeneratedMcpSecretPatchInput>;
 
-function normalizeSecretPatchInput(input: McpSecretPatchInput | undefined): NormalizedMcpSecretPatch {
+function toMcpTransport(value: string, label: string): McpTransport {
+  return narrowGeneratedStringUnion(value, MCP_TRANSPORT_VALUES, label);
+}
+
+function normalizeSecretPatchInput(
+  input: McpSecretPatchInput | undefined
+): GeneratedMcpSecretPatchInput {
   if (!input) {
     return {
       preserveKeys: [],
@@ -56,46 +71,52 @@ function normalizeSecretPatchInput(input: McpSecretPatchInput | undefined): Norm
     };
   }
 
-  const maybePatch = input as {
-    preserve_keys?: unknown;
-    replace?: unknown;
-  };
+  const patchInput = input as McpSecretPatchDraft;
   const hasPatchShape =
-    Array.isArray(maybePatch.preserve_keys) ||
-    (maybePatch.replace != null &&
-      typeof maybePatch.replace === "object" &&
-      !Array.isArray(maybePatch.replace));
+    Array.isArray(patchInput.preserveKeys) ||
+    (patchInput.replace != null &&
+      typeof patchInput.replace === "object" &&
+      !Array.isArray(patchInput.replace));
 
   if (hasPatchShape) {
-    const patch = input as {
-      preserve_keys?: string[];
-      replace?: Record<string, string>;
-    };
     return {
-      preserveKeys: patch.preserve_keys ?? [],
-      replace: patch.replace ?? {},
+      preserveKeys: patchInput.preserveKeys ?? [],
+      replace: patchInput.replace ?? {},
     };
   }
 
   return {
     preserveKeys: [],
-    replace: input as Record<string, string>,
+    replace: input,
   };
 }
 
-function buildSafeSecretPatchLog(patch: NormalizedMcpSecretPatch) {
+function buildSafeSecretPatchLog(patch: GeneratedMcpSecretPatchInput) {
   return {
-    preserveKeys: patch.preserveKeys,
-    replaceKeys: Object.keys(patch.replace),
+    preserveKeys: patch.preserveKeys ?? [],
+    replaceKeys: Object.keys(patch.replace ?? {}),
   };
 }
 
-function asMcpServerSummary(value: McpServerSummaryView): McpServerSummary {
-  return value as McpServerSummary;
+function toMcpServerSummary(value: GeneratedMcpServerSummaryView): McpServerSummary {
+  return {
+    ...value,
+    transport: toMcpTransport(value.transport, "mcp_server.transport"),
+  };
 }
 
-function asMcpParseResult(value: GeneratedMcpParseResult): McpParseResult {
-  return value as McpParseResult;
+function toMcpImportServer(value: GeneratedMcpImportServer): McpImportServer {
+  return {
+    ...value,
+    transport: toMcpTransport(value.transport, "mcp_import_server.transport"),
+  };
+}
+
+function toMcpParseResult(value: GeneratedMcpParseResult): McpParseResult {
+  return {
+    ...value,
+    servers: value.servers.map(toMcpImportServer),
+  };
 }
 
 export async function mcpServersList(workspaceId: number) {
@@ -103,28 +124,19 @@ export async function mcpServersList(workspaceId: number) {
     title: "读取 MCP 服务列表失败",
     cmd: "mcp_servers_list",
     args: { input: { workspaceId } },
-    invoke: async () => {
-      const result = await commands.mcpServersList({ workspaceId });
-      if (result == null) {
-        return result as any;
-      }
-      if (result.status === "ok") {
-        return {
-          status: "ok" as const,
-          data: result.data.map(asMcpServerSummary),
-        };
-      }
-      return result;
-    },
+    invoke: async () =>
+      mapGeneratedCommandResponse(await commands.mcpServersList({ workspaceId }), (rows) =>
+        rows.map(toMcpServerSummary)
+      ),
   });
 }
 
 export async function mcpServerUpsert(input: McpServerUpsertInput) {
   const normalizedEnv = normalizeSecretPatchInput(input.env);
   const normalizedHeaders = normalizeSecretPatchInput(input.headers);
-  const payload = {
-    serverId: input.server_id ?? null,
-    serverKey: input.server_key,
+  const payload: GeneratedMcpServerUpsertInput = {
+    serverId: input.serverId ?? null,
+    serverKey: input.serverKey,
     name: input.name,
     transport: input.transport,
     command: input.command ?? null,
@@ -152,30 +164,19 @@ export async function mcpServerUpsert(input: McpServerUpsertInput) {
         headers: buildSafeSecretPatchLog(normalizedHeaders),
       },
     },
-    invoke: async () => {
-      const result = await commands.mcpServerUpsert(payload);
-      if (result == null) {
-        return result as any;
-      }
-      if (result.status === "ok") {
-        return {
-          status: "ok" as const,
-          data: asMcpServerSummary(result.data),
-        };
-      }
-      return result;
-    },
+    invoke: async () =>
+      mapGeneratedCommandResponse(await commands.mcpServerUpsert(payload), toMcpServerSummary),
   });
 }
 
 export async function mcpServerSetEnabled(input: {
-  workspace_id: number;
-  server_id: number;
+  workspaceId: number;
+  serverId: number;
   enabled: boolean;
 }) {
   const payload = {
-    workspaceId: input.workspace_id,
-    serverId: input.server_id,
+    workspaceId: input.workspaceId,
+    serverId: input.serverId,
     enabled: input.enabled,
   };
 
@@ -183,19 +184,8 @@ export async function mcpServerSetEnabled(input: {
     title: "更新 MCP 服务启用状态失败",
     cmd: "mcp_server_set_enabled",
     args: { input: payload },
-    invoke: async () => {
-      const result = await commands.mcpServerSetEnabled(payload);
-      if (result == null) {
-        return result as any;
-      }
-      if (result.status === "ok") {
-        return {
-          status: "ok" as const,
-          data: asMcpServerSummary(result.data),
-        };
-      }
-      return result;
-    },
+    invoke: async () =>
+      mapGeneratedCommandResponse(await commands.mcpServerSetEnabled(payload), toMcpServerSummary),
   });
 }
 
@@ -204,8 +194,7 @@ export async function mcpServerDelete(serverId: number) {
     title: "删除 MCP 服务失败",
     cmd: "mcp_server_delete",
     args: { input: { serverId } },
-    invoke: () =>
-      commands.mcpServerDelete({ serverId }) as Promise<GeneratedCommandResult<boolean>>,
+    invoke: () => commands.mcpServerDelete({ serverId }),
   });
 }
 
@@ -214,28 +203,17 @@ export async function mcpParseJson(jsonText: string) {
     title: "解析 MCP JSON 失败",
     cmd: "mcp_parse_json",
     args: { input: { jsonText } },
-    invoke: async () => {
-      const result = await commands.mcpParseJson({ jsonText });
-      if (result == null) {
-        return result as any;
-      }
-      if (result.status === "ok") {
-        return {
-          status: "ok" as const,
-          data: asMcpParseResult(result.data),
-        };
-      }
-      return result;
-    },
+    invoke: async () =>
+      mapGeneratedCommandResponse(await commands.mcpParseJson({ jsonText }), toMcpParseResult),
   });
 }
 
 export async function mcpImportServers(input: {
-  workspace_id: number;
+  workspaceId: number;
   servers: McpImportServer[];
 }) {
   const payload = {
-    workspaceId: input.workspace_id,
+    workspaceId: input.workspaceId,
     servers: input.servers,
   };
 
@@ -243,19 +221,17 @@ export async function mcpImportServers(input: {
     title: "导入 MCP 服务失败",
     cmd: "mcp_import_servers",
     args: { input: payload },
-    invoke: () =>
-      commands.mcpImportServers(payload) as Promise<GeneratedCommandResult<McpImportReport>>,
+    invoke: () => commands.mcpImportServers(payload),
   });
 }
 
-export async function mcpImportFromWorkspaceCli(workspace_id: number) {
+export async function mcpImportFromWorkspaceCli(workspaceId: number) {
   return invokeGeneratedIpc<McpImportReport>({
     title: "从工作区 CLI 导入 MCP 服务失败",
     cmd: "mcp_import_from_workspace_cli",
-    args: { input: { workspaceId: workspace_id } },
-    invoke: () =>
-      commands.mcpImportFromWorkspaceCli({
-        workspaceId: workspace_id,
-      }) as Promise<GeneratedCommandResult<McpImportReport>>,
+    args: { input: { workspaceId } },
+    invoke: () => commands.mcpImportFromWorkspaceCli({ workspaceId }),
   });
 }
+
+export type { McpImportReport };

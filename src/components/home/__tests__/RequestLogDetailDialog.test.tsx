@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RequestAttemptLog, RequestLogDetail } from "../../../services/gateway/requestLogs";
+import { createRequestLogDetail } from "../../../services/gateway/requestLogFixtures";
 import type { TraceSession } from "../../../services/gateway/traceStore";
 import { RequestLogDetailDialog } from "../RequestLogDetailDialog";
 
@@ -33,20 +34,14 @@ vi.mock("../../../services/gateway/traceStore", () => ({
 }));
 
 function createSelectedLog(overrides: Partial<RequestLogDetail> = {}): RequestLogDetail {
-  return {
-    id: 1,
-    trace_id: "trace-1",
-    cli_key: "claude",
+  const hasTimestampOverride = "created_at" in overrides || "created_at_ms" in overrides;
+  return createRequestLogDetail({
     method: "post",
-    path: "/v1/messages",
     query: "hello",
-    excluded_from_stats: false,
-    special_settings_json: null,
     status: 499,
     error_code: "GW_STREAM_ABORTED",
     duration_ms: 1234,
     ttfb_ms: 100,
-    attempts_json: "[]",
     input_tokens: 10,
     output_tokens: 20,
     total_tokens: 30,
@@ -62,10 +57,9 @@ function createSelectedLog(overrides: Partial<RequestLogDetail> = {}): RequestLo
     final_provider_source_name: "OpenAI Primary",
     cost_usd: 0.12,
     cost_multiplier: 1.25,
-    created_at_ms: null,
-    created_at: 1000,
+    ...(hasTimestampOverride ? {} : { created_at_ms: 1_000_000, created_at: 1000 }),
     ...overrides,
-  };
+  });
 }
 
 function setRequestLogQueryState(overrides: Partial<typeof requestLogQueryState> = {}) {
@@ -190,8 +184,8 @@ describe("home/RequestLogDetailDialog", () => {
         cache_creation_5m_input_tokens: null,
         cache_creation_1h_input_tokens: null,
         cost_usd: null,
-        final_provider_id: null,
-        final_provider_name: null,
+        final_provider_id: 0,
+        final_provider_name: "Unknown",
       }),
     });
     setTraceStoreState({ traces: [] });

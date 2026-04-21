@@ -7,6 +7,7 @@ import {
   requestLogsListAll,
   type RequestLogSummary,
 } from "../../services/gateway/requestLogs";
+import { createRequestLogSummary as createRequestLogSummaryFixture } from "../../services/gateway/requestLogFixtures";
 import { createQueryWrapper, createTestQueryClient } from "../../test/utils/reactQuery";
 import { setTauriRuntime } from "../../test/utils/tauriRuntime";
 import {
@@ -29,41 +30,14 @@ vi.mock("../../services/gateway/requestLogs", async () => {
   };
 });
 
-function makeRequestLogSummary(overrides: Partial<RequestLogSummary> = {}): RequestLogSummary {
-  return {
-    id: 1,
-    trace_id: "trace-1",
-    cli_key: "claude",
-    method: "POST",
-    path: "/v1/messages",
-    requested_model: "claude-3-7-sonnet",
-    status: 200,
-    error_code: null,
-    duration_ms: 100,
-    ttfb_ms: 50,
-    attempt_count: 1,
-    has_failover: false,
-    start_provider_id: 1,
-    start_provider_name: "Provider A",
-    final_provider_id: 1,
-    final_provider_name: "Provider A",
-    final_provider_source_id: null,
-    final_provider_source_name: null,
-    route: [],
-    session_reuse: false,
-    input_tokens: null,
-    output_tokens: null,
-    total_tokens: null,
-    cache_read_input_tokens: null,
-    cache_creation_input_tokens: null,
-    cache_creation_5m_input_tokens: null,
-    cache_creation_1h_input_tokens: null,
-    cost_usd: null,
-    cost_multiplier: 1,
-    created_at_ms: null,
-    created_at: 10,
+function makeRequestLogSummary(
+  overrides: Parameters<typeof createRequestLogSummaryFixture>[0] = {}
+): RequestLogSummary {
+  const hasTimestampOverride = "created_at" in overrides || "created_at_ms" in overrides;
+  return createRequestLogSummaryFixture({
+    ...(hasTimestampOverride ? {} : { created_at_ms: 10_000, created_at: 10 }),
     ...overrides,
-  };
+  });
 }
 
 describe("query/requestLogs", () => {

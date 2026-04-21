@@ -2,14 +2,13 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { RouteTooltipContent } from "../RouteTooltipContent";
 import type { RequestLogRouteHop } from "../../../services/gateway/requestLogs";
+import { createRequestLogRouteHop } from "../../../services/gateway/requestLogFixtures";
 
 function makeHop(overrides: Partial<RequestLogRouteHop> = {}): RequestLogRouteHop {
-  return {
-    provider_id: 1,
+  return createRequestLogRouteHop({
     provider_name: "TestProvider",
-    ok: true,
     ...overrides,
-  };
+  });
 }
 
 describe("RouteTooltipContent", () => {

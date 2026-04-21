@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { commands } from "../../../generated/bindings";
 import {
+  cliSessionsFolderLookupByIds,
   cliSessionsProjectsList,
   cliSessionsSessionsList,
   cliSessionsMessagesGet,
@@ -17,6 +18,10 @@ beforeEach(() => {
     data: { messages: [], total: 0, page: 0, page_size: 50, has_more: false },
   } as any);
   vi.spyOn(commands, "cliSessionsSessionDelete").mockResolvedValue({ status: "ok", data: [] } as any);
+  vi.spyOn(commands, "cliSessionsFolderLookupByIds").mockResolvedValue({
+    status: "ok",
+    data: [],
+  } as any);
 });
 
 describe("services/cli/cliSessions", () => {
@@ -69,10 +74,10 @@ describe("services/cli/cliSessions", () => {
     it("calls generated command with correct args", async () => {
       await cliSessionsMessagesGet({
         source: "claude",
-        file_path: "/path/to/file.json",
+        filePath: "/path/to/file.json",
         page: 0,
-        page_size: 50,
-        from_end: true,
+        pageSize: 50,
+        fromEnd: true,
       });
       expect(commands.cliSessionsMessagesGet).toHaveBeenCalledWith(
         "claude",
@@ -89,7 +94,7 @@ describe("services/cli/cliSessions", () => {
     it("calls generated command with correct args", async () => {
       await cliSessionsSessionDelete({
         source: "claude",
-        file_paths: ["/f1.json", "/f2.json"],
+        filePaths: ["/f1.json", "/f2.json"],
       });
       expect(commands.cliSessionsSessionDelete).toHaveBeenCalledWith(
         "claude",
@@ -101,12 +106,22 @@ describe("services/cli/cliSessions", () => {
     it("passes wsl_distro when provided", async () => {
       await cliSessionsSessionDelete({
         source: "codex",
-        file_paths: ["/f.json"],
-        wsl_distro: "Ubuntu",
+        filePaths: ["/f.json"],
+        wslDistro: "Ubuntu",
       });
       expect(commands.cliSessionsSessionDelete).toHaveBeenCalledWith(
         "codex",
         ["/f.json"],
+        "Ubuntu"
+      );
+    });
+  });
+
+  describe("cliSessionsFolderLookupByIds", () => {
+    it("passes generated lookup items without any-casts", async () => {
+      await cliSessionsFolderLookupByIds([{ source: "claude", session_id: "s1" }], "Ubuntu");
+      expect(commands.cliSessionsFolderLookupByIds).toHaveBeenCalledWith(
+        [{ source: "claude", session_id: "s1" }],
         "Ubuntu"
       );
     });

@@ -4,6 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { CliSessionsFolderLookupEntry } from "../../../services/cli/cliSessions";
 import type { RequestLogSummary } from "../../../services/gateway/requestLogs";
+import {
+  createRequestLogRouteHop,
+  createRequestLogSummary,
+} from "../../../services/gateway/requestLogFixtures";
 import type { TraceSession } from "../../../services/gateway/traceStore";
 import { HomeRequestLogsPanel } from "../HomeRequestLogsPanel";
 
@@ -16,6 +20,12 @@ const { useCliSessionsFolderLookupByIdsQueryMock } = vi.hoisted(() => ({
 vi.mock("../../../query/cliSessions", () => ({
   useCliSessionsFolderLookupByIdsQuery: useCliSessionsFolderLookupByIdsQueryMock,
 }));
+
+function makeRequestLogs(
+  items: Array<Parameters<typeof createRequestLogSummary>[0]>
+): RequestLogSummary[] {
+  return items.map((item) => createRequestLogSummary(item));
+}
 
 describe("components/home/HomeRequestLogsPanel", () => {
   afterEach(() => {
@@ -75,7 +85,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
       },
     ];
 
-    const requestLogs: RequestLogSummary[] = [
+    const requestLogs = makeRequestLogs([
       {
         id: 1,
         trace_id: "t1",
@@ -97,12 +107,12 @@ describe("components/home/HomeRequestLogsPanel", () => {
         final_provider_source_id: 7,
         final_provider_source_name: "OpenAI Primary",
         route: [
-          {
+          createRequestLogRouteHop({
             provider_id: 1,
             provider_name: "P1",
             ok: true,
             status: 200,
-          },
+          }),
         ],
         session_reuse: false,
         input_tokens: 10,
@@ -114,10 +124,9 @@ describe("components/home/HomeRequestLogsPanel", () => {
         cache_creation_1h_input_tokens: 0,
         cost_usd: 0.123456,
         cost_multiplier: 1,
-        created_at_ms: null,
         created_at: Math.floor(Date.now() / 1000),
       },
-    ];
+    ]);
 
     const onRefreshRequestLogs = vi.fn();
     const onSelectLogId = vi.fn();
@@ -182,7 +191,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
       },
     ];
 
-    const requestLogs: RequestLogSummary[] = [
+    const requestLogs = makeRequestLogs([
       {
         id: 1,
         trace_id: "t-log-claude",
@@ -211,10 +220,9 @@ describe("components/home/HomeRequestLogsPanel", () => {
         cache_creation_1h_input_tokens: null,
         cost_usd: null,
         cost_multiplier: 1,
-        created_at_ms: null,
         created_at: Math.floor(Date.now() / 1000),
       },
-    ];
+    ]);
 
     render(
       <MemoryRouter>
@@ -251,7 +259,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
       isLoading: false,
     });
 
-    const requestLogs: RequestLogSummary[] = [
+    const requestLogs = makeRequestLogs([
       {
         id: 21,
         trace_id: "t-folder-codex",
@@ -281,7 +289,6 @@ describe("components/home/HomeRequestLogsPanel", () => {
         cache_creation_1h_input_tokens: null,
         cost_usd: null,
         cost_multiplier: 1,
-        created_at_ms: null,
         created_at: Math.floor(Date.now() / 1000),
       },
       {
@@ -313,10 +320,9 @@ describe("components/home/HomeRequestLogsPanel", () => {
         cache_creation_1h_input_tokens: null,
         cost_usd: null,
         cost_multiplier: 1,
-        created_at_ms: null,
         created_at: Math.floor(Date.now() / 1000),
       },
-    ];
+    ]);
 
     render(
       <MemoryRouter>
@@ -351,7 +357,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
       isLoading: false,
     });
 
-    const requestLogs: RequestLogSummary[] = [
+    const requestLogs = makeRequestLogs([
       {
         id: 11,
         trace_id: "t-pending-claude",
@@ -381,10 +387,9 @@ describe("components/home/HomeRequestLogsPanel", () => {
         cache_creation_1h_input_tokens: null,
         cost_usd: null,
         cost_multiplier: 1,
-        created_at_ms: null,
         created_at: Math.floor(Date.now() / 1000),
       },
-    ];
+    ]);
 
     render(
       <MemoryRouter>
@@ -412,7 +417,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
 
   it("keeps in-progress request logs at the top while preserving time order for the rest", () => {
     const nowMs = Date.now();
-    const requestLogs: RequestLogSummary[] = [
+    const requestLogs = makeRequestLogs([
       {
         id: 21,
         trace_id: "t-completed-newer",
@@ -506,7 +511,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
         created_at_ms: nowMs - 20_000,
         created_at: Math.floor((nowMs - 20_000) / 1000),
       },
-    ];
+    ]);
 
     render(
       <MemoryRouter>
@@ -579,7 +584,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
       },
     ];
 
-    const requestLogs: RequestLogSummary[] = [
+    const requestLogs = makeRequestLogs([
       {
         id: 12,
         trace_id: "t-live-provider",
@@ -608,10 +613,9 @@ describe("components/home/HomeRequestLogsPanel", () => {
         cache_creation_1h_input_tokens: null,
         cost_usd: null,
         cost_multiplier: 1,
-        created_at_ms: null,
         created_at: Math.floor(Date.now() / 1000),
       },
-    ];
+    ]);
 
     render(
       <MemoryRouter>
@@ -667,7 +671,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
       } as any,
     ];
 
-    const requestLogs: RequestLogSummary[] = [
+    const requestLogs = makeRequestLogs([
       {
         id: 1,
         trace_id: "t1",
@@ -686,14 +690,14 @@ describe("components/home/HomeRequestLogsPanel", () => {
         final_provider_id: 0,
         final_provider_name: "Unknown",
         route: [
-          { provider_id: 1, provider_name: "P1", ok: true, status: 200 },
-          {
+          createRequestLogRouteHop({ provider_id: 1, provider_name: "P1", ok: true, status: 200 }),
+          createRequestLogRouteHop({
             provider_id: 2,
             provider_name: "Unknown",
             ok: false,
             status: null,
             error_code: "GW_UPSTREAM_TIMEOUT",
-          },
+          }),
         ],
         session_reuse: true,
         input_tokens: 123,
@@ -705,7 +709,6 @@ describe("components/home/HomeRequestLogsPanel", () => {
         cache_creation_1h_input_tokens: 0,
         cost_usd: 9.99,
         cost_multiplier: 1.5,
-        created_at_ms: null,
         created_at: Math.floor(nowMs / 1000),
       },
       {
@@ -736,10 +739,9 @@ describe("components/home/HomeRequestLogsPanel", () => {
         cache_creation_1h_input_tokens: null,
         cost_usd: 0,
         cost_multiplier: 1,
-        created_at_ms: null,
         created_at: Math.floor(nowMs / 1000),
       },
-    ];
+    ]);
 
     const onRefreshRequestLogs = vi.fn();
     const onSelectLogId = vi.fn();
@@ -795,7 +797,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
         <HomeRequestLogsPanel
           showCustomTooltip={true}
           traces={[]}
-          requestLogs={[
+          requestLogs={makeRequestLogs([
             {
               id: 9,
               trace_id: "t-free",
@@ -824,10 +826,9 @@ describe("components/home/HomeRequestLogsPanel", () => {
               cache_creation_1h_input_tokens: 0,
               cost_usd: 0,
               cost_multiplier: 0,
-              created_at_ms: null,
               created_at: Math.floor(Date.now() / 1000),
             },
-          ]}
+          ])}
           requestLogsLoading={false}
           requestLogsRefreshing={false}
           requestLogsAvailable={true}
@@ -866,7 +867,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
 
   it("shows plain 链路 when route exists without failover", () => {
     const onRefreshRequestLogs = vi.fn();
-    const requestLogs: RequestLogSummary[] = [
+    const requestLogs = makeRequestLogs([
       {
         id: 11,
         trace_id: "t11",
@@ -884,7 +885,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
         start_provider_name: "P1",
         final_provider_id: 1,
         final_provider_name: "P1",
-        route: [{ provider_id: 1, provider_name: "P1", ok: true, status: 200 }],
+        route: [createRequestLogRouteHop({ provider_id: 1, provider_name: "P1", ok: true, status: 200 })],
         session_reuse: false,
         input_tokens: 1,
         output_tokens: 2,
@@ -895,10 +896,9 @@ describe("components/home/HomeRequestLogsPanel", () => {
         cache_creation_1h_input_tokens: 0,
         cost_usd: 0.01,
         cost_multiplier: 1,
-        created_at_ms: null,
         created_at: Math.floor(Date.now() / 1000),
       },
-    ];
+    ]);
 
     render(
       <MemoryRouter>
@@ -999,7 +999,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
   it("renders rich tooltip with attempt counts for failover routes", async () => {
     const user = userEvent.setup();
     const nowMs = Date.now();
-    const requestLogs: RequestLogSummary[] = [
+    const requestLogs = makeRequestLogs([
       {
         id: 20,
         trace_id: "t20",
@@ -1018,7 +1018,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
         final_provider_id: 2,
         final_provider_name: "ProvB",
         route: [
-          {
+          createRequestLogRouteHop({
             provider_id: 1,
             provider_name: "ProvA",
             ok: false,
@@ -1027,14 +1027,14 @@ describe("components/home/HomeRequestLogsPanel", () => {
             error_code: "GW_UPSTREAM_5XX",
             decision: "failover",
             reason: "status=500",
-          },
-          {
+          }),
+          createRequestLogRouteHop({
             provider_id: 2,
             provider_name: "ProvB",
             ok: true,
             attempts: 1,
             status: 200,
-          },
+          }),
         ],
         session_reuse: false,
         input_tokens: 100,
@@ -1046,10 +1046,9 @@ describe("components/home/HomeRequestLogsPanel", () => {
         cache_creation_1h_input_tokens: 0,
         cost_usd: 0.05,
         cost_multiplier: 1,
-        created_at_ms: null,
         created_at: Math.floor(nowMs / 1000),
       },
-    ];
+    ]);
 
     render(
       <MemoryRouter>
@@ -1095,7 +1094,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
         <HomeRequestLogsPanel
           showCustomTooltip={false}
           traces={[]}
-          requestLogs={[
+          requestLogs={makeRequestLogs([
             {
               id: 31,
               trace_id: "t31",
@@ -1113,7 +1112,14 @@ describe("components/home/HomeRequestLogsPanel", () => {
               start_provider_name: "P1",
               final_provider_id: 1,
               final_provider_name: "P1",
-              route: [{ provider_id: 1, provider_name: "P1", ok: true, status: 200 }],
+              route: [
+                createRequestLogRouteHop({
+                  provider_id: 1,
+                  provider_name: "P1",
+                  ok: true,
+                  status: 200,
+                }),
+              ],
               session_reuse: true,
               input_tokens: 100,
               output_tokens: 200,
@@ -1124,10 +1130,9 @@ describe("components/home/HomeRequestLogsPanel", () => {
               cache_creation_1h_input_tokens: 0,
               cost_usd: 0.01,
               cost_multiplier: 1.5,
-              created_at_ms: null,
               created_at: Math.floor(Date.now() / 1000),
             },
-          ]}
+          ])}
           requestLogsLoading={false}
           requestLogsRefreshing={false}
           requestLogsAvailable={true}

@@ -26,8 +26,8 @@ export function resolveProviderLabel(
   id: number | null | undefined
 ): string | null {
   const trimmed = name?.trim();
-  if (trimmed) return trimmed;
-  if (typeof id === "number") return `#${id}`;
+  if (trimmed && trimmed !== "Unknown") return trimmed;
+  if (typeof id === "number" && id > 0) return `#${id}`;
   return null;
 }
 

@@ -2,10 +2,10 @@ import { formatUnknownError } from "../utils/errors";
 import { logToConsole } from "./consoleLog";
 
 export type GeneratedCommandResult<T> =
-  | { status: "ok"; data: T }
+  | { status: "ok"; data: T | null | undefined }
   | { status: "error"; error: unknown };
 
-export type GeneratedCommandResponse<T> = GeneratedCommandResult<T> | T;
+export type GeneratedCommandResponse<T> = GeneratedCommandResult<T> | T | null | undefined;
 
 type InvokeGeneratedIpcOptions<T> = {
   title: string;
@@ -79,6 +79,33 @@ function isGeneratedCommandResult<T>(value: unknown): value is GeneratedCommandR
   }
 
   return "data" in candidate || "error" in candidate;
+}
+
+export function mapGeneratedCommandResponse<TValue, TMapped>(
+  value: GeneratedCommandResponse<TValue>,
+  map: (value: TValue) => TMapped
+): GeneratedCommandResponse<TMapped> {
+  if (value == null) {
+    return value as GeneratedCommandResponse<TMapped>;
+  }
+
+  if (isGeneratedCommandResult<TValue>(value)) {
+    if (value.status === "error") {
+      return value;
+    }
+    if (value.data == null) {
+      return {
+        status: "ok",
+        data: value.data as TMapped | null | undefined,
+      };
+    }
+    return {
+      status: "ok",
+      data: map(value.data),
+    };
+  }
+
+  return map(value);
 }
 
 export async function invokeGeneratedIpc<T, Fallback = never>(

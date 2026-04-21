@@ -1,72 +1,96 @@
-import { commands } from "../../generated/bindings";
-import { invokeGeneratedIpc, type GeneratedCommandResult } from "../generatedIpc";
+import {
+  commands,
+  type CliSessionsDisplayContentBlock,
+  type CliSessionsDisplayMessage,
+  type CliSessionsFolderLookupEntry as GeneratedCliSessionsFolderLookupEntry,
+  type CliSessionsFolderLookupInput as GeneratedCliSessionsFolderLookupInput,
+  type CliSessionsPaginatedMessages,
+  type CliSessionsProjectSummary as GeneratedCliSessionsProjectSummary,
+  type CliSessionsSessionSummary as GeneratedCliSessionsSessionSummary,
+} from "../../generated/bindings";
+import { invokeGeneratedIpc, mapGeneratedCommandResponse } from "../generatedIpc";
+import { narrowGeneratedStringUnion, type Override } from "../generatedTypeUtils";
 
-export type CliSessionsSource = "claude" | "codex";
+const CLI_SESSION_SOURCE_VALUES = ["claude", "codex"] as const;
 
-export type CliSessionsProjectSummary = {
+export type CliSessionsSource = (typeof CLI_SESSION_SOURCE_VALUES)[number];
+
+export type CliSessionsProjectSummary = Override<
+  GeneratedCliSessionsProjectSummary,
+  {
+    source: CliSessionsSource;
+  }
+>;
+
+export type CliSessionsSessionSummary = Override<
+  GeneratedCliSessionsSessionSummary,
+  {
+    source: CliSessionsSource;
+  }
+>;
+
+export type CliSessionsFolderLookupInput = Override<
+  GeneratedCliSessionsFolderLookupInput,
+  {
+    source: CliSessionsSource;
+  }
+>;
+
+export type CliSessionsFolderLookupEntry = Override<
+  GeneratedCliSessionsFolderLookupEntry,
+  {
+    source: CliSessionsSource;
+  }
+>;
+
+type CliSessionsMessagesCommandArgs = Parameters<typeof commands.cliSessionsMessagesGet>;
+type CliSessionsSessionDeleteCommandArgs = Parameters<typeof commands.cliSessionsSessionDelete>;
+
+export type CliSessionsMessagesInput = {
   source: CliSessionsSource;
-  id: string;
-  display_path: string;
-  short_name: string;
-  session_count: number;
-  last_modified: number | null;
-  model_provider: string | null;
-  wsl_distro: string | null;
+  filePath: CliSessionsMessagesCommandArgs[1];
+  page: CliSessionsMessagesCommandArgs[2];
+  pageSize: CliSessionsMessagesCommandArgs[3];
+  fromEnd: CliSessionsMessagesCommandArgs[4];
+  wslDistro?: Exclude<CliSessionsMessagesCommandArgs[5], undefined>;
 };
 
-export type CliSessionsSessionSummary = {
+export type CliSessionsSessionDeleteInput = {
   source: CliSessionsSource;
-  session_id: string;
-  file_path: string;
-  first_prompt: string | null;
-  message_count: number;
-  created_at: number | null;
-  modified_at: number | null;
-  git_branch: string | null;
-  project_path: string | null;
-  is_sidechain: boolean | null;
-  cwd: string | null;
-  model_provider: string | null;
-  cli_version: string | null;
-  wsl_distro: string | null;
+  filePaths: CliSessionsSessionDeleteCommandArgs[1];
+  wslDistro?: Exclude<CliSessionsSessionDeleteCommandArgs[2], undefined>;
 };
 
-export type CliSessionsFolderLookupInput = {
-  source: CliSessionsSource;
-  session_id: string;
-};
+function toCliSessionsSource(value: string, label: string): CliSessionsSource {
+  return narrowGeneratedStringUnion(value, CLI_SESSION_SOURCE_VALUES, label);
+}
 
-export type CliSessionsFolderLookupEntry = {
-  source: CliSessionsSource;
-  session_id: string;
-  folder_name: string;
-  folder_path: string;
-};
+function toCliSessionsProjectSummary(
+  value: GeneratedCliSessionsProjectSummary
+): CliSessionsProjectSummary {
+  return {
+    ...value,
+    source: toCliSessionsSource(value.source, "cli_sessions_projects_list.source"),
+  };
+}
 
-export type CliSessionsDisplayContentBlock =
-  | { type: "text"; text: string }
-  | { type: "thinking"; thinking: string }
-  | { type: "tool_use"; id: string; name: string; input: string }
-  | { type: "tool_result"; tool_use_id: string; content: string; is_error: boolean }
-  | { type: "reasoning"; text: string }
-  | { type: "function_call"; name: string; arguments: string; call_id: string }
-  | { type: "function_call_output"; call_id: string; output: string };
+function toCliSessionsSessionSummary(
+  value: GeneratedCliSessionsSessionSummary
+): CliSessionsSessionSummary {
+  return {
+    ...value,
+    source: toCliSessionsSource(value.source, "cli_sessions_sessions_list.source"),
+  };
+}
 
-export type CliSessionsDisplayMessage = {
-  uuid: string | null;
-  role: string;
-  timestamp: string | null;
-  model: string | null;
-  content: CliSessionsDisplayContentBlock[];
-};
-
-export type CliSessionsPaginatedMessages = {
-  messages: CliSessionsDisplayMessage[];
-  total: number;
-  page: number;
-  page_size: number;
-  has_more: boolean;
-};
+function toCliSessionsFolderLookupEntry(
+  value: GeneratedCliSessionsFolderLookupEntry
+): CliSessionsFolderLookupEntry {
+  return {
+    ...value,
+    source: toCliSessionsSource(value.source, "cli_sessions_folder_lookup_by_ids.source"),
+  };
+}
 
 export async function cliSessionsProjectsList(source: CliSessionsSource, wslDistro?: string) {
   return invokeGeneratedIpc<CliSessionsProjectSummary[]>({
@@ -76,10 +100,10 @@ export async function cliSessionsProjectsList(source: CliSessionsSource, wslDist
       source,
       wslDistro: wslDistro ?? null,
     },
-    invoke: () =>
-      commands.cliSessionsProjectsList(source, wslDistro ?? null) as Promise<
-        GeneratedCommandResult<CliSessionsProjectSummary[]>
-      >,
+    invoke: async () =>
+      mapGeneratedCommandResponse(await commands.cliSessionsProjectsList(source, wslDistro ?? null), (rows) =>
+        rows.map(toCliSessionsProjectSummary)
+      ),
   });
 }
 
@@ -96,63 +120,49 @@ export async function cliSessionsSessionsList(
       projectId,
       wslDistro: wslDistro ?? null,
     },
-    invoke: () =>
-      commands.cliSessionsSessionsList(source, projectId, wslDistro ?? null) as Promise<
-        GeneratedCommandResult<CliSessionsSessionSummary[]>
-      >,
+    invoke: async () =>
+      mapGeneratedCommandResponse(
+        await commands.cliSessionsSessionsList(source, projectId, wslDistro ?? null),
+        (rows) => rows.map(toCliSessionsSessionSummary)
+      ),
   });
 }
 
-export async function cliSessionsMessagesGet(input: {
-  source: CliSessionsSource;
-  file_path: string;
-  page: number;
-  page_size: number;
-  from_end: boolean;
-  wsl_distro?: string;
-}) {
+export async function cliSessionsMessagesGet(input: CliSessionsMessagesInput) {
   return invokeGeneratedIpc<CliSessionsPaginatedMessages>({
     title: "读取会话消息失败",
     cmd: "cli_sessions_messages_get",
     args: {
       source: input.source,
-      filePath: input.file_path,
+      filePath: input.filePath,
       page: input.page,
-      pageSize: input.page_size,
-      fromEnd: input.from_end,
-      wslDistro: input.wsl_distro ?? null,
+      pageSize: input.pageSize,
+      fromEnd: input.fromEnd,
+      wslDistro: input.wslDistro ?? null,
     },
     invoke: () =>
       commands.cliSessionsMessagesGet(
         input.source,
-        input.file_path,
+        input.filePath,
         input.page,
-        input.page_size,
-        input.from_end,
-        input.wsl_distro ?? null
-      ) as Promise<GeneratedCommandResult<CliSessionsPaginatedMessages>>,
+        input.pageSize,
+        input.fromEnd,
+        input.wslDistro ?? null
+      ),
   });
 }
 
-export async function cliSessionsSessionDelete(input: {
-  source: CliSessionsSource;
-  file_paths: string[];
-  wsl_distro?: string;
-}) {
+export async function cliSessionsSessionDelete(input: CliSessionsSessionDeleteInput) {
   return invokeGeneratedIpc<string[]>({
     title: "删除会话失败",
     cmd: "cli_sessions_session_delete",
     args: {
       source: input.source,
-      filePaths: input.file_paths,
-      wslDistro: input.wsl_distro ?? null,
+      filePaths: input.filePaths,
+      wslDistro: input.wslDistro ?? null,
     },
     invoke: () =>
-      commands.cliSessionsSessionDelete(
-        input.source,
-        input.file_paths,
-        input.wsl_distro ?? null
-      ) as Promise<GeneratedCommandResult<string[]>>,
+      commands.cliSessionsSessionDelete(input.source, input.filePaths, input.wslDistro ?? null),
   });
 }
 
@@ -167,10 +177,10 @@ export async function cliSessionsFolderLookupByIds(
       items,
       wslDistro: wslDistro ?? null,
     },
-    invoke: () =>
-      commands.cliSessionsFolderLookupByIds(items as any, wslDistro ?? null) as Promise<
-        GeneratedCommandResult<CliSessionsFolderLookupEntry[]>
-      >,
+    invoke: async () =>
+      mapGeneratedCommandResponse(await commands.cliSessionsFolderLookupByIds(items, wslDistro ?? null), (rows) =>
+        rows.map(toCliSessionsFolderLookupEntry)
+      ),
   });
 }
 
@@ -207,3 +217,5 @@ export function escapeShellArg(arg: string): string {
   // The pattern '\'' ends the current quote, adds an escaped single quote, and starts a new quote
   return `'${arg.replace(/'/g, "'\\''")}'`;
 }
+
+export type { CliSessionsDisplayContentBlock, CliSessionsDisplayMessage, CliSessionsPaginatedMessages };

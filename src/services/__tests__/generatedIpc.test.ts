@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { invokeGeneratedIpc } from "../generatedIpc";
+import { invokeGeneratedIpc, mapGeneratedCommandResponse } from "../generatedIpc";
 import { logToConsole } from "../consoleLog";
 
 vi.mock("../consoleLog", async () => {
@@ -124,5 +124,16 @@ describe("services/generatedIpc", () => {
         fallback: "fallback-dir",
       })
     ).resolves.toBe("fallback-dir");
+  });
+
+  it("keeps ok envelopes with null data intact while mapping generated responses", () => {
+    expect(
+      mapGeneratedCommandResponse<string[], number[]>({ status: "ok", data: null }, (items) =>
+        items.map((item) => Number(item))
+      )
+    ).toEqual({
+      status: "ok",
+      data: null,
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { commands } from "../../../generated/bindings";
 import { logToConsole } from "../../consoleLog";
+import { createRequestLogDetail } from "../requestLogFixtures";
 import {
   requestAttemptLogsByTraceId,
   requestLogGet,
@@ -74,7 +75,7 @@ describe("services/gateway/requestLogs", () => {
     });
     vi.mocked(commands.requestLogGet).mockResolvedValueOnce({
       status: "ok",
-      data: { id: 1 } as any,
+      data: createRequestLogDetail(),
     });
     vi.mocked(commands.requestLogGetByTraceId).mockResolvedValueOnce({
       status: "ok",

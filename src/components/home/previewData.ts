@@ -3,6 +3,7 @@
 
 import { GatewayErrorCodes } from "../../constants/gatewayErrorCodes";
 import type { GatewayAttemptEvent } from "../../services/gateway/gatewayEvents";
+import { createRequestLogSummary } from "../../services/gateway/requestLogFixtures";
 import type { CliSessionsFolderLookupEntry } from "../../services/cli/cliSessions";
 import type { RequestLogSummary } from "../../services/gateway/requestLogs";
 import type { TraceSession } from "../../services/gateway/traceStore";
@@ -385,7 +386,7 @@ export function buildPreviewRequestLogs(
       created_at_ms: null,
       created_at: nowSec - 960,
     },
-  ];
+  ].map((item) => createRequestLogSummary(item));
 }
 
 export function buildPreviewTraces(nowMs = Date.now()): TraceSession[] {

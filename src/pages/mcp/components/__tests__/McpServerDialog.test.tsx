@@ -79,13 +79,13 @@ describe("pages/mcp/components/McpServerDialog", () => {
           command: "node",
           args: ["-y", "@foo/bar"],
           env: {
-            preserve_keys: [],
+            preserveKeys: [],
             replace: { FOO: "bar" },
           },
           cwd: null,
           url: null,
           headers: {
-            preserve_keys: [],
+            preserveKeys: [],
             replace: {},
           },
         })
@@ -157,12 +157,12 @@ describe("pages/mcp/components/McpServerDialog", () => {
           command: "node",
           cwd: "/tmp",
           env: {
-            preserve_keys: [],
+            preserveKeys: [],
             replace: { FOO: "bar" },
           },
           url: null,
           headers: {
-            preserve_keys: [],
+            preserveKeys: [],
             replace: {},
           },
         })
@@ -227,13 +227,13 @@ describe("pages/mcp/components/McpServerDialog", () => {
           command: null,
           args: [],
           env: {
-            preserve_keys: [],
+            preserveKeys: [],
             replace: {},
           },
           cwd: null,
           url: "https://example.com/mcp",
           headers: {
-            preserve_keys: [],
+            preserveKeys: [],
             replace: { Authorization: "Bearer y" },
           },
         })
@@ -304,13 +304,13 @@ describe("pages/mcp/components/McpServerDialog", () => {
           command: null,
           args: [],
           env: {
-            preserve_keys: [],
+            preserveKeys: [],
             replace: {},
           },
           cwd: null,
           url: "https://example.com/mcp",
           headers: {
-            preserve_keys: [],
+            preserveKeys: [],
             replace: { Authorization: "Bearer x" },
           },
         })
@@ -412,13 +412,13 @@ describe("pages/mcp/components/McpServerDialog", () => {
           command: "uvx",
           args: ["mcp-server-fetch"],
           env: {
-            preserve_keys: [],
+            preserveKeys: [],
             replace: { FOO: "bar" },
           },
           cwd: null,
           url: null,
           headers: {
-            preserve_keys: [],
+            preserveKeys: [],
             replace: {},
           },
         })

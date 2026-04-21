@@ -66,11 +66,11 @@ export function useCliSessionsMessagesInfiniteQuery(
     queryFn: ({ pageParam = 0 }) =>
       cliSessionsMessagesGet({
         source,
-        file_path: filePath,
+        filePath,
         page: pageParam,
-        page_size: 50,
-        from_end: fromEnd,
-        wsl_distro: wslDistro,
+        pageSize: 50,
+        fromEnd,
+        wslDistro,
       }),
     enabled: Boolean(filePath.trim()) && (options?.enabled ?? true),
     getNextPageParam: (lastPage) => (lastPage?.has_more ? lastPage.page + 1 : undefined),
@@ -90,8 +90,8 @@ export function useCliSessionsSessionDeleteMutation() {
     }) =>
       cliSessionsSessionDelete({
         source: input.source,
-        file_paths: input.filePaths,
-        wsl_distro: input.wslDistro,
+        filePaths: input.filePaths,
+        wslDistro: input.wslDistro,
       }),
     onSuccess: (failedList, input) => {
       if (!failedList) return;

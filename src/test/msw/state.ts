@@ -123,6 +123,7 @@ const DEFAULT_USAGE_SUMMARY: UsageSummary = {
   cache_read_input_tokens: 0,
   cache_creation_input_tokens: 0,
   cache_creation_5m_input_tokens: 0,
+  cache_creation_1h_input_tokens: 0,
 };
 
 let traceCounter = 0;

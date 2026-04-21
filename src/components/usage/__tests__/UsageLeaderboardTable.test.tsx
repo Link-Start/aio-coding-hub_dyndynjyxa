@@ -19,6 +19,7 @@ const SUMMARY: UsageSummary = {
   cache_read_input_tokens: 0,
   cache_creation_input_tokens: 0,
   cache_creation_5m_input_tokens: 0,
+  cache_creation_1h_input_tokens: 0,
 };
 
 const ROW_A: UsageLeaderboardRow = {

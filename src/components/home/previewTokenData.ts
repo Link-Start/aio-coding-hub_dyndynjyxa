@@ -246,5 +246,6 @@ export function buildPreviewTokenSummary(rows: UsageLeaderboardRow[]): UsageSumm
     cache_read_input_tokens: cacheReadTokens,
     cache_creation_input_tokens: cacheCreationTokens,
     cache_creation_5m_input_tokens: Math.round(cacheCreationTokens * 0.68),
+    cache_creation_1h_input_tokens: Math.round(cacheCreationTokens * 0.32),
   };
 }

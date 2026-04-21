@@ -115,7 +115,7 @@ describe("services/workspace/mcp", () => {
     expect(commands.mcpServersList).toHaveBeenNthCalledWith(1, { workspaceId: 7 });
 
     await mcpServerUpsert({
-      server_key: "fetch",
+      serverKey: "fetch",
       name: "Fetch",
       transport: "stdio",
     });
@@ -138,7 +138,7 @@ describe("services/workspace/mcp", () => {
       },
     });
 
-    await mcpServerSetEnabled({ workspace_id: 9, server_id: 2, enabled: false });
+    await mcpServerSetEnabled({ workspaceId: 9, serverId: 2, enabled: false });
     expect(commands.mcpServerSetEnabled).toHaveBeenCalledWith({
       workspaceId: 9,
       serverId: 2,
@@ -159,7 +159,7 @@ describe("services/workspace/mcp", () => {
     });
 
     await mcpImportServers({
-      workspace_id: 1,
+      workspaceId: 1,
       servers: [
         {
           server_key: "fetch",

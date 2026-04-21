@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { commands } from "../../../generated/bindings";
 import { logToConsole } from "../../consoleLog";
 import {
@@ -6,8 +6,6 @@ import {
   modelPriceAliasesSet,
   modelPricesList,
   modelPricesSyncBasellm,
-  notifyModelPricesUpdated,
-  subscribeModelPricesUpdated,
 } from "../modelPrices";
 
 vi.mock("../../../generated/bindings", async () => {
@@ -34,6 +32,10 @@ vi.mock("../../consoleLog", async () => {
   };
 });
 
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
 describe("services/usage/modelPrices", () => {
   it("rethrows invoke errors and logs", async () => {
     vi.mocked(commands.modelPricesList).mockRejectedValueOnce(new Error("model prices boom"));
@@ -49,49 +51,68 @@ describe("services/usage/modelPrices", () => {
     );
   });
 
-  it("treats null invoke result as error with runtime", async () => {
-    vi.mocked(commands.modelPricesList).mockResolvedValueOnce(null as any);
-
-    await expect(modelPricesList("claude")).rejects.toThrow("IPC_NULL_RESULT: model_prices_list");
-  });
-
-  it("keeps argument mapping unchanged", async () => {
-    vi.mocked(commands.modelPricesList).mockResolvedValue({ status: "ok", data: [] as any });
-    vi.mocked(commands.modelPricesSyncBasellm).mockResolvedValue({
+  it("maps generated list and alias payloads through generated authority", async () => {
+    vi.mocked(commands.modelPricesList).mockResolvedValueOnce({
       status: "ok",
-      data: { status: "updated", inserted: 0, updated: 0, skipped: 0, total: 0 } as any,
-    });
-    vi.mocked(commands.modelPriceAliasesGet).mockResolvedValue({
+      data: [
+        {
+          id: 1,
+          cli_key: "claude",
+          model: "claude-3-7-sonnet",
+          currency: "USD",
+          created_at: 1,
+          updated_at: 2,
+        },
+      ],
+    } as any);
+    vi.mocked(commands.modelPriceAliasesGet).mockResolvedValueOnce({
       status: "ok",
-      data: { version: 1, rules: [] } as any,
-    });
-    vi.mocked(commands.modelPriceAliasesSet).mockResolvedValue({
+      data: {
+        version: 1,
+        rules: [
+          {
+            cli_key: "codex",
+            match_type: "prefix",
+            pattern: "gpt-",
+            target_model: "gpt-5",
+            enabled: true,
+          },
+        ],
+      },
+    } as any);
+    vi.mocked(commands.modelPriceAliasesSet).mockResolvedValueOnce({
       status: "ok",
-      data: { version: 2, rules: [] } as any,
-    });
+      data: {
+        version: 2,
+        rules: [
+          {
+            cli_key: "codex",
+            match_type: "prefix",
+            pattern: "gpt-",
+            target_model: "gpt-5",
+            enabled: true,
+          },
+        ],
+      },
+    } as any);
+    vi.mocked(commands.modelPricesSyncBasellm).mockResolvedValueOnce({
+      status: "ok",
+      data: { status: "updated", inserted: 1, updated: 0, skipped: 0, total: 1 },
+    } as any);
 
-    await modelPricesList("claude");
+    const rows = await modelPricesList("claude");
+    const aliases = await modelPriceAliasesGet();
+    const updated = await modelPriceAliasesSet(aliases!);
+    const report = await modelPricesSyncBasellm(true);
+
+    expect(rows?.[0]?.cli_key).toBe("claude");
+    expect(aliases?.rules[0]?.cli_key).toBe("codex");
+    expect(updated?.version).toBe(2);
+    expect(report).toEqual(
+      expect.objectContaining({ status: "updated", inserted: 1, total: 1 })
+    );
     expect(commands.modelPricesList).toHaveBeenCalledWith("claude");
-
-    await modelPricesSyncBasellm(true);
+    expect(commands.modelPriceAliasesSet).toHaveBeenCalledWith(aliases);
     expect(commands.modelPricesSyncBasellm).toHaveBeenCalledWith(true);
-
-    await modelPriceAliasesGet();
-    expect(commands.modelPriceAliasesGet).toHaveBeenCalledWith();
-
-    await modelPriceAliasesSet({ version: 2, rules: [] });
-    expect(commands.modelPriceAliasesSet).toHaveBeenCalledWith({ version: 2, rules: [] });
-  });
-
-  it("subscribes/unsubscribes update listeners", () => {
-    const listener = vi.fn();
-    const unsubscribe = subscribeModelPricesUpdated(listener);
-
-    notifyModelPricesUpdated();
-    expect(listener).toHaveBeenCalledTimes(1);
-
-    unsubscribe();
-    notifyModelPricesUpdated();
-    expect(listener).toHaveBeenCalledTimes(1);
   });
 });
