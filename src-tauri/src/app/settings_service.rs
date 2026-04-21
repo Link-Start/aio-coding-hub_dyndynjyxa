@@ -79,16 +79,38 @@ pub(crate) struct SettingsUpdate {
     pub wsl_custom_host_address: Option<String>,
     pub codex_home_mode: Option<settings::CodexHomeMode>,
     pub codex_home_override: Option<String>,
+    #[serde(rename = "cx2CcFallbackModelOpus")]
+    #[specta(rename = "cx2CcFallbackModelOpus")]
     pub cx2cc_fallback_model_opus: Option<String>,
+    #[serde(rename = "cx2CcFallbackModelSonnet")]
+    #[specta(rename = "cx2CcFallbackModelSonnet")]
     pub cx2cc_fallback_model_sonnet: Option<String>,
+    #[serde(rename = "cx2CcFallbackModelHaiku")]
+    #[specta(rename = "cx2CcFallbackModelHaiku")]
     pub cx2cc_fallback_model_haiku: Option<String>,
+    #[serde(rename = "cx2CcFallbackModelMain")]
+    #[specta(rename = "cx2CcFallbackModelMain")]
     pub cx2cc_fallback_model_main: Option<String>,
+    #[serde(rename = "cx2CcModelReasoningEffort")]
+    #[specta(rename = "cx2CcModelReasoningEffort")]
     pub cx2cc_model_reasoning_effort: Option<String>,
+    #[serde(rename = "cx2CcServiceTier")]
+    #[specta(rename = "cx2CcServiceTier")]
     pub cx2cc_service_tier: Option<String>,
+    #[serde(rename = "cx2CcDisableResponseStorage")]
+    #[specta(rename = "cx2CcDisableResponseStorage")]
     pub cx2cc_disable_response_storage: Option<bool>,
+    #[serde(rename = "cx2CcEnableReasoningToThinking")]
+    #[specta(rename = "cx2CcEnableReasoningToThinking")]
     pub cx2cc_enable_reasoning_to_thinking: Option<bool>,
+    #[serde(rename = "cx2CcDropStopSequences")]
+    #[specta(rename = "cx2CcDropStopSequences")]
     pub cx2cc_drop_stop_sequences: Option<bool>,
+    #[serde(rename = "cx2CcCleanSchema")]
+    #[specta(rename = "cx2CcCleanSchema")]
     pub cx2cc_clean_schema: Option<bool>,
+    #[serde(rename = "cx2CcFilterBatchTool")]
+    #[specta(rename = "cx2CcFilterBatchTool")]
     pub cx2cc_filter_batch_tool: Option<bool>,
     pub upstream_proxy_enabled: Option<bool>,
     pub upstream_proxy_url: Option<String>,
@@ -963,4 +985,60 @@ pub(crate) async fn settings_codex_session_id_completion_set(
 #[cfg(windows)]
 async fn wsl_auto_sync_after_settings(app: &tauri::AppHandle) -> Result<(), String> {
     super::wsl::wsl_auto_sync_core(app).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_update_deserializes_cx2cc_fields_from_specta_keys() {
+        let json = serde_json::json!({
+            "preferredPort": 37123,
+            "autoStart": false,
+            "logRetentionDays": 30,
+            "failoverMaxAttemptsPerProvider": 5,
+            "failoverMaxProvidersToTry": 3,
+            "cx2CcFallbackModelOpus": "gpt-5",
+            "cx2CcFallbackModelSonnet": "gpt-4.1",
+            "cx2CcFallbackModelHaiku": "gpt-4.1-mini",
+            "cx2CcFallbackModelMain": "gpt-5.4",
+            "cx2CcModelReasoningEffort": "high",
+            "cx2CcServiceTier": "flex",
+            "cx2CcDisableResponseStorage": false,
+            "cx2CcEnableReasoningToThinking": true,
+            "cx2CcDropStopSequences": true,
+            "cx2CcCleanSchema": false,
+            "cx2CcFilterBatchTool": true
+        });
+
+        let update: SettingsUpdate = serde_json::from_value(json).expect("should deserialize");
+        assert_eq!(update.cx2cc_fallback_model_opus.as_deref(), Some("gpt-5"));
+        assert_eq!(update.cx2cc_fallback_model_sonnet.as_deref(), Some("gpt-4.1"));
+        assert_eq!(update.cx2cc_fallback_model_haiku.as_deref(), Some("gpt-4.1-mini"));
+        assert_eq!(update.cx2cc_fallback_model_main.as_deref(), Some("gpt-5.4"));
+        assert_eq!(update.cx2cc_model_reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(update.cx2cc_service_tier.as_deref(), Some("flex"));
+        assert_eq!(update.cx2cc_disable_response_storage, Some(false));
+        assert_eq!(update.cx2cc_enable_reasoning_to_thinking, Some(true));
+        assert_eq!(update.cx2cc_drop_stop_sequences, Some(true));
+        assert_eq!(update.cx2cc_clean_schema, Some(false));
+        assert_eq!(update.cx2cc_filter_batch_tool, Some(true));
+    }
+
+    #[test]
+    fn settings_update_cx2cc_fields_default_to_none_when_absent() {
+        let json = serde_json::json!({
+            "preferredPort": 37123,
+            "autoStart": false,
+            "logRetentionDays": 30,
+            "failoverMaxAttemptsPerProvider": 5,
+            "failoverMaxProvidersToTry": 3
+        });
+
+        let update: SettingsUpdate = serde_json::from_value(json).expect("should deserialize");
+        assert!(update.cx2cc_model_reasoning_effort.is_none());
+        assert!(update.cx2cc_fallback_model_opus.is_none());
+        assert!(update.cx2cc_filter_batch_tool.is_none());
+    }
 }
