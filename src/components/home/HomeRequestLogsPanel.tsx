@@ -41,9 +41,11 @@ import {
   buildRequestRouteMeta,
   computeEffectiveInputTokens,
   computeStatusBadge,
+  FastModeBadge,
   FolderBadge,
   FreeBadge,
   getErrorCodeLabel,
+  hasPriorityServiceTierSpecialSetting,
   resolveLiveTraceDurationMs,
   resolveLiveTraceProvider,
   SessionReuseBadge,
@@ -233,6 +235,11 @@ const RequestLogCard = memo(function RequestLogCard({
     Number.isFinite(costMultiplier) && costMultiplier >= 0 && Math.abs(costMultiplier - 1) > 0.0001;
   const costMultiplierText = isFree ? "免费" : `x${costMultiplier.toFixed(2)}`;
   const costUsdText = formatUsd(log.cost_usd);
+
+  // Codex fast mode (priority service tier) detection
+  const isPriorityServiceTier =
+    log.cli_key === "codex" &&
+    hasPriorityServiceTierSpecialSetting(log.special_settings_json);
 
   const cacheWrite = (() => {
     // 优先展示有值的 TTL 桶；若都为 0，则仍展示 0 而不是 "—"。
@@ -471,6 +478,9 @@ const RequestLogCard = memo(function RequestLogCard({
                   <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
                     {costUsdText}
                   </span>
+                  {isPriorityServiceTier && (
+                    <FastModeBadge showCustomTooltip={showCustomTooltip} />
+                  )}
                 </div>
 
                 <div className="flex items-center gap-1 h-4" title="Output Tokens">

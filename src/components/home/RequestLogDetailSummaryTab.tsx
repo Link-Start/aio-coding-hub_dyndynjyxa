@@ -13,6 +13,8 @@ import { RequestLogErrorObservationCard } from "./RequestLogErrorObservationCard
 import {
   buildRequestLogAuditMeta,
   computeStatusBadge,
+  FastModeBadge,
+  hasPriorityServiceTierSpecialSetting,
 } from "./HomeLogShared";
 
 export type RequestLogDetailSummaryTabProps = {
@@ -35,6 +37,9 @@ export function RequestLogDetailSummaryTab({
   attemptCount: _attemptCount,
 }: RequestLogDetailSummaryTabProps) {
   const auditMeta = buildRequestLogAuditMeta(selectedLog);
+  const isPriorityServiceTier =
+    selectedLog.cli_key === "codex" &&
+    hasPriorityServiceTierSpecialSetting(selectedLog.special_settings_json);
 
   return (
     <div className="space-y-3">
@@ -45,9 +50,7 @@ export function RequestLogDetailSummaryTab({
       {auditMeta && auditMeta.tags.length > 0 ? (
         <Card padding="sm">
           <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              审计语义
-            </div>
+            <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">审计语义</div>
             <div className="flex flex-wrap items-center gap-2">
               {auditMeta.tags.map((tag) => (
                 <span
@@ -72,17 +75,18 @@ export function RequestLogDetailSummaryTab({
       {hasTokens ? (
         <Card padding="sm">
           <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              关键指标
+            <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">关键指标</div>
+            <div className="flex flex-wrap items-center gap-2">
+              {isPriorityServiceTier ? <FastModeBadge showCustomTooltip={false} /> : null}
+              {statusBadge ? (
+                <span
+                  className={cn("rounded-full px-2.5 py-1 text-xs font-medium", statusBadge.tone)}
+                  title={statusBadge.title}
+                >
+                  {statusBadge.text}
+                </span>
+              ) : null}
             </div>
-            {statusBadge ? (
-              <span
-                className={cn("rounded-full px-2.5 py-1 text-xs font-medium", statusBadge.tone)}
-                title={statusBadge.title}
-              >
-                {statusBadge.text}
-              </span>
-            ) : null}
           </div>
 
           <div className="mt-3 grid gap-2 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
@@ -110,6 +114,10 @@ export function RequestLogDetailSummaryTab({
               })()}
             />
             <MetricCard label="花费" value={formatUsd(selectedLog.cost_usd)} />
+            <MetricCard
+              label="费用系数"
+              value={formatCostMultiplier(selectedLog.cost_multiplier)}
+            />
           </div>
         </Card>
       ) : null}
@@ -132,6 +140,11 @@ function MetricCard({
       </div>
     </div>
   );
+}
+
+function formatCostMultiplier(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "—";
+  return value === 0 ? "免费" : `x${value.toFixed(2)}`;
 }
 
 function resolveCacheWriteValue(selectedLog: RequestLogDetail) {

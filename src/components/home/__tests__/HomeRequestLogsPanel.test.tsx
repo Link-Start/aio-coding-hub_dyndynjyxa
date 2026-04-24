@@ -1104,6 +1104,17 @@ describe("components/home/HomeRequestLogsPanel", () => {
               requested_model: "gpt-5.4",
               status: 200,
               error_code: "GW_STREAM_ABORTED",
+              special_settings_json: JSON.stringify([
+                { type: "client_abort", scope: "stream" },
+                {
+                  type: "codex_service_tier_result",
+                  requestedServiceTier: "priority",
+                  actualServiceTier: "priority",
+                  billingSourcePreference: "actual",
+                  resolvedFrom: "actual",
+                  effectivePriority: true,
+                },
+              ]),
               duration_ms: 3200,
               ttfb_ms: 600,
               attempt_count: 1,
@@ -1149,10 +1160,13 @@ describe("components/home/HomeRequestLogsPanel", () => {
     expect(screen.queryByText("3.20s")).not.toBeInTheDocument();
     expect(screen.queryByText("输入")).not.toBeInTheDocument();
     expect(screen.getByText("会话复用")).toBeInTheDocument();
+    expect(screen.queryByText("客户端中断")).not.toBeInTheDocument();
+    expect(screen.queryByText("fast")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("switch", { name: "最近使用记录简洁模式" }));
 
     expect(screen.getByText("输入")).toBeInTheDocument();
     expect(screen.getAllByText("P1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("fast")).toHaveLength(1);
   });
 });

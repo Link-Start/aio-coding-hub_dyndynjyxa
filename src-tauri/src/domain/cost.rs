@@ -238,6 +238,13 @@ fn finalize_i64(cost_femto: i128) -> Option<i64> {
     Some(cost_femto as i64)
 }
 
+/// Options for cost calculation.
+#[derive(Debug, Clone, Default)]
+pub struct CostCalculationOptions {
+    /// Whether priority service tier pricing should be applied (Codex fast mode).
+    pub priority_service_tier_applied: bool,
+}
+
 pub fn calculate_cost_usd_femto(
     usage: &CostUsage,
     price_json: &str,
@@ -245,18 +252,60 @@ pub fn calculate_cost_usd_femto(
     cli_key: &str,
     model: &str,
 ) -> Option<i64> {
+    calculate_cost_usd_femto_with_options(
+        usage,
+        price_json,
+        multiplier,
+        cli_key,
+        model,
+        &CostCalculationOptions::default(),
+    )
+}
+
+pub fn calculate_cost_usd_femto_with_options(
+    usage: &CostUsage,
+    price_json: &str,
+    multiplier: f64,
+    cli_key: &str,
+    model: &str,
+    options: &CostCalculationOptions,
+) -> Option<i64> {
     let parsed: Value = serde_json::from_str(price_json).ok()?;
     let obj = parsed.as_object()?;
 
-    let input_cost = get_femto_from_any(
-        obj,
-        &["input_cost_per_token", "input_cost_per_cached_token"],
-    )
+    // If priority service tier is applied, prefer priority pricing fields
+    let input_cost = if options.priority_service_tier_applied {
+        get_femto_from_any(
+            obj,
+            &[
+                "input_cost_per_token_priority",
+                "input_cost_per_token",
+                "input_cost_per_cached_token",
+            ],
+        )
+    } else {
+        get_femto_from_any(
+            obj,
+            &["input_cost_per_token", "input_cost_per_cached_token"],
+        )
+    }
     .unwrap_or(0);
-    let output_cost = get_femto_from_any(
-        obj,
-        &["output_cost_per_token", "output_cost_per_cached_token"],
-    )
+
+    let output_cost = if options.priority_service_tier_applied {
+        get_femto_from_any(
+            obj,
+            &[
+                "output_cost_per_token_priority",
+                "output_cost_per_token",
+                "output_cost_per_cached_token",
+            ],
+        )
+    } else {
+        get_femto_from_any(
+            obj,
+            &["output_cost_per_token", "output_cost_per_cached_token"],
+        )
+    }
     .unwrap_or(0);
 
     let input_cost_above_200k = get_femto(obj, "input_cost_per_token_above_200k_tokens");

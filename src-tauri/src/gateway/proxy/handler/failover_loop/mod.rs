@@ -6,6 +6,7 @@ mod attempt_record;
 mod claude_metadata_user_id_injection;
 mod claude_model_mapping;
 mod codex_chatgpt;
+mod codex_service_tier;
 mod codex_session_id_completion;
 mod context;
 mod cx2cc_preparation;

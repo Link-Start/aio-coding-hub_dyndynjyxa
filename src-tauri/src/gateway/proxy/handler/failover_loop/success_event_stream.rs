@@ -269,6 +269,13 @@ pub(super) async fn handle_success_event_stream(
         )
         .await;
 
+        codex_service_tier::append_result_if_detected(
+            common.cli_key.as_str(),
+            common.introspection_body.as_slice(),
+            None,
+            &common.special_settings,
+        );
+
         let ctx = build_stream_finalize_ctx(
             &common,
             &provider_ctx_owned,

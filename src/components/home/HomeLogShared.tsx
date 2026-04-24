@@ -23,6 +23,7 @@ const SESSION_REUSE_TOOLTIP =
 type RequestLogAuditInput = {
   cli_key: CliKey | string;
   path: string;
+  status?: number | null;
   excluded_from_stats?: boolean | null;
   special_settings_json?: string | null;
   error_code?: string | null;
@@ -66,6 +67,55 @@ function isParsedRequestLogSpecialSetting(value: unknown): value is ParsedReques
   return typeof value === "object" && value !== null;
 }
 
+type CodexServiceTierResultSetting = {
+  type: "codex_service_tier_result";
+  requestedServiceTier?: string | null;
+  actualServiceTier?: string | null;
+  billingSourcePreference?: string | null;
+  resolvedFrom?: string | null;
+  effectivePriority?: boolean;
+};
+
+function isCodexServiceTierResultSetting(
+  value: unknown
+): value is CodexServiceTierResultSetting {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).type === "codex_service_tier_result"
+  );
+}
+
+/**
+ * Check if the request has priority service tier applied (Codex fast mode).
+ */
+export function hasPriorityServiceTierSpecialSetting(
+  specialSettingsJson: string | null | undefined
+): boolean {
+  if (!specialSettingsJson) return false;
+
+  try {
+    const settings = JSON.parse(specialSettingsJson) as unknown;
+    if (!Array.isArray(settings)) return false;
+
+    const codexTierSetting = [...settings].reverse().find(isCodexServiceTierResultSetting);
+    if (!codexTierSetting) return false;
+
+    // Legacy compatibility: if no billingSourcePreference, check actualServiceTier
+    if (
+      codexTierSetting.billingSourcePreference == null &&
+      codexTierSetting.resolvedFrom == null &&
+      codexTierSetting.actualServiceTier != null
+    ) {
+      return codexTierSetting.actualServiceTier === "priority";
+    }
+
+    return codexTierSetting.effectivePriority === true;
+  } catch {
+    return false;
+  }
+}
+
 function auditTag(label: string, className: string, title?: string): RequestLogAuditTag {
   return { label, className, title };
 }
@@ -75,9 +125,11 @@ export function buildRequestLogAuditMeta(log: RequestLogAuditInput): RequestLogA
   const settingTypes = new Set(settings.map((item) => item.type).filter(Boolean));
   const isWarmupIntercept = settingTypes.has("warmup_intercept");
   const isCliProxyGuard = settingTypes.has("cli_proxy_guard");
+  const isSuccessful = typeof log.status === "number" && log.status >= 200 && log.status < 300;
   const isClientAbort =
-    !!(log.error_code && CLIENT_ABORT_ERROR_CODES.has(log.error_code)) ||
-    settingTypes.has("client_abort");
+    !isSuccessful &&
+    (!!(log.error_code && CLIENT_ABORT_ERROR_CODES.has(log.error_code)) ||
+      settingTypes.has("client_abort"));
   const excludedFromStats = !!log.excluded_from_stats;
 
   const tags: RequestLogAuditTag[] = [];
@@ -197,6 +249,23 @@ export function FreeBadge() {
   return (
     <span className="inline-flex shrink-0 items-center whitespace-nowrap rounded-md bg-emerald-50/80 px-2 py-0.5 text-[11px] font-semibold text-emerald-600 ring-1 ring-inset ring-emerald-500/10 dark:bg-emerald-500/15 dark:text-emerald-300 dark:ring-emerald-400/20">
       免费
+    </span>
+  );
+}
+
+const FAST_MODE_TOOLTIP = "Codex 优先服务层 (fast mode) - 使用更高优先级资源，费率更高";
+
+export function FastModeBadge({ showCustomTooltip }: { showCustomTooltip: boolean }) {
+  const className =
+    "inline-flex shrink-0 items-center whitespace-nowrap rounded-md bg-orange-50/80 px-2 py-0.5 text-[11px] font-semibold text-orange-600 ring-1 ring-inset ring-orange-500/10 dark:bg-orange-500/15 dark:text-orange-300 dark:ring-orange-400/20 cursor-help";
+
+  return showCustomTooltip ? (
+    <Tooltip content={FAST_MODE_TOOLTIP}>
+      <span className={className}>fast</span>
+    </Tooltip>
+  ) : (
+    <span className={className} title={FAST_MODE_TOOLTIP}>
+      fast
     </span>
   );
 }

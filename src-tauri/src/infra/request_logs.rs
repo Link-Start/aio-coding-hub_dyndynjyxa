@@ -184,6 +184,45 @@ struct EffectiveCostBasis {
     model: String,
 }
 
+/// Parse `effectivePriority` from `codex_service_tier_result` special setting.
+fn parse_effective_priority(special_settings_json: Option<&str>) -> bool {
+    let raw = match special_settings_json {
+        Some(s) => s.trim(),
+        None => return false,
+    };
+    if raw.is_empty() {
+        return false;
+    }
+
+    let settings: Vec<Value> = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    for setting in settings.iter().rev() {
+        let Some(obj) = setting.as_object() else {
+            continue;
+        };
+        if obj.get("type").and_then(Value::as_str) != Some("codex_service_tier_result") {
+            continue;
+        }
+
+        // Check effectivePriority field
+        if let Some(effective) = obj.get("effectivePriority").and_then(Value::as_bool) {
+            return effective;
+        }
+
+        // Legacy compatibility: if no effectivePriority, check actualServiceTier
+        if obj.get("billingSourcePreference").is_none() && obj.get("resolvedFrom").is_none() {
+            if let Some(actual) = obj.get("actualServiceTier").and_then(Value::as_str) {
+                return actual == "priority";
+            }
+        }
+    }
+
+    false
+}
+
 pub(crate) fn parse_cx2cc_cost_basis(
     special_settings_json: Option<&str>,
 ) -> Option<(String, String)> {
@@ -491,13 +530,22 @@ fn insert_batch_once(
                             }
 
                             match price_json {
-                                Some(price_json) => cost::calculate_cost_usd_femto(
-                                    &usage,
-                                    &price_json,
-                                    cost_multiplier,
-                                    priced_cli_key,
-                                    priced_model,
-                                ),
+                                Some(price_json) => {
+                                    let priority_applied = parse_effective_priority(
+                                        item.special_settings_json.as_deref(),
+                                    );
+                                    let options = cost::CostCalculationOptions {
+                                        priority_service_tier_applied: priority_applied,
+                                    };
+                                    cost::calculate_cost_usd_femto_with_options(
+                                        &usage,
+                                        &price_json,
+                                        cost_multiplier,
+                                        priced_cli_key,
+                                        priced_model,
+                                        &options,
+                                    )
+                                }
                                 None => None,
                             }
                         }

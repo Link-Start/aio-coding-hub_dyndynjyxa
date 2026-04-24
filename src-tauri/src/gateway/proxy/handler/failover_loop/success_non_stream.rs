@@ -347,6 +347,13 @@ pub(super) async fn handle_success_non_stream(
                 )
                 .await;
 
+                codex_service_tier::append_result_if_detected(
+                    common.cli_key.as_str(),
+                    common.introspection_body.as_slice(),
+                    None,
+                    &common.special_settings,
+                );
+
                 let ctx = build_stream_finalize_ctx(
                     &common,
                     &provider_ctx_owned,
@@ -427,6 +434,13 @@ pub(super) async fn handle_success_non_stream(
                     Some(status.as_u16()),
                 )
                 .await;
+
+                codex_service_tier::append_result_if_detected(
+                    common.cli_key.as_str(),
+                    common.introspection_body.as_slice(),
+                    None,
+                    &common.special_settings,
+                );
 
                 let ctx = build_stream_finalize_ctx(
                     &common,
@@ -809,6 +823,13 @@ pub(super) async fn handle_success_non_stream(
         }
         body_bytes = outcome.body;
     }
+
+    codex_service_tier::append_result_if_detected(
+        common.cli_key.as_str(),
+        common.introspection_body.as_slice(),
+        Some(body_bytes.as_ref()),
+        &common.special_settings,
+    );
 
     let usage = usage::parse_usage_from_json_or_sse_bytes(common.cli_key.as_str(), &body_bytes);
     let usage_metrics = usage.as_ref().map(|u| u.metrics.clone());

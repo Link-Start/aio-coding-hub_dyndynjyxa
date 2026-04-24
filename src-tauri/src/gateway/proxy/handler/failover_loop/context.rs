@@ -138,6 +138,7 @@ pub(super) struct CommonCtxOwned<'a> {
     pub(super) enable_response_fixer: bool,
     pub(super) response_fixer_stream_config: response_fixer::ResponseFixerConfig,
     pub(super) response_fixer_non_stream_config: response_fixer::ResponseFixerConfig,
+    pub(super) introspection_body: Vec<u8>,
 }
 
 impl<'a> From<CommonCtx<'a>> for CommonCtxOwned<'a> {
@@ -167,6 +168,7 @@ impl<'a> From<CommonCtx<'a>> for CommonCtxOwned<'a> {
             enable_response_fixer: ctx.enable_response_fixer,
             response_fixer_stream_config: ctx.response_fixer_stream_config,
             response_fixer_non_stream_config: ctx.response_fixer_non_stream_config,
+            introspection_body: ctx.introspection_body.to_vec(),
         }
     }
 }

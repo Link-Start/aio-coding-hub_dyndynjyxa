@@ -123,9 +123,35 @@ describe("home/RequestLogDetailDialog", () => {
     expect(screen.getByText("TTFB")).toBeInTheDocument();
     expect(screen.getByText("速率")).toBeInTheDocument();
     expect(screen.getByText("花费")).toBeInTheDocument();
+    expectMetricValue("费用系数", "x1.25");
 
     // Raw data not visible on summary tab
     expect(screen.queryByText(/usage_json/)).not.toBeInTheDocument();
+  });
+
+  it("shows Codex fast mode badge on the summary tab", () => {
+    setRequestLogQueryState({
+      selectedLog: createSelectedLog({
+        cli_key: "codex",
+        special_settings_json: JSON.stringify([
+          {
+            type: "codex_service_tier_result",
+            requestedServiceTier: "priority",
+            actualServiceTier: "priority",
+            billingSourcePreference: "actual",
+            resolvedFrom: "actual",
+            effectivePriority: true,
+          },
+        ]),
+        cost_multiplier: 1.5,
+      }),
+    });
+    setTraceStoreState({ traces: [] });
+
+    render(<RequestLogDetailDialog selectedLogId={1} onSelectLogId={vi.fn()} />);
+
+    expect(screen.getByText("fast")).toBeInTheDocument();
+    expectMetricValue("费用系数", "x1.50");
   });
 
   it("falls back to raw usage_json when JSON parsing fails without rendering raw json section", () => {
@@ -288,9 +314,7 @@ describe("home/RequestLogDetailDialog", () => {
     // (parsedJson.errorCode takes priority over gatewayErrorCode)
     expect(screen.getByText("上游服务返回服务端错误 (5xx)")).toBeInTheDocument();
     // The suggestion text should be present
-    expect(
-      screen.getByText(/Provider 内部错误/)
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Provider 内部错误/)).toBeInTheDocument();
   });
 
   it("uses live trace provider and elapsed duration for in-progress logs", () => {
