@@ -11,6 +11,7 @@ import type { CliKey } from "../../services/providers/providers";
 import type { RequestLogRouteHop } from "../../services/gateway/requestLogs";
 import type { TraceSession } from "../../services/gateway/traceStore";
 import { Tooltip } from "../../ui/Tooltip";
+import { computeEffectiveInputTokens as computeSharedEffectiveInputTokens } from "../../utils/cacheRateMetrics";
 import { FolderOpen } from "lucide-react";
 import { RouteTooltipContent } from "./RouteTooltipContent";
 
@@ -451,9 +452,7 @@ export function computeEffectiveInputTokens(
   cacheReadInputTokens: number | null
 ) {
   if (inputTokens == null) return null;
-  const cacheRead = cacheReadInputTokens ?? 0;
-  if (cliKey === "codex" || cliKey === "gemini") return Math.max(inputTokens - cacheRead, 0);
-  return inputTokens;
+  return computeSharedEffectiveInputTokens(cliKey, inputTokens, cacheReadInputTokens);
 }
 
 export function buildRequestRouteMeta(input: {

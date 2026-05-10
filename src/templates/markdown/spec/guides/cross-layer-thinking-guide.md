@@ -580,6 +580,42 @@ Provider-probe checklist:
 - Regression tests must cover model-not-found/rate-limit success, 5xx failure,
   and body-level auth failure with a 4xx status.
 
+### Mistake 24: Cache Hit-Rate Denominators Drift Across Layers
+
+**Bad**: Backend usage summaries, provider trends, Home cards, Usage tables,
+and realtime trace cards each calculate "cache rate" from whichever fields are
+nearby. One screen shows cached-token share, another shows read-hit rate, and
+bridge providers get counted differently from Codex/Gemini.
+
+**Good**: Treat cache hit rate as a cross-layer metric contract:
+
+- Formula: `cache_read_input_tokens / (effective_input_tokens + cache_creation_input_tokens + cache_read_input_tokens)`.
+- `effective_input_tokens` subtracts cache reads for Codex/Gemini and any
+  backend-classified bridge/source provider where cached reads are already a
+  subset of input tokens.
+- Rust usage aggregation owns SQL-level effective input and total token
+  expressions in `src-tauri/src/domain/usage_stats/tokens.rs`.
+- Frontend display helpers own UI-level math in `src/utils/cacheRateMetrics.ts`;
+  components should not duplicate the formula.
+- Usage summary/leaderboard DTOs already expose effective `input_tokens`; do
+  not subtract cache reads again in components that consume those DTOs.
+- Raw realtime logs/traces may still need frontend effective-input correction
+  before display because they carry unaggregated gateway metrics.
+
+Cache metric checklist:
+- [ ] Decide whether the data source is raw gateway metrics or already
+      aggregated usage DTO data
+- [ ] For backend trend rows, expose `denom_tokens` from the backend and let
+      charts divide `cache_read_input_tokens / denom_tokens`
+- [ ] For frontend summary/table rows, use `computeCacheHitRate` and confirm the
+      input argument is already the effective input from Rust aggregation
+- [ ] For raw trace/log cards, use the shared effective-input helper instead of
+      local CLI string checks
+- [ ] Add regression tests that distinguish old cached-token share from the
+      read-hit formula
+- [ ] Include Codex/Gemini and bridge/source-provider examples when touching
+      denominator logic
+
 ---
 
 ## Checklist for Cross-Layer Features
@@ -622,6 +658,9 @@ After implementation:
       logs, events, stats, and provider-health side effects match that choice
 - [ ] Classified provider availability probe results by status and body
       semantics, including 5xx and body-level auth errors
+- [ ] If displaying cache hit rate or cache denominator data, verified the
+      formula owner and whether the source data is raw gateway metrics or
+      already-aggregated effective usage
 - [ ] If the change touches gateway/proxy paths, explicitly list all non-passthrough
       mutations (headers, path/query, body JSON, response translation) and ensure each
       mutation is either:
