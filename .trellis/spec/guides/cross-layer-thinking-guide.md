@@ -696,6 +696,9 @@ After implementation:
 - [ ] Checked provider-scoped continuation ids before provider-health mutation:
       stale Codex `previous_response_id` errors are repaired once and recorded
       as a guarded body mutation, not as circuit-breaker evidence
+- [ ] For Codex SSE responses, distinguished terminal error markers from late
+      tail read failures after `response.completed`; do not let teardown I/O
+      noise overwrite a successful user-visible completion
 - [ ] Classified helper/probe routes as user-visible vs infra-only and verified
       logs, events, stats, and provider-health side effects match that choice
 - [ ] Classified provider availability probe results by status and body

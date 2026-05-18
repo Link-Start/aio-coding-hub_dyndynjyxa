@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use super::super::events::emit_gateway_debug_log;
 use super::super::proxy::GatewayErrorCode;
 use super::super::util::now_unix_seconds;
 use super::request_end::{emit_request_event_and_spawn_request_log, StreamRequestCompletion};
@@ -60,6 +61,38 @@ fn is_codex_drop_successish(
         && (usage_seen || completion_seen || !terminal_error_seen)
 }
 
+fn is_codex_stream_terminal_error_successish(
+    cli_key: &str,
+    path: &str,
+    status: u16,
+    saw_stream_output: bool,
+    completion_seen: bool,
+    usage_seen: bool,
+) -> bool {
+    is_codex_stream_tail_error_successish(
+        cli_key,
+        path,
+        status,
+        saw_stream_output,
+        completion_seen,
+        usage_seen,
+    )
+}
+
+fn is_codex_stream_tail_error_successish(
+    cli_key: &str,
+    path: &str,
+    status: u16,
+    saw_stream_output: bool,
+    completion_seen: bool,
+    usage_seen: bool,
+) -> bool {
+    is_codex_responses_path(cli_key, path)
+        && (200..300).contains(&status)
+        && saw_stream_output
+        && (usage_seen || completion_seen)
+}
+
 fn is_codex_body_buffer_drop_successish(
     cli_key: &str,
     path: &str,
@@ -99,6 +132,7 @@ where
     idle_timeout: Option<Duration>,
     idle_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
     finalized: bool,
+    defer_terminal_error: bool,
 }
 
 impl<S, B> UsageSseTeeStream<S, B>
@@ -120,7 +154,13 @@ where
             idle_timeout,
             idle_sleep: idle_timeout.map(|d| Box::pin(tokio::time::sleep(d))),
             finalized: false,
+            defer_terminal_error: false,
         }
+    }
+
+    pub(in crate::gateway) fn with_defer_terminal_error(mut self) -> Self {
+        self.defer_terminal_error = true;
+        self
     }
 
     fn finalize(&mut self, error_code: Option<&'static str>) {
@@ -177,7 +217,12 @@ where
                 Poll::Pending
             }
             Poll::Ready(None) => {
-                this.finalize(this.ctx.error_code);
+                // When defer_terminal_error is set and the tracker saw a terminal
+                // error, skip finalization here — the relay task will decide the
+                // final error_code with Codex-specific tolerance logic.
+                if !(this.defer_terminal_error && this.tracker.terminal_error_seen()) {
+                    this.finalize(this.ctx.error_code);
+                }
                 Poll::Ready(None)
             }
             Poll::Ready(Some(Ok(chunk))) => {
@@ -192,21 +237,66 @@ where
                         this.idle_sleep = Some(Box::pin(tokio::time::sleep(d)));
                     }
                 }
+                emit_gateway_debug_log(
+                    &this.ctx.app,
+                    format!(
+                        "[SSE_CHUNK] trace_id={} len={}\n  {}",
+                        this.ctx.trace_id,
+                        chunk.as_ref().len(),
+                        String::from_utf8_lossy(chunk.as_ref()),
+                    ),
+                );
+                let was_terminal_error = this.tracker.terminal_error_seen();
                 this.tracker.ingest_chunk(chunk.as_ref());
                 if this.tracker.terminal_error_seen() {
-                    let code = if this.tracker.fake_200_detected() {
-                        GatewayErrorCode::Fake200.as_str()
-                    } else {
-                        GatewayErrorCode::StreamError.as_str()
-                    };
-                    this.finalize(Some(code));
-                    return Poll::Ready(None);
+                    if !was_terminal_error {
+                        emit_gateway_debug_log(
+                            &this.ctx.app,
+                            format!(
+                                "[SSE] terminal_error_seen triggered — trace_id={} cli_key={} path={} fake_200={}",
+                                this.ctx.trace_id,
+                                this.ctx.cli_key,
+                                this.ctx.path,
+                                this.tracker.fake_200_detected(),
+                            ),
+                        );
+                    }
+                    if !this.defer_terminal_error {
+                        let code = if this.tracker.fake_200_detected() {
+                            GatewayErrorCode::Fake200.as_str()
+                        } else {
+                            GatewayErrorCode::StreamError.as_str()
+                        };
+                        this.finalize(Some(code));
+                        return Poll::Ready(None);
+                    }
                 }
                 Poll::Ready(Some(Ok(chunk)))
             }
             Poll::Ready(Some(Err(err))) => {
-                this.finalize(Some(GatewayErrorCode::StreamError.as_str()));
-                Poll::Ready(Some(Err(err)))
+                let completion_seen = this.tracker.completion_seen();
+                let codex_successish = is_codex_stream_tail_error_successish(
+                    &this.ctx.cli_key,
+                    &this.ctx.path,
+                    this.ctx.status,
+                    this.first_byte_ms.is_some(),
+                    completion_seen,
+                    completion_seen,
+                );
+                if codex_successish {
+                    emit_gateway_debug_log(
+                        &this.ctx.app,
+                        format!(
+                            "[SSE] tolerating late stream read error after completion trace_id={} cli_key={} path={} err={}",
+                            this.ctx.trace_id, this.ctx.cli_key, this.ctx.path, err
+                        ),
+                    );
+                    this.finalize(None);
+                    Poll::Ready(None)
+                } else {
+                    this.finalize(Some(GatewayErrorCode::StreamError.as_str()));
+                    Poll::Ready(Some(Err(err)))
+                }
             }
         }
     }
@@ -258,7 +348,9 @@ where
     let (tx, rx) =
         tokio::sync::mpsc::channel::<Result<Bytes, reqwest::Error>>(SSE_RELAY_BUFFER_CAPACITY);
 
-    let mut tee = UsageSseTeeStream::new(upstream, ctx, idle_timeout, initial_first_byte_ms);
+    let mut tee =
+        UsageSseTeeStream::new(upstream, ctx, idle_timeout, initial_first_byte_ms)
+            .with_defer_terminal_error();
 
     tokio::spawn(async move {
         let mut forwarded_chunks: i64 = 0;
@@ -376,6 +468,42 @@ where
                         }
                     }
                 }
+            }
+        }
+
+        // When the stream ended normally (no client abort) but the tracker
+        // detected a terminal-error-like SSE event, apply Codex-specific
+        // tolerance: if we already saw output AND completion/usage, treat the
+        // request as successful instead of marking it GW_STREAM_ERROR.
+        if client_abort_detected_by.is_none() && tee.tracker.terminal_error_seen() {
+            let completion_seen = tee.tracker.completion_seen();
+            let saw_stream_output = tee.first_byte_ms.is_some()
+                || forwarded_chunks > 0
+                || forwarded_bytes > 0
+                || drained_chunks > 0
+                || drained_bytes > 0;
+
+            // For Codex /v1/responses, completion_seen implies response.completed
+            // was received (which carries usage). We treat this as a proxy for
+            // usage_seen to avoid consuming tracker state before tee.finalize().
+            let codex_successish = is_codex_stream_terminal_error_successish(
+                &tee.ctx.cli_key,
+                &tee.ctx.path,
+                tee.ctx.status,
+                saw_stream_output,
+                completion_seen,
+                completion_seen,
+            );
+
+            if codex_successish {
+                tee.finalize(None);
+            } else {
+                let code = if tee.tracker.fake_200_detected() {
+                    GatewayErrorCode::Fake200.as_str()
+                } else {
+                    GatewayErrorCode::StreamError.as_str()
+                };
+                tee.finalize(Some(code));
             }
         }
 
@@ -605,6 +733,7 @@ mod tests {
     use super::{
         is_codex_body_buffer_drop_successish, is_codex_client_abort_successish,
         is_codex_drop_successish, is_codex_responses_path,
+        is_codex_stream_tail_error_successish, is_codex_stream_terminal_error_successish,
     };
 
     #[test]
@@ -752,6 +881,102 @@ mod tests {
             200,
             true,
             true
+        ));
+    }
+
+    #[test]
+    fn codex_stream_terminal_error_successish_with_completion_and_usage() {
+        assert!(is_codex_stream_terminal_error_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            true,
+            true
+        ));
+        assert!(is_codex_stream_terminal_error_successish(
+            "codex",
+            "/responses",
+            200,
+            true,
+            true,
+            false
+        ));
+        assert!(is_codex_stream_terminal_error_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn codex_stream_terminal_error_not_successish_without_completion_or_usage() {
+        assert!(!is_codex_stream_terminal_error_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn codex_stream_terminal_error_not_successish_for_non_codex() {
+        assert!(!is_codex_stream_terminal_error_successish(
+            "claude",
+            "/v1/responses",
+            200,
+            true,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn codex_stream_terminal_error_not_successish_without_stream_output() {
+        assert!(!is_codex_stream_terminal_error_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            false,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn codex_stream_terminal_error_not_successish_on_error_status() {
+        assert!(!is_codex_stream_terminal_error_successish(
+            "codex",
+            "/v1/responses",
+            500,
+            true,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn codex_stream_tail_error_successish_after_completion() {
+        assert!(is_codex_stream_tail_error_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            true,
+            false
+        ));
+        assert!(!is_codex_stream_tail_error_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            false,
+            false
         ));
     }
 }

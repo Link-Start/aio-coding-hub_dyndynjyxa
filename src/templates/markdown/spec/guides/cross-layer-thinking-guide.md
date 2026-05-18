@@ -654,6 +654,9 @@ After implementation:
       skips in user-facing wording
 - [ ] For request logs, documented unsupported CLI folder lookup instead of
       treating it as a lookup miss
+- [ ] For Codex SSE responses, distinguished terminal error markers from late
+      tail read failures after `response.completed`; do not let teardown I/O
+      noise overwrite a successful user-visible completion
 - [ ] Classified helper/probe routes as user-visible vs infra-only and verified
       logs, events, stats, and provider-health side effects match that choice
 - [ ] Classified provider availability probe results by status and body
