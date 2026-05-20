@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::gateway::proxy::{
-    gemini_oauth, is_fake_200_non_stream_body, protocol_bridge, provider_router, GatewayErrorCode,
+    gemini_oauth, is_fake_200_non_stream_body, protocol_bridge, provider_router,
+    upstream_client_error_rules, GatewayErrorCode,
 };
 
 fn buffer_cx2cc_event_stream_as_json(
@@ -908,14 +909,25 @@ where
     if (200..300).contains(&status.as_u16()) && is_fake_200_non_stream_body(body_bytes.as_ref()) {
         let error_code = GatewayErrorCode::Fake200.as_str();
         let duration_ms = started.elapsed().as_millis();
+        let quota_exhausted =
+            upstream_client_error_rules::match_quota_exhausted(body_bytes.as_ref());
+        let decision = if quota_exhausted {
+            FailoverDecision::SwitchProvider
+        } else {
+            FailoverDecision::Abort
+        };
         if let Some(last) = attempts.last_mut() {
             if last.outcome == "success" {
                 last.outcome = format!("body_error: code={error_code}");
             }
             last.error_category = Some(ErrorCategory::ProviderError.as_str());
             last.error_code = Some(error_code);
-            last.decision = Some(FailoverDecision::Abort.as_str());
-            last.reason = Some("successful HTTP status with error body".to_string());
+            last.decision = Some(decision.as_str());
+            last.reason = Some(if quota_exhausted {
+                "successful HTTP status with quota exhausted error body".to_string()
+            } else {
+                "successful HTTP status with error body".to_string()
+            });
             last.reason_code = Some(ErrorCategory::ProviderError.reason_code());
             last.attempt_duration_ms = Some(duration_ms);
         }
@@ -936,6 +948,25 @@ where
             last.circuit_state_after = Some(change.after.state.as_str());
             last.circuit_failure_count = Some(change.after.failure_count);
             last.circuit_failure_threshold = Some(change.after.failure_threshold);
+        }
+        *circuit_snapshot = change.after.clone();
+
+        if quota_exhausted {
+            if common.provider_cooldown_secs > 0 {
+                let snap = provider_router::trigger_cooldown(
+                    state.circuit.as_ref(),
+                    provider_id,
+                    now_unix,
+                    common.provider_cooldown_secs,
+                );
+                *circuit_snapshot = snap;
+            }
+            failed_provider_ids.insert(provider_id);
+            *last_outcome = Some(AttemptOutcome::new(
+                ErrorCategory::ProviderError.as_str(),
+                error_code,
+            ));
+            return LoopControl::BreakRetry;
         }
 
         emit_request_event_and_enqueue_request_log(

@@ -307,7 +307,7 @@ pub(super) async fn handle_non_success_response<R: tauri::Runtime>(
         && (upstream_client_error_rules::should_attempt_non_retryable_match(
             status,
             resp.as_ref().and_then(|r| r.content_length()),
-        ) || status.as_u16() == 429);
+        ) || matches!(status.as_u16(), 402 | 429));
     let need_5xx_body_preview =
         !is_count_tokens && status.is_server_error() && !need_client_error_scan;
     let need_codex_previous_response_id_scan = !is_count_tokens
@@ -353,18 +353,31 @@ pub(super) async fn handle_non_success_response<R: tauri::Runtime>(
                     }
                 }
                 if need_client_error_scan {
+                    if matches!(status.as_u16(), 402 | 429)
+                        && upstream_client_error_rules::match_quota_exhausted(
+                            body_for_scan.as_ref(),
+                        )
+                    {
+                        category = ErrorCategory::ProviderError;
+                        decision = FailoverDecision::SwitchProvider;
+                        matched_rule_id = Some("quota_exhausted");
+                    }
                     if status.as_u16() == 429 {
                         matched_429_concurrency_limit =
                             upstream_client_error_rules::match_429_concurrency_limit(
                                 body_for_scan.as_ref(),
                             );
                     }
-                    matched_rule_id = upstream_client_error_rules::match_non_retryable_client_error(
-                        ctx.cli_key.as_str(),
-                        status,
-                        body_for_scan.as_ref(),
-                    );
-                    if matched_rule_id.is_some() || matched_429_concurrency_limit {
+                    let matched_non_retryable_rule =
+                        upstream_client_error_rules::match_non_retryable_client_error(
+                            ctx.cli_key.as_str(),
+                            status,
+                            body_for_scan.as_ref(),
+                        );
+                    if matched_non_retryable_rule.is_some() {
+                        matched_rule_id = matched_non_retryable_rule;
+                    }
+                    if matched_non_retryable_rule.is_some() || matched_429_concurrency_limit {
                         category = ErrorCategory::NonRetryableClientError;
                         decision = FailoverDecision::Abort;
                     }

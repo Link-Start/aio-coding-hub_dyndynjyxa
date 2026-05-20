@@ -223,6 +223,31 @@ mod tests {
         (format!("http://{addr}"), task)
     }
 
+    async fn spawn_status_json_upstream(
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind status json upstream stub");
+        let addr = listener.local_addr().expect("status json upstream addr");
+        let task = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0_u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        (format!("http://{addr}"), task)
+    }
+
     async fn spawn_large_known_length_error_upstream(
         status_line: &'static str,
         declared_content_length: usize,
@@ -682,6 +707,100 @@ mod tests {
         );
 
         timeout_task.abort();
+        success_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mock_runtime_router_429_quota_fails_over_without_same_provider_retry() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 5;
+        app_settings.failover_max_providers_to_try = 2;
+        app_settings.provider_cooldown_seconds = 30;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("gateway-route-429-quota-test.sqlite"))
+            .expect("init test db");
+        let quota_body = r#"{"error":{"message":"You exceeded your current quota","type":"insufficient_quota"}}"#;
+        let success_body = r#"{"id":"stub-ok","object":"chat.completion","choices":[]}"#;
+        let (quota_base_url, quota_task) =
+            spawn_status_json_upstream("429 Too Many Requests", quota_body).await;
+        let (success_base_url, success_task) = spawn_json_upstream(success_body).await;
+        let quota_provider_id =
+            insert_codex_provider_with_priority(&db, "429 Quota Stub", quota_base_url, 0);
+        let success_provider_id =
+            insert_codex_provider_with_priority(&db, "Success Stub", success_base_url, 1);
+
+        let circuit = Arc::new(circuit_breaker::CircuitBreaker::new(
+            circuit_breaker::CircuitBreakerConfig::default(),
+            HashMap::new(),
+            None,
+        ));
+        let session = Arc::new(session_manager::SessionManager::new());
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_parts(
+            app_handle,
+            db,
+            log_tx,
+            circuit.clone(),
+            session,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"model":"gpt-route-429-quota","messages":[{"role":"user","content":"hello"}]}"#,
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(log.status, Some(200));
+        assert_eq!(log.error_code, None);
+
+        let attempts: Value = serde_json::from_str(&log.attempts_json).expect("attempts json");
+        let attempts = attempts.as_array().expect("attempt array");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(
+            attempts[0].get("provider_id").and_then(Value::as_i64),
+            Some(quota_provider_id)
+        );
+        assert_eq!(
+            attempts[0].get("retry_index").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            attempts[0].get("decision").and_then(Value::as_str),
+            Some("switch")
+        );
+        assert!(attempts[0]
+            .get("reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| reason.contains("rule=quota_exhausted")));
+        assert_eq!(
+            attempts[1].get("provider_id").and_then(Value::as_i64),
+            Some(success_provider_id)
+        );
+        assert_eq!(
+            attempts[1].get("outcome").and_then(Value::as_str),
+            Some("success")
+        );
+
+        let circuit_snapshot = circuit.snapshot(quota_provider_id, 0);
+        assert!(circuit_snapshot.cooldown_until.is_some());
+
+        quota_task.abort();
         success_task.abort();
     }
 
@@ -1642,7 +1761,7 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("response body");
-        assert!(String::from_utf8_lossy(&body).contains("quota exhausted"));
+        assert!(String::from_utf8_lossy(&body).contains("GW_FAKE_200"));
 
         tokio::time::timeout(Duration::from_secs(2), writer_task)
             .await
@@ -1666,7 +1785,7 @@ mod tests {
             Some("gpt-route-json-fake-200")
         );
         assert_eq!(detail.final_provider_id, provider_id);
-        assert!(detail.ttfb_ms.is_some());
+        assert!(detail.ttfb_ms.is_none());
 
         let attempts: Value = serde_json::from_str(&detail.attempts_json).expect("attempts json");
         let attempts = attempts.as_array().expect("attempt array");
@@ -1686,6 +1805,10 @@ mod tests {
         assert_eq!(
             attempts[0].get("error_category").and_then(Value::as_str),
             Some("PROVIDER_ERROR")
+        );
+        assert_eq!(
+            attempts[0].get("decision").and_then(Value::as_str),
+            Some("switch")
         );
 
         let error_details: Value = serde_json::from_str(
@@ -1716,12 +1839,125 @@ mod tests {
             circuit_breaker::CircuitState::Closed
         );
         assert_eq!(circuit_snapshot.failure_count, 1);
+        assert!(circuit_snapshot.cooldown_until.is_some());
         assert_eq!(
             session.get_bound_provider("codex", logged_session_id, 0),
             None
         );
 
         json_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mock_runtime_router_json_fake_200_quota_fails_over_to_next_provider() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 2;
+        app_settings.provider_cooldown_seconds = 30;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(
+            &db_dir
+                .path()
+                .join("gateway-route-json-fake-200-quota-failover-test.sqlite"),
+        )
+        .expect("init test db");
+        let fake_200_body =
+            r#"{"error":{"message":"quota exhausted","type":"insufficient_quota"}}"#;
+        let success_body = r#"{"id":"stub-ok","object":"chat.completion","choices":[]}"#;
+        let (quota_base_url, quota_task) = spawn_json_upstream(fake_200_body).await;
+        let (success_base_url, success_task) = spawn_json_upstream(success_body).await;
+        let quota_provider_id =
+            insert_codex_provider_with_priority(&db, "Quota Stub", quota_base_url, 0);
+        let success_provider_id =
+            insert_codex_provider_with_priority(&db, "Success Stub", success_base_url, 1);
+
+        let circuit = Arc::new(circuit_breaker::CircuitBreaker::new(
+            circuit_breaker::CircuitBreakerConfig::default(),
+            HashMap::new(),
+            None,
+        ));
+        let session = Arc::new(session_manager::SessionManager::new());
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_parts(
+            app_handle,
+            db,
+            log_tx,
+            circuit.clone(),
+            session,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"model":"gpt-route-json-fake-200-quota","messages":[{"role":"user","content":"hello"}]}"#,
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let payload: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(payload.get("id").and_then(Value::as_str), Some("stub-ok"));
+
+        let log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(log.status, Some(200));
+        assert_eq!(log.error_code, None);
+
+        let attempts: Value = serde_json::from_str(&log.attempts_json).expect("attempts json");
+        let attempts = attempts.as_array().expect("attempt array");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(
+            attempts[0].get("provider_id").and_then(Value::as_i64),
+            Some(quota_provider_id)
+        );
+        assert_eq!(
+            attempts[0].get("outcome").and_then(Value::as_str),
+            Some("body_error: code=GW_FAKE_200")
+        );
+        assert_eq!(
+            attempts[0].get("decision").and_then(Value::as_str),
+            Some("switch")
+        );
+        assert_eq!(
+            attempts[1].get("provider_id").and_then(Value::as_i64),
+            Some(success_provider_id)
+        );
+        assert_eq!(
+            attempts[1].get("outcome").and_then(Value::as_str),
+            Some("success")
+        );
+
+        let provider_chain: Value =
+            serde_json::from_str(log.provider_chain_json.as_deref().expect("provider chain"))
+                .expect("provider chain json");
+        let chain = provider_chain.as_array().expect("provider chain array");
+        assert_eq!(
+            chain[0].get("provider_id").and_then(Value::as_i64),
+            Some(quota_provider_id)
+        );
+        assert_eq!(
+            chain[1].get("provider_id").and_then(Value::as_i64),
+            Some(success_provider_id)
+        );
+
+        let circuit_snapshot = circuit.snapshot(quota_provider_id, 0);
+        assert!(circuit_snapshot.cooldown_until.is_some());
+
+        quota_task.abort();
+        success_task.abort();
     }
 
     #[tokio::test(flavor = "current_thread")]

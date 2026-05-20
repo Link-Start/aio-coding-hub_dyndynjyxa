@@ -472,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_session_reuse_binding_promotes_bound_provider_when_allowed() {
+    fn apply_session_reuse_binding_rotates_from_bound_provider_when_allowed() {
         let mut providers = vec![provider(11), provider(22), provider(33)];
 
         let selected = super::provider_selection::apply_session_reuse_provider_binding(
@@ -483,7 +483,7 @@ mod tests {
         );
 
         assert_eq!(selected, Some(22));
-        assert_eq!(provider_ids(&providers), vec![22, 11, 33]);
+        assert_eq!(provider_ids(&providers), vec![22, 33, 11]);
     }
 
     #[test]
