@@ -34,7 +34,7 @@ pub(super) fn reorder_providers_by_bound_order(
 }
 
 pub(super) fn apply_session_provider_preference(
-    providers: &mut Vec<providers::ProviderForGateway>,
+    providers: &mut [providers::ProviderForGateway],
     bound_provider_id: i64,
     bound_provider_order: Option<&[i64]>,
 ) -> Option<i64> {
