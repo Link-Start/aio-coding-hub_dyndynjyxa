@@ -12,11 +12,18 @@ import { useSyncExternalStore } from "react";
 import { logToConsole } from "../consoleLog";
 
 let enabled = true;
-const listeners = new Set<() => void>();
+type NotificationSoundListener = () => void;
+
+const listeners = new Set<NotificationSoundListener>();
 
 function emitChange() {
-  for (const listener of listeners) {
-    listener();
+  for (const listener of Array.from(listeners)) {
+    if (!listeners.has(listener)) continue;
+    try {
+      listener();
+    } catch (err) {
+      logToConsole("warn", "通知音效状态订阅处理失败", { error: String(err) });
+    }
   }
 }
 
@@ -30,16 +37,15 @@ export function getNotificationSoundEnabled(): boolean {
   return enabled;
 }
 
+export function subscribeNotificationSoundEnabled(listener: NotificationSoundListener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
 export function useNotificationSoundEnabled(): boolean {
-  return useSyncExternalStore(
-    (callback) => {
-      listeners.add(callback);
-      return () => {
-        listeners.delete(callback);
-      };
-    },
-    () => enabled
-  );
+  return useSyncExternalStore(subscribeNotificationSoundEnabled, () => enabled);
 }
 
 let cachedAudio: HTMLAudioElement | null = null;

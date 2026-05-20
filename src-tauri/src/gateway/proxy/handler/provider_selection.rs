@@ -12,8 +12,8 @@ pub(super) struct ProviderSelection {
     pub(super) session_bound_sort_mode_id: Option<Option<i64>>,
 }
 
-pub(super) fn select_providers_with_session_binding(
-    state: &GatewayAppState,
+pub(super) fn select_providers_with_session_binding<R: tauri::Runtime>(
+    state: &GatewayAppState<R>,
     cli_key: &str,
     session_id: Option<&str>,
     created_at: i64,

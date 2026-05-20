@@ -76,14 +76,10 @@ fn reqwest_error_decision(
     }
 }
 
-async fn read_response_body_with_optional_limit(
+async fn read_response_body_with_limit(
     mut resp: reqwest::Response,
-    max_bytes: Option<u64>,
+    max_bytes: u64,
 ) -> Result<Bytes, reqwest::Error> {
-    let Some(max_bytes) = max_bytes else {
-        return resp.bytes().await;
-    };
-
     let limit = max_bytes.min(usize::MAX as u64) as usize;
     if limit == 0 {
         return Ok(Bytes::new());
@@ -110,6 +106,20 @@ async fn read_response_body_with_optional_limit(
     }
 
     Ok(Bytes::from(out))
+}
+
+fn error_body_scan_limit_bytes() -> u64 {
+    upstream_client_error_rules::max_body_read_bytes().min(MAX_NON_SSE_BODY_BYTES as u64)
+}
+
+pub(super) fn error_body_scan_limit_usize() -> usize {
+    error_body_scan_limit_bytes().min(usize::MAX as u64) as usize
+}
+
+pub(super) async fn read_response_body_for_error_scan(
+    resp: reqwest::Response,
+) -> Result<Bytes, reqwest::Error> {
+    read_response_body_with_limit(resp, error_body_scan_limit_bytes()).await
 }
 
 pub(super) struct UpstreamRequestState<'a> {
@@ -193,19 +203,19 @@ fn remove_codex_previous_response_id(body: &mut Bytes) -> bool {
     }
 }
 
-pub(super) struct HandleNonSuccessResponseInput<'a> {
-    pub(super) ctx: CommonCtx<'a>,
+pub(super) struct HandleNonSuccessResponseInput<'a, R: tauri::Runtime = tauri::Wry> {
+    pub(super) ctx: CommonCtx<'a, R>,
     pub(super) provider_ctx: ProviderCtx<'a>,
     pub(super) attempt_ctx: AttemptCtx<'a>,
-    pub(super) loop_state: LoopState<'a>,
+    pub(super) loop_state: LoopState<'a, R>,
     pub(super) enable_thinking_signature_rectifier: bool,
     pub(super) enable_thinking_budget_rectifier: bool,
     pub(super) resp: reqwest::Response,
     pub(super) upstream: UpstreamRequestState<'a>,
 }
 
-pub(super) async fn handle_non_success_response(
-    input: HandleNonSuccessResponseInput<'_>,
+pub(super) async fn handle_non_success_response<R: tauri::Runtime>(
+    input: HandleNonSuccessResponseInput<'_, R>,
 ) -> LoopControl {
     let HandleNonSuccessResponseInput {
         ctx,
@@ -309,22 +319,14 @@ pub(super) async fn handle_non_success_response(
         );
     if need_client_error_scan || need_5xx_body_preview || need_codex_previous_response_id_scan {
         if let Some(r) = resp.take() {
-            let read_result = if r.content_length().is_none() {
-                read_response_body_with_optional_limit(
-                    r,
-                    Some(upstream_client_error_rules::max_body_read_bytes()),
-                )
-                .await
-            } else {
-                r.bytes().await
-            };
+            let read_result = read_response_body_for_error_scan(r).await;
             if let Ok(bytes) = read_result {
                 let mut headers_for_scan = response_headers.clone();
                 strip_hop_headers(&mut headers_for_scan);
                 let body_for_scan = maybe_gunzip_response_body_bytes_with_limit(
                     bytes,
                     &mut headers_for_scan,
-                    MAX_NON_SSE_BODY_BYTES,
+                    error_body_scan_limit_usize(),
                 );
                 // CX2CC: log upstream error body to console for debugging.
                 if cx2cc_active && retry_index == 1 {
@@ -573,8 +575,7 @@ pub(super) async fn handle_non_success_response(
                         HeaderValue::from_static(outcome.header_value),
                     );
                     if let Some(setting) = outcome.special_setting {
-                        let mut settings = special_settings.lock_or_recover();
-                        settings.push(setting);
+                        response_fixer::push_special_setting(&special_settings, setting);
                     }
                     body_bytes = outcome.body;
                 }
@@ -692,11 +693,11 @@ pub(super) async fn handle_non_success_response(
     }
 }
 
-pub(super) async fn handle_reqwest_error(
-    ctx: CommonCtx<'_>,
+pub(super) async fn handle_reqwest_error<R: tauri::Runtime>(
+    ctx: CommonCtx<'_, R>,
     provider_ctx: ProviderCtx<'_>,
     attempt_ctx: AttemptCtx<'_>,
-    loop_state: LoopState<'_>,
+    loop_state: LoopState<'_, R>,
     err: reqwest::Error,
 ) -> LoopControl {
     tracing::warn!(
@@ -764,11 +765,42 @@ pub(super) async fn handle_reqwest_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        matches_codex_previous_response_id_error, remove_codex_previous_response_id,
+        error_body_scan_limit_usize, matches_codex_previous_response_id_error,
+        read_response_body_for_error_scan, remove_codex_previous_response_id,
         reqwest_error_decision, should_scan_codex_previous_response_id_error,
         upstream_error_decision, FailoverDecision,
     };
     use axum::body::Bytes;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn known_length_response(
+        body: Vec<u8>,
+    ) -> (reqwest::Response, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test upstream");
+        let addr = listener.local_addr().expect("local addr");
+        let task = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request_buf = [0u8; 1024];
+            let _ = socket.read(&mut request_buf).await;
+            let headers = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(headers.as_bytes()).await;
+            let _ = socket.write_all(&body).await;
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/error"))
+            .send()
+            .await
+            .expect("fetch test response");
+        (response, task)
+    }
 
     #[test]
     fn upstream_error_decision_aborts_for_count_tokens() {
@@ -796,6 +828,22 @@ mod tests {
 
         let abort_decision = upstream_error_decision(false, FailoverDecision::Abort, 1, 5);
         assert!(matches!(abort_decision, FailoverDecision::Abort));
+    }
+
+    #[tokio::test]
+    async fn error_scan_body_reader_truncates_known_length_bodies() {
+        let limit = error_body_scan_limit_usize();
+        let payload = vec![b'x'; limit + 4096];
+        let (response, server_task) = known_length_response(payload).await;
+
+        assert_eq!(response.content_length(), Some((limit + 4096) as u64));
+        let body = read_response_body_for_error_scan(response)
+            .await
+            .expect("read limited body");
+        server_task.abort();
+
+        assert_eq!(body.len(), limit);
+        assert!(body.iter().all(|byte| *byte == b'x'));
     }
 
     #[test]
@@ -884,5 +932,11 @@ mod tests {
     fn reqwest_error_decision_retries_non_connect_errors_before_limit() {
         let decision = reqwest_error_decision(false, false, 1, 5);
         assert!(matches!(decision, FailoverDecision::RetrySameProvider));
+    }
+
+    #[test]
+    fn reqwest_error_decision_switches_non_connect_errors_at_limit() {
+        let decision = reqwest_error_decision(false, false, 5, 5);
+        assert!(matches!(decision, FailoverDecision::SwitchProvider));
     }
 }
