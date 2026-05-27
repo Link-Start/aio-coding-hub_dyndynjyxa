@@ -215,7 +215,7 @@ export function Sidebar({ className }: SidebarProps) {
                       to={item.to}
                       className={({ isActive }) =>
                         cn(
-                          "group relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
+                          "group relative flex items-center gap-3 rounded-lg px-3 py-2 font-display text-sm font-semibold transition-colors",
                           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/35 focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar",
                           isActive
                             ? "border border-primary bg-primary text-primary-foreground shadow-sm shadow-primary/10"
