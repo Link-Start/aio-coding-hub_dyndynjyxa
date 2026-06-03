@@ -556,7 +556,7 @@ export function SkillsView({
                       toggleMutation.isPending ||
                       returnToLocalMutation.isPending
                     }
-                    className="h-4 w-4 rounded border border-slate-400 bg-card accent-accent focus:ring-2 focus:ring-accent/30 dark:border-slate-600 dark:bg-secondary"
+                    className="h-4 w-4 rounded border border-input bg-card accent-accent focus:ring-2 focus:ring-ring/30"
                     aria-label="全选通用技能"
                   />
                   <span>全选</span>
@@ -630,7 +630,7 @@ export function SkillsView({
                           togglingSkillId === skill.id ||
                           returningLocalSkillId === skill.id
                         }
-                        className="mt-0.5 h-4 w-4 rounded border border-slate-400 bg-card accent-accent focus:ring-2 focus:ring-accent/30 dark:border-slate-600 dark:bg-secondary"
+                        className="mt-0.5 h-4 w-4 rounded border border-input bg-card accent-accent focus:ring-2 focus:ring-ring/30"
                         aria-label={`选择通用技能 ${skill.name}`}
                       />
 
@@ -761,7 +761,7 @@ export function SkillsView({
                     checked={allLocalSelected}
                     onChange={toggleAllLocalSelection}
                     disabled={deletingLocal || importingLocal}
-                    className="h-4 w-4 rounded border border-slate-400 bg-card accent-accent focus:ring-2 focus:ring-accent/30 dark:border-slate-600 dark:bg-secondary"
+                    className="h-4 w-4 rounded border border-input bg-card accent-accent focus:ring-2 focus:ring-ring/30"
                     aria-label="全选本机技能"
                   />
                   <span>全选</span>
@@ -825,7 +825,7 @@ export function SkillsView({
                         checked={selectedLocalDirNames.has(skill.dir_name)}
                         onChange={() => toggleLocalSelection(skill.dir_name)}
                         disabled={deletingLocal || importingLocal}
-                        className="mt-0.5 h-4 w-4 rounded border border-slate-400 bg-card accent-accent focus:ring-2 focus:ring-accent/30 dark:border-slate-600 dark:bg-secondary"
+                        className="mt-0.5 h-4 w-4 rounded border border-input bg-card accent-accent focus:ring-2 focus:ring-ring/30"
                         aria-label={`选择本机技能 ${label}`}
                       />
 
