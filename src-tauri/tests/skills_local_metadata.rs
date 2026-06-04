@@ -6,6 +6,63 @@ use support::SkillTestFixture;
 const SOURCE_METADATA_FILE: &str = ".aio-coding-hub.source.json";
 
 #[test]
+fn skills_local_list_skips_managed_ssot_links() {
+    let app = support::TestApp::new();
+    let handle = app.handle();
+
+    aio_coding_hub_lib::test_support::init_db(&handle).expect("init db");
+    let fix = SkillTestFixture::new(&app, &handle, "codex", "Codex Managed Link List");
+
+    aio_coding_hub_lib::test_support::skill_set_enabled_json(
+        &handle,
+        fix.workspace_id,
+        fix.skill_id,
+        true,
+    )
+    .expect("enable managed skill");
+
+    let rows = support::json_array(
+        aio_coding_hub_lib::test_support::skills_local_list_json(&handle, fix.workspace_id)
+            .expect("list local skills"),
+    );
+
+    assert!(
+        rows.iter()
+            .all(|row| support::json_str(row, "dir_name") != fix.skill_key),
+        "managed skill link should not be reported as a local skill: {rows:?}"
+    );
+}
+
+#[test]
+fn skills_local_list_accepts_case_insensitive_skill_md_file_name() {
+    let app = support::TestApp::new();
+    let handle = app.handle();
+
+    aio_coding_hub_lib::test_support::init_db(&handle).expect("init db");
+    let fix = SkillTestFixture::new(&app, &handle, "codex", "Codex Mixed Case Skill Md");
+
+    let dir_name = "mixed-case-md";
+    let local_dir = fix.cli_skills_root.join(dir_name);
+    std::fs::create_dir_all(&local_dir).expect("create local skill dir");
+    std::fs::write(
+        local_dir.join("Skill.md"),
+        "---\nname: Mixed Case Skill Md\ndescription: Mixed case file name\n---\n",
+    )
+    .expect("write local skill md");
+
+    let rows = support::json_array(
+        aio_coding_hub_lib::test_support::skills_local_list_json(&handle, fix.workspace_id)
+            .expect("list local skills"),
+    );
+    let row = rows
+        .iter()
+        .find(|row| support::json_str(row, "dir_name") == dir_name)
+        .expect("mixed-case skill row");
+
+    assert_eq!(support::json_str(row, "name"), "Mixed Case Skill Md");
+}
+
+#[test]
 fn skills_local_list_fails_when_source_metadata_is_invalid() {
     let app = support::TestApp::new();
     let handle = app.handle();

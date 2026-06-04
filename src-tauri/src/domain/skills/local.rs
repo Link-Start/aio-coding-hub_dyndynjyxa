@@ -1,6 +1,7 @@
 use super::fs_ops::{
-    copy_dir_recursive, is_managed_dir, is_symlink, read_source_metadata, remove_marker,
-    skill_dir_content_hash, write_marker, write_source_metadata, SkillSourceMetadata,
+    copy_dir_recursive, is_managed_dir, is_managed_link_to_ssot, is_symlink,
+    is_symlink_or_junction, read_source_metadata, remove_marker, skill_dir_content_hash,
+    skill_md_path, write_marker, write_source_metadata, SkillSourceMetadata,
 };
 use super::installed::{get_skill_by_id, skill_key_exists};
 use super::npx_lock::NpxSkillLock;
@@ -21,9 +22,13 @@ use std::path::Path;
 
 fn summarize_local_skill_dir(
     path: &Path,
+    ssot_root: &Path,
     npx_lock: Option<&NpxSkillLock>,
 ) -> crate::shared::error::AppResult<Option<LocalSkillSummary>> {
-    if !path.is_dir() || is_managed_dir(path) {
+    if !path.is_dir() && !is_symlink_or_junction(path) {
+        return Ok(None);
+    }
+    if is_managed_dir(path) || is_managed_link_to_ssot(path, ssot_root) {
         return Ok(None);
     }
 
@@ -36,10 +41,9 @@ fn summarize_local_skill_dir(
         return Ok(None);
     }
 
-    let skill_md = path.join("SKILL.md");
-    if !skill_md.exists() {
+    let Some(skill_md) = skill_md_path(path)? else {
         return Ok(None);
-    }
+    };
 
     let (name, description) = match parse_skill_md(&skill_md) {
         Ok((name, description)) => (name, description),
@@ -115,6 +119,7 @@ fn next_available_local_dir_name(root: &Path, preferred: &str) -> String {
 
 fn find_local_skill_by_source(
     root: &Path,
+    ssot_root: &Path,
     source: &SkillSourceMetadata,
 ) -> crate::shared::error::AppResult<Option<LocalSkillSummary>> {
     if !root.exists() {
@@ -127,7 +132,7 @@ fn find_local_skill_by_source(
         let entry =
             entry.map_err(|e| format!("failed to read dir entry {}: {e}", root.display()))?;
         let path = entry.path();
-        let Some(summary) = summarize_local_skill_dir(&path, None)? else {
+        let Some(summary) = summarize_local_skill_dir(&path, ssot_root, None)? else {
             continue;
         };
 
@@ -163,6 +168,7 @@ pub fn local_list<R: tauri::Runtime>(
     if !root.exists() {
         return Ok(Vec::new());
     }
+    let ssot_root = ssot_skills_root(app)?;
     let npx_lock = NpxSkillLock::read(app);
 
     let entries = std::fs::read_dir(&root)
@@ -173,7 +179,7 @@ pub fn local_list<R: tauri::Runtime>(
         let entry =
             entry.map_err(|e| format!("failed to read dir entry {}: {e}", root.display()))?;
         let path = entry.path();
-        let Some(summary) = summarize_local_skill_dir(&path, Some(&npx_lock))? else {
+        let Some(summary) = summarize_local_skill_dir(&path, &ssot_root, Some(&npx_lock))? else {
             continue;
         };
         out.push(summary);
@@ -220,10 +226,11 @@ pub fn install_to_local<R: tauri::Runtime>(
     }
 
     let cli_root = cli_skills_root(app, &cli_key)?;
+    let ssot_root = ssot_skills_root(app)?;
     std::fs::create_dir_all(&cli_root)
         .map_err(|e| format!("failed to create {}: {e}", cli_root.display()))?;
 
-    if let Some(existing) = find_local_skill_by_source(&cli_root, &source)? {
+    if let Some(existing) = find_local_skill_by_source(&cli_root, &ssot_root, &source)? {
         return Ok(existing);
     }
 
@@ -238,12 +245,11 @@ pub fn install_to_local<R: tauri::Runtime>(
             .into());
     }
 
-    let skill_md = src_dir.join("SKILL.md");
-    if !skill_md.exists() {
+    let Some(skill_md) = skill_md_path(&src_dir)? else {
         return Err("SEC_INVALID_INPUT: SKILL.md not found in source_subdir"
             .to_string()
             .into());
-    }
+    };
 
     let (name, _description) = match parse_skill_md(&skill_md) {
         Ok(v) => v,
@@ -271,7 +277,7 @@ pub fn install_to_local<R: tauri::Runtime>(
         return Err(err);
     }
 
-    summarize_local_skill_dir(&local_dir, None)?
+    summarize_local_skill_dir(&local_dir, &ssot_root, None)?
         .ok_or_else(|| "SKILL_LOCAL_INSTALL_FAILED: local skill summary unavailable".into())
 }
 
@@ -320,8 +326,7 @@ pub fn delete_local<R: tauri::Runtime>(
         .into());
     }
 
-    let skill_md = local_dir.join("SKILL.md");
-    if !skill_md.exists() {
+    if skill_md_path(&local_dir)?.is_none() {
         return Err("SEC_INVALID_INPUT: SKILL.md not found in local skill dir"
             .to_string()
             .into());
@@ -371,12 +376,11 @@ pub fn import_local<R: tauri::Runtime>(
         );
     }
 
-    let skill_md = local_dir.join("SKILL.md");
-    if !skill_md.exists() {
+    let Some(skill_md) = skill_md_path(&local_dir)? else {
         return Err("SEC_INVALID_INPUT: SKILL.md not found in local skill dir"
             .to_string()
             .into());
-    }
+    };
 
     let (name, description) = match parse_skill_md(&skill_md) {
         Ok(v) => v,
