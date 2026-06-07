@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.57.0](https://github.com/dyndynjyxa/aio-coding-hub/compare/aio-coding-hub-v0.56.0...aio-coding-hub-v0.57.0) (2026-06-07)
+
+
+### Features
+
+* **providers:** 支持 Codex 设备码 OAuth 登录 ([#279](https://github.com/dyndynjyxa/aio-coding-hub/issues/279)) ([16ac1b6](https://github.com/dyndynjyxa/aio-coding-hub/commit/16ac1b621d39e76b1b48d3044b89afcd22f36b8d))
+
+
+### Bug Fixes
+
+* **cli:** normalize CLI version comparison ([4590af0](https://github.com/dyndynjyxa/aio-coding-hub/commit/4590af00dfc39939e4ae162f7bdd6c84c935aff6)), closes [#289](https://github.com/dyndynjyxa/aio-coding-hub/issues/289)
+* **skills:** 修复外来 managed skill 刷新识别 ([1ab7378](https://github.com/dyndynjyxa/aio-coding-hub/commit/1ab7378c8d66db0b3319f3a080cc14504ab99a16))
+* 保留供应商编辑后的列表滚动位置 ([#291](https://github.com/dyndynjyxa/aio-coding-hub/issues/291)) ([42271ec](https://github.com/dyndynjyxa/aio-coding-hub/commit/42271ecef5be84db88545eb93ed5c683b14ebdcc))
+
+
+### Styles
+
+* **ui:** 统一对话框最大宽度及交互样式调整 ([94ea461](https://github.com/dyndynjyxa/aio-coding-hub/commit/94ea461bf032d448ca2616ff37cf988efb620e70))
+
 ## [0.56.0](https://github.com/dyndynjyxa/aio-coding-hub/compare/aio-coding-hub-v0.55.0...aio-coding-hub-v0.56.0) (2026-06-04)
 
 
