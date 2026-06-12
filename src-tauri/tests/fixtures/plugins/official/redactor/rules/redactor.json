@@ -1,0 +1,32 @@
+{
+  "rules": [
+    {
+      "id": "redact-bearer-token-log",
+      "hook": "log.beforePersist",
+      "target": { "field": "log.message" },
+      "match": { "regex": "Bearer\\s+[A-Za-z0-9._~+/=-]{8,}" },
+      "action": { "kind": "replace", "replacement": "Bearer [REDACTED]" }
+    },
+    {
+      "id": "redact-github-token-log",
+      "hook": "log.beforePersist",
+      "target": { "field": "log.message" },
+      "match": { "regex": "github_(pat|classic)_[A-Za-z0-9_]{10,}|gh[pousr]_[A-Za-z0-9_]{20,}" },
+      "action": { "kind": "replace", "replacement": "[REDACTED]" }
+    },
+    {
+      "id": "redact-url-token-log",
+      "hook": "log.beforePersist",
+      "target": { "field": "log.message" },
+      "match": { "regex": "([?&](?:token|api_key|key|access_token)=)[^\\s&]+" },
+      "action": { "kind": "replace", "replacement": "$1[REDACTED]" }
+    },
+    {
+      "id": "redact-db-connection-log",
+      "hook": "log.beforePersist",
+      "target": { "field": "log.message" },
+      "match": { "regex": "(postgres|postgresql|mysql|mongodb)://[^\\s@]+@[^\\s]+" },
+      "action": { "kind": "replace", "replacement": "$1://[REDACTED]" }
+    }
+  ]
+}

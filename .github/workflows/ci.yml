@@ -103,6 +103,21 @@ jobs:
       - name: Gateway error codes sync check
         run: pnpm check:gateway-error-codes
 
+      - name: Plugin docs contract
+        run: pnpm check:plugin-system-docs
+
+      - name: Generated IPC bindings contract
+        run: pnpm check:generated-bindings
+
+      - name: Plugin TypeScript SDK typecheck
+        run: pnpm plugin-sdk:typecheck
+
+      - name: Plugin scaffolder tests
+        run: pnpm create-aio-plugin:test
+
+      - name: Plugin GUI E2E smoke
+        run: pnpm test:e2e
+
       - name: Unit tests (Vitest + coverage gate)
         run: pnpm test:unit:coverage
 
@@ -170,6 +185,9 @@ jobs:
       - name: Rust clippy
         working-directory: src-tauri
         run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Plugin WASM SDK tests
+        run: pnpm plugin-wasm-sdk:test
 
       - name: Rust test
         working-directory: src-tauri

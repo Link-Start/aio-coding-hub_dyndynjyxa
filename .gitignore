@@ -27,7 +27,15 @@ dist-ssr
 .docs/
 .claude/
 .local/
-docs/
+docs/*
+!docs/
+!docs/plugin-system-development-plan.md
+!docs/plugin-system-rfc.md
+!docs/plugin-manifest-v1.md
+!docs/superpowers/
+!docs/superpowers/**
+!docs/plugins/
+!docs/plugins/**
 .vscode/
 *CLAUDE.md
 .ace-tool/
@@ -42,6 +50,7 @@ src/templates/
 .codex/
 .codex-temp/
 .opencode/
+target/
 src-tauri/target*/
 .pnpm-store/
 .codegraph/

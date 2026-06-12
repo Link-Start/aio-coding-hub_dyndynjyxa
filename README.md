@@ -83,6 +83,13 @@
 - 仓库管理、过滤、排序
 - 关联工作区批量管理
 
+### 插件系统
+
+- 官方示例插件：Prompt Optimizer、Safety Detector、Sensitive Data Redactor、Privacy Filter
+- 声明式规则插件：请求、响应、流式 chunk、日志 hook
+- 插件权限、配置 schema、审计日志、启用 / 禁用 / 卸载
+- SDK 与脚手架：`@aio-coding-hub/plugin-sdk`、`create-aio-plugin`
+
 ### CLI 管理
 
 - Claude Code 设置直接编辑
@@ -217,6 +224,17 @@ pnpm tauri:build
 curl http://127.0.0.1:37123/health
 # {"status":"ok"}
 ```
+
+### 插件开发文档
+
+插件系统面向社区扩展，短期优先支持安全的声明式规则插件。开发入口：
+
+- [插件开发总览](docs/plugins/README.md)
+- [快速开始](docs/plugins/getting-started.md)
+- [Plugin SDK](docs/plugins/sdk.md)
+- [声明式规则 Runtime](docs/plugins/declarative-rules.md)
+- [官方示例插件](docs/plugins/official-examples.md)
+- [Manifest v1 规范](docs/plugin-manifest-v1.md)
 
 ---
 

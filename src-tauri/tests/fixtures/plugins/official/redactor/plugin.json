@@ -1,0 +1,56 @@
+{
+  "id": "official.redactor",
+  "name": "Sensitive Data Redactor",
+  "version": "1.0.0",
+  "apiVersion": "1.0.0",
+  "category": "redaction",
+  "runtime": {
+    "kind": "declarativeRules",
+    "rules": ["rules/redactor.json"]
+  },
+  "hooks": [
+    {
+      "name": "gateway.request.beforeSend",
+      "priority": 20,
+      "failurePolicy": "fail-open"
+    },
+    {
+      "name": "gateway.response.chunk",
+      "priority": 20,
+      "failurePolicy": "fail-open"
+    },
+    {
+      "name": "gateway.response.after",
+      "priority": 20,
+      "failurePolicy": "fail-open"
+    },
+    {
+      "name": "log.beforePersist",
+      "priority": 1,
+      "failurePolicy": "fail-closed-to-host-redaction"
+    }
+  ],
+  "permissions": ["request.body.read", "response.body.read", "log.redact"],
+  "hostCompatibility": {
+    "app": ">=0.56.0 <1.0.0",
+    "pluginApi": "^1.0.0",
+    "platforms": ["macos", "windows", "linux"]
+  },
+  "configSchema": {
+    "type": "object",
+    "required": ["redactLogsAndGuiOnly", "sensitiveTypes"],
+    "properties": {
+      "redactLogsAndGuiOnly": { "type": "boolean" },
+      "redactBeforeUpstream": { "type": "boolean" },
+      "sensitiveTypes": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": ["bearer_token", "github_token", "url_query_token", "database_connection_string"]
+        }
+      },
+      "keepPrefixChars": { "type": "integer" },
+      "keepSuffixChars": { "type": "integer" }
+    }
+  }
+}

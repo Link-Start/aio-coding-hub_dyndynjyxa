@@ -5,6 +5,7 @@ import type { CliProxyResult, CliProxyStatus } from "../../services/cli/cliProxy
 import type { DbDiskUsage } from "../../services/app/dataManagement";
 import type { EnvConflict } from "../../services/cli/envConflicts";
 import type { GatewayStatus } from "../../services/gateway/gateway";
+import type { PluginDetail, PluginSummary } from "../../services/plugins";
 import type { CliKey, ProviderSummary } from "../../services/providers/providers";
 import type { AppSettings } from "../../services/settings/settings";
 import type { SortModeActiveRow, SortModeSummary } from "../../services/providers/sortModes";
@@ -140,6 +141,7 @@ let dbDiskUsageState: DbDiskUsage = clone(DEFAULT_DB_DISK_USAGE);
 let sortModesState: SortModeSummary[] = [];
 let sortModeActiveState: SortModeActiveRow[] = [];
 let workspacesState: Map<CliKey, WorkspacesListResult> = new Map();
+let pluginState: Map<string, PluginDetail> = new Map();
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -163,6 +165,7 @@ export function resetMswState() {
   sortModesState = [];
   sortModeActiveState = [];
   workspacesState = new Map();
+  pluginState = new Map();
 }
 
 export function getCliProxyStatusAllState(): CliProxyStatus[] {
@@ -204,6 +207,101 @@ export function getGatewayStatusState(): GatewayStatus {
 
 export function setGatewayStatusState(next: GatewayStatus) {
   gatewayStatusState = clone(next);
+}
+
+// -- Plugins --
+
+function officialPrivacyFilterDetail(): PluginDetail {
+  const summary: PluginSummary = {
+    id: 1,
+    plugin_id: "official.privacy-filter",
+    name: "Privacy Filter",
+    current_version: "1.0.0",
+    status: "disabled",
+    runtime: "declarativeRules",
+    permission_risk: "high",
+    update_available: false,
+    last_error: null,
+    created_at: 1,
+    updated_at: 1,
+  };
+
+  return {
+    summary,
+    manifest: {
+      id: "official.privacy-filter",
+      name: "Privacy Filter",
+      version: "1.0.0",
+      apiVersion: "1.0.0",
+      runtime: { kind: "declarativeRules", rules: ["rules/privacy-filter.json"] },
+      hooks: [
+        { name: "gateway.request.afterBodyRead", priority: 10, failurePolicy: "fail-open" },
+        { name: "log.beforePersist", priority: 10, failurePolicy: "fail-open" },
+      ],
+      permissions: ["request.body.read", "request.body.write", "log.redact"],
+      hostCompatibility: {
+        app: ">=0.56.0 <1.0.0",
+        pluginApi: "^1.0.0",
+        platforms: ["macos", "windows", "linux"],
+      },
+      configSchema: {
+        type: "object",
+        properties: {
+          redactEmails: { type: "boolean", default: true },
+          redactSecrets: { type: "boolean", default: true },
+        },
+      },
+      description: "Official privacy filter for PII and secrets.",
+      homepage: "https://github.com/packyme/privacy-filter",
+    },
+    install_source: "official",
+    installed_dir: null,
+    config: { redactEmails: true, redactSecrets: true },
+    granted_permissions: ["request.body.read", "request.body.write", "log.redact"],
+    pending_permissions: [],
+    audit_logs: [
+      {
+        id: 1,
+        plugin_id: "official.privacy-filter",
+        trace_id: null,
+        event_type: "plugin.installed",
+        risk_level: "low",
+        message: "Plugin installed",
+        details: { source: "official" },
+        created_at: 1,
+      },
+    ],
+    runtime_failures: [],
+  };
+}
+
+export function getPluginSummariesState(): PluginSummary[] {
+  return Array.from(pluginState.values()).map((detail) => clone(detail.summary));
+}
+
+export function getPluginDetailState(pluginId: string): PluginDetail | null {
+  return pluginState.has(pluginId) ? clone(pluginState.get(pluginId)!) : null;
+}
+
+export function installOfficialPluginState(pluginId: string): PluginDetail {
+  const detail =
+    pluginId === "official.privacy-filter"
+      ? officialPrivacyFilterDetail()
+      : {
+          ...officialPrivacyFilterDetail(),
+          summary: {
+            ...officialPrivacyFilterDetail().summary,
+            plugin_id: pluginId,
+            name: pluginId.split(".").pop() ?? pluginId,
+          },
+          manifest: {
+            ...officialPrivacyFilterDetail().manifest,
+            id: pluginId,
+            name: pluginId.split(".").pop() ?? pluginId,
+          },
+        };
+  pluginState.set(pluginId, clone(detail));
+  return clone(detail);
 }
 
 // -- Providers --

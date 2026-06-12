@@ -1,0 +1,27 @@
+{
+  "rules": [
+    {
+      "id": "dangerous-shell-non-stream",
+      "hook": "gateway.response.after",
+      "target": {
+        "field": "response.body",
+        "jsonPath": "$.choices[*].message.content"
+      },
+      "match": { "regex": "(rm\\s+-rf\\s+/|curl\\s+[^|]+\\|\\s*sh)" },
+      "action": {
+        "kind": "block",
+        "reason": "Potentially dangerous output blocked by Safety Detector."
+      }
+    },
+    {
+      "id": "dangerous-shell-stream",
+      "hook": "gateway.response.chunk",
+      "target": { "field": "stream.chunk" },
+      "match": { "regex": "(rm\\s+-rf\\s+/|curl\\s+[^|]+\\|\\s*sh)" },
+      "action": {
+        "kind": "block",
+        "reason": "Potentially dangerous stream output blocked by Safety Detector."
+      }
+    }
+  ]
+}

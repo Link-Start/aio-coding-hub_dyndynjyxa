@@ -122,9 +122,18 @@ where
 #[allow(clippy::await_holding_lock, clippy::field_reassign_with_default)]
 mod tests {
     use super::build_router;
+    use crate::domain::plugins::{
+        PluginDetail, PluginHook, PluginHostCompatibility, PluginInstallSource, PluginManifest,
+        PluginPermissionRisk, PluginRuntime, PluginStatus, PluginSummary,
+    };
     use crate::gateway::codex_session_id::CodexSessionIdCache;
+    use crate::gateway::plugins::context::{GatewayHookResult, GatewayPluginHookName};
+    use crate::gateway::plugins::pipeline::{
+        GatewayPluginPipeline, GatewayPluginPipelineConfig, InMemoryGatewayPluginExecutor,
+    };
     use crate::gateway::proxy::{ProviderBaseUrlPingCache, RecentErrorCache};
     use crate::gateway::runtime::GatewayAppState;
+    use crate::infra::plugins::repository;
     use crate::{circuit_breaker, db, providers, request_logs, session_manager, settings};
     use axum::body::HttpBody;
     use axum::body::{to_bytes, Body};
@@ -221,6 +230,105 @@ mod tests {
         });
 
         (format!("http://{addr}"), task)
+    }
+
+    async fn read_complete_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let Ok(size) = socket.read(&mut chunk).await else {
+                break;
+            };
+            if size == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..size]);
+            if buf.len() > 64 * 1024 {
+                break;
+            }
+
+            let request = String::from_utf8_lossy(&buf);
+            let Some((headers, body)) = request.split_once("\r\n\r\n") else {
+                continue;
+            };
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if name.eq_ignore_ascii_case("content-length") {
+                        value.trim().parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+            if body.len() >= content_length {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    async fn spawn_capturing_json_upstream(
+        body: &'static str,
+    ) -> (
+        String,
+        tokio::sync::oneshot::Receiver<String>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind capturing json upstream stub");
+        let addr = listener.local_addr().expect("capturing upstream addr");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let request = read_complete_http_request(&mut socket).await;
+                let captured_body = request
+                    .split_once("\r\n\r\n")
+                    .map(|(_, body)| body.to_string())
+                    .unwrap_or_default();
+                let _ = tx.send(captured_body);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        (format!("http://{addr}"), rx, task)
+    }
+
+    async fn spawn_capturing_raw_upstream(
+        body: &'static str,
+    ) -> (
+        String,
+        tokio::sync::oneshot::Receiver<String>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind capturing raw upstream stub");
+        let addr = listener.local_addr().expect("capturing raw upstream addr");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let request = read_complete_http_request(&mut socket).await;
+                let _ = tx.send(request);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        (format!("http://{addr}"), rx, task)
     }
 
     async fn spawn_status_json_upstream(
@@ -548,7 +656,182 @@ mod tests {
             codex_session_cache: Arc::new(Mutex::new(CodexSessionIdCache::default())),
             recent_errors: Arc::new(Mutex::new(RecentErrorCache::default())),
             latency_cache: Arc::new(Mutex::new(ProviderBaseUrlPingCache::default())),
+            plugin_pipeline: GatewayPluginPipeline::empty_shared(),
         }
+    }
+
+    fn gateway_state_with_plugin_pipeline(
+        app: tauri::AppHandle<tauri::test::MockRuntime>,
+        db: db::Db,
+        log_tx: tokio::sync::mpsc::Sender<request_logs::RequestLogInsert>,
+        plugin_pipeline: Arc<GatewayPluginPipeline>,
+    ) -> GatewayAppState<tauri::test::MockRuntime> {
+        let mut state = gateway_state(app, db, log_tx);
+        state.plugin_pipeline = plugin_pipeline;
+        state
+    }
+
+    fn request_rewrite_plugin() -> PluginDetail {
+        PluginDetail {
+            summary: PluginSummary {
+                id: 1,
+                plugin_id: "test.request-rewrite".to_string(),
+                name: "Request Rewrite".to_string(),
+                current_version: Some("1.0.0".to_string()),
+                status: PluginStatus::Enabled,
+                runtime: "declarativeRules".to_string(),
+                permission_risk: PluginPermissionRisk::High,
+                update_available: false,
+                last_error: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+            manifest: PluginManifest {
+                id: "test.request-rewrite".to_string(),
+                name: "Request Rewrite".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0.0".to_string(),
+                runtime: PluginRuntime::DeclarativeRules {
+                    rules: vec!["rules/main.json".to_string()],
+                },
+                hooks: vec![PluginHook {
+                    name: GatewayPluginHookName::RequestAfterBodyRead
+                        .as_str()
+                        .to_string(),
+                    priority: 10,
+                    failure_policy: Some("fail-open".to_string()),
+                }],
+                permissions: vec![
+                    "request.body.read".to_string(),
+                    "request.body.write".to_string(),
+                ],
+                host_compatibility: PluginHostCompatibility {
+                    app: ">=0.56.0 <1.0.0".to_string(),
+                    plugin_api: "^1.0.0".to_string(),
+                    platforms: vec![],
+                },
+                entry: None,
+                config_schema: None,
+                config_version: None,
+                description: None,
+                author: None,
+                homepage: None,
+                repository: None,
+                license: None,
+                checksum: None,
+                signature: None,
+                category: None,
+            },
+            install_source: PluginInstallSource::Official,
+            installed_dir: None,
+            config: serde_json::json!({}),
+            granted_permissions: vec![
+                "request.body.read".to_string(),
+                "request.body.write".to_string(),
+            ],
+            pending_permissions: vec![],
+            audit_logs: vec![],
+            runtime_failures: vec![],
+        }
+    }
+
+    fn fail_closed(mut plugin: PluginDetail) -> PluginDetail {
+        plugin.manifest.hooks[0].failure_policy = Some("fail-closed".to_string());
+        plugin
+    }
+
+    fn before_send_header_plugin() -> PluginDetail {
+        let mut plugin = request_rewrite_plugin();
+        plugin.summary.plugin_id = "test.before-send".to_string();
+        plugin.summary.name = "Before Send".to_string();
+        plugin.manifest.id = "test.before-send".to_string();
+        plugin.manifest.name = "Before Send".to_string();
+        plugin.manifest.hooks[0].name = GatewayPluginHookName::RequestBeforeSend
+            .as_str()
+            .to_string();
+        plugin.manifest.permissions = vec![
+            "request.meta.read".to_string(),
+            "request.header.write".to_string(),
+        ];
+        plugin.granted_permissions = plugin.manifest.permissions.clone();
+        plugin
+    }
+
+    fn response_after_plugin() -> PluginDetail {
+        let mut plugin = request_rewrite_plugin();
+        plugin.summary.plugin_id = "test.response-after".to_string();
+        plugin.summary.name = "Response After".to_string();
+        plugin.manifest.id = "test.response-after".to_string();
+        plugin.manifest.name = "Response After".to_string();
+        plugin.manifest.hooks[0].name = GatewayPluginHookName::ResponseAfter.as_str().to_string();
+        plugin.manifest.permissions = vec![
+            "response.body.read".to_string(),
+            "response.body.write".to_string(),
+        ];
+        plugin.granted_permissions = plugin.manifest.permissions.clone();
+        plugin
+    }
+
+    fn stream_chunk_plugin() -> PluginDetail {
+        let mut plugin = request_rewrite_plugin();
+        plugin.summary.plugin_id = "test.stream-chunk".to_string();
+        plugin.summary.name = "Stream Chunk".to_string();
+        plugin.manifest.id = "test.stream-chunk".to_string();
+        plugin.manifest.name = "Stream Chunk".to_string();
+        plugin.manifest.hooks[0].name = GatewayPluginHookName::ResponseChunk.as_str().to_string();
+        plugin.manifest.permissions =
+            vec!["stream.inspect".to_string(), "stream.modify".to_string()];
+        plugin.granted_permissions = plugin.manifest.permissions.clone();
+        plugin
+    }
+
+    fn log_redaction_plugin() -> PluginDetail {
+        let mut plugin = request_rewrite_plugin();
+        plugin.summary.plugin_id = "test.log-redaction".to_string();
+        plugin.summary.name = "Log Redaction".to_string();
+        plugin.manifest.id = "test.log-redaction".to_string();
+        plugin.manifest.name = "Log Redaction".to_string();
+        plugin.manifest.hooks[0].name =
+            GatewayPluginHookName::LogBeforePersist.as_str().to_string();
+        plugin.manifest.permissions = vec!["log.redact".to_string()];
+        plugin.granted_permissions = plugin.manifest.permissions.clone();
+        plugin
+    }
+
+    fn gateway_error_plugin() -> PluginDetail {
+        let mut plugin = request_rewrite_plugin();
+        plugin.summary.plugin_id = "test.gateway-error".to_string();
+        plugin.summary.name = "Gateway Error".to_string();
+        plugin.manifest.id = "test.gateway-error".to_string();
+        plugin.manifest.name = "Gateway Error".to_string();
+        plugin.manifest.hooks[0].name = GatewayPluginHookName::Error.as_str().to_string();
+        plugin.manifest.permissions = vec![
+            "response.body.read".to_string(),
+            "response.body.write".to_string(),
+            "response.header.write".to_string(),
+        ];
+        plugin.granted_permissions = plugin.manifest.permissions.clone();
+        plugin
+    }
+
+    fn persist_test_plugin(db: &db::Db, plugin: &PluginDetail) {
+        repository::insert_plugin(
+            db,
+            repository::InsertPluginInput {
+                manifest: plugin.manifest.clone(),
+                install_source: PluginInstallSource::Official,
+                status: PluginStatus::Enabled,
+                installed_dir: None,
+            },
+        )
+        .expect("insert test plugin");
+        repository::save_plugin_permissions(
+            db,
+            &plugin.summary.plugin_id,
+            &plugin.granted_permissions,
+            &[],
+        )
+        .expect("grant test plugin permissions");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -646,6 +929,792 @@ mod tests {
         );
 
         upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_request_after_body_read_rewrites_upstream_body() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("gateway-plugin-request-test.sqlite"))
+            .expect("init test db");
+        let (upstream_base_url, captured_rx, upstream_task) = spawn_capturing_json_upstream(
+            r#"{"id":"stub-ok","object":"chat.completion","choices":[]}"#,
+        )
+        .await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+
+        let executor = InMemoryGatewayPluginExecutor::new().with_request_handler(
+            "test.request-rewrite",
+            |_ctx| GatewayHookResult {
+                request_body: Some(
+                    r#"{"model":"gpt-plugin","messages":[{"role":"user","content":"rewritten"}]}"#
+                        .to_string(),
+                ),
+                ..GatewayHookResult::continue_unchanged()
+            },
+        );
+        let plugin = request_rewrite_plugin();
+        persist_test_plugin(&db, &plugin);
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![plugin.clone()],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db.clone(),
+            log_tx,
+            plugin_pipeline,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/codex/_aio/provider/{provider_id}/v1/chat/completions"
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"model":"gpt-plugin","messages":[{"role":"user","content":"original"}]}"#,
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let captured = tokio::time::timeout(Duration::from_secs(2), captured_rx)
+            .await
+            .expect("captured upstream request")
+            .expect("captured body");
+        assert!(captured.contains(r#""content":"rewritten""#));
+        assert!(!captured.contains(r#""content":"original""#));
+
+        let request_log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(request_log.status, Some(200));
+        let plugin_detail = repository::get_plugin(&db, &plugin.summary.plugin_id)
+            .expect("read persisted plugin detail");
+        assert!(plugin_detail.audit_logs.iter().any(|audit| {
+            audit.trace_id.as_deref() == Some(request_log.trace_id.as_str())
+                && audit.event_type == "plugin.hook.completed"
+        }));
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_request_after_body_read_fail_closed_error_stops_request() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(
+            &db_dir
+                .path()
+                .join("gateway-plugin-after-body-fail-closed-test.sqlite"),
+        )
+        .expect("init test db");
+        let (upstream_base_url, captured_rx, upstream_task) = spawn_capturing_json_upstream(
+            r#"{"id":"stub-ok","object":"chat.completion","choices":[]}"#,
+        )
+        .await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+
+        let executor = InMemoryGatewayPluginExecutor::new().with_request_handler(
+            "test.request-rewrite",
+            |_ctx| {
+                let mut result = GatewayHookResult::continue_unchanged();
+                result
+                    .headers
+                    .insert("x-aio-forbidden".to_string(), "1".to_string());
+                result
+            },
+        );
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![fail_closed(request_rewrite_plugin())],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, _log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db,
+            log_tx,
+            plugin_pipeline,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/codex/_aio/provider/{provider_id}/v1/chat/completions"
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"model":"gpt-plugin","messages":[{"role":"user","content":"original"}]}"#,
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let payload: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            payload.get("error_code").and_then(Value::as_str),
+            Some(crate::gateway::proxy::GatewayErrorCode::InternalError.as_str())
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), captured_rx)
+                .await
+                .is_err(),
+            "fail-closed afterBodyRead should not send the request upstream"
+        );
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_request_before_send_adds_upstream_header() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("gateway-plugin-before-send-test.sqlite"))
+            .expect("init test db");
+        let (upstream_base_url, captured_rx, upstream_task) = spawn_capturing_raw_upstream(
+            r#"{"id":"stub-ok","object":"chat.completion","choices":[]}"#,
+        )
+        .await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+
+        let executor =
+            InMemoryGatewayPluginExecutor::new().with_request_handler("test.before-send", |_ctx| {
+                let mut result = GatewayHookResult::continue_unchanged();
+                result
+                    .headers
+                    .insert("x-plugin-before-send".to_string(), "applied".to_string());
+                result
+            });
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![before_send_header_plugin()],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db,
+            log_tx,
+            plugin_pipeline,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/codex/_aio/provider/{provider_id}/v1/chat/completions"
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"model":"gpt-plugin","messages":[{"role":"user","content":"hello"}]}"#,
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let captured = tokio::time::timeout(Duration::from_secs(2), captured_rx)
+            .await
+            .expect("captured upstream request")
+            .expect("captured raw request");
+        assert!(
+            captured
+                .to_ascii_lowercase()
+                .contains("x-plugin-before-send: applied"),
+            "captured upstream request did not include plugin header:\n{captured}"
+        );
+
+        let log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(log.status, Some(200));
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_request_before_send_fail_closed_error_stops_request() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(
+            &db_dir
+                .path()
+                .join("gateway-plugin-before-send-fail-closed-test.sqlite"),
+        )
+        .expect("init test db");
+        let (upstream_base_url, captured_rx, upstream_task) = spawn_capturing_raw_upstream(
+            r#"{"id":"stub-ok","object":"chat.completion","choices":[]}"#,
+        )
+        .await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+
+        let executor =
+            InMemoryGatewayPluginExecutor::new().with_request_handler("test.before-send", |_ctx| {
+                let mut result = GatewayHookResult::continue_unchanged();
+                result
+                    .headers
+                    .insert("x-aio-forbidden".to_string(), "1".to_string());
+                result
+            });
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![fail_closed(before_send_header_plugin())],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, _log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db,
+            log_tx,
+            plugin_pipeline,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/codex/_aio/provider/{provider_id}/v1/chat/completions"
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"model":"gpt-plugin","messages":[{"role":"user","content":"hello"}]}"#,
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let payload: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            payload.get("error_code").and_then(Value::as_str),
+            Some(crate::gateway::proxy::GatewayErrorCode::InternalError.as_str())
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), captured_rx)
+                .await
+                .is_err(),
+            "fail-closed beforeSend should not send the request upstream"
+        );
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_response_after_rewrites_non_stream_body() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("gateway-plugin-response-test.sqlite"))
+            .expect("init test db");
+        let (upstream_base_url, upstream_task) =
+            spawn_json_upstream(r#"{"id":"original","object":"chat.completion","choices":[]}"#)
+                .await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+
+        let executor = InMemoryGatewayPluginExecutor::new().with_response_handler(
+            "test.response-after",
+            |_ctx| GatewayHookResult {
+                response_body: Some(
+                    r#"{"id":"rewritten","object":"chat.completion","choices":[]}"#.to_string(),
+                ),
+                ..GatewayHookResult::continue_unchanged()
+            },
+        );
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![response_after_plugin()],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db,
+            log_tx,
+            plugin_pipeline,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/codex/_aio/provider/{provider_id}/v1/chat/completions"
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"model":"gpt-plugin","messages":[{"role":"user","content":"hello"}]}"#,
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let payload: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(payload.get("id").and_then(Value::as_str), Some("rewritten"));
+
+        let log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(log.status, Some(200));
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_response_after_fail_closed_error_replaces_upstream_success() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(
+            &db_dir
+                .path()
+                .join("gateway-plugin-response-fail-closed-test.sqlite"),
+        )
+        .expect("init test db");
+        let (upstream_base_url, upstream_task) =
+            spawn_json_upstream(r#"{"id":"original","object":"chat.completion","choices":[]}"#)
+                .await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+
+        let executor = InMemoryGatewayPluginExecutor::new().with_response_handler(
+            "test.response-after",
+            |_ctx| {
+                let mut result = GatewayHookResult::continue_unchanged();
+                result
+                    .headers
+                    .insert("x-aio-forbidden".to_string(), "1".to_string());
+                result
+            },
+        );
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![fail_closed(response_after_plugin())],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, _log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db,
+            log_tx,
+            plugin_pipeline,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/codex/_aio/provider/{provider_id}/v1/chat/completions"
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"model":"gpt-plugin","messages":[{"role":"user","content":"hello"}]}"#,
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let payload: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            payload.get("error_code").and_then(Value::as_str),
+            Some(crate::gateway::proxy::GatewayErrorCode::InternalError.as_str())
+        );
+        assert_ne!(payload.get("id").and_then(Value::as_str), Some("original"));
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_response_chunk_rewrites_stream_body() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("gateway-plugin-stream-test.sqlite"))
+            .expect("init test db");
+        let (upstream_base_url, upstream_task) =
+            spawn_sse_upstream("data: secret-stream\n\n").await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+
+        let executor =
+            InMemoryGatewayPluginExecutor::new().with_stream_handler("test.stream-chunk", |ctx| {
+                let chunk = ctx.stream.chunk.expect("visible stream chunk");
+                assert!(chunk.contains("secret-stream"));
+                GatewayHookResult {
+                    stream_chunk: Some(chunk.replace("secret-stream", "redacted-stream")),
+                    ..GatewayHookResult::continue_unchanged()
+                }
+            });
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![stream_chunk_plugin()],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db,
+            log_tx,
+            plugin_pipeline,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/codex/_aio/provider/{provider_id}/v1/chat/completions"
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"model":"gpt-plugin","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream")));
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("redacted-stream"),
+            "stream body was not rewritten: {body}"
+        );
+        assert!(
+            !body.contains("secret-stream"),
+            "stream body leaked secret: {body}"
+        );
+
+        let log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(log.status, Some(200));
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_response_chunk_block_emits_stream_error_event() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(
+            &db_dir
+                .path()
+                .join("gateway-plugin-stream-block-test.sqlite"),
+        )
+        .expect("init test db");
+        let (upstream_base_url, upstream_task) =
+            spawn_sse_upstream("data: dangerous-command\n\n").await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+
+        let executor =
+            InMemoryGatewayPluginExecutor::new().with_stream_handler("test.stream-chunk", |ctx| {
+                assert!(ctx
+                    .stream
+                    .chunk
+                    .as_deref()
+                    .is_some_and(|chunk| chunk.contains("dangerous-command")));
+                let mut result = GatewayHookResult::continue_unchanged();
+                result.action = crate::gateway::plugins::context::GatewayHookAction::Block;
+                result.reason = Some("dangerous command detected".to_string());
+                result
+            });
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![stream_chunk_plugin()],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db,
+            log_tx,
+            plugin_pipeline,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/codex/_aio/provider/{provider_id}/v1/chat/completions"
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"model":"gpt-plugin","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("event: error"),
+            "stream block did not emit error event: {body}"
+        );
+        assert!(
+            body.contains("plugin_blocked"),
+            "stream block reason missing: {body}"
+        );
+        assert!(
+            !body.contains("dangerous-command"),
+            "blocked stream leaked chunk: {body}"
+        );
+
+        let log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(log.status, Some(502));
+        assert_eq!(
+            log.error_code.as_deref(),
+            Some(crate::gateway::proxy::GatewayErrorCode::Fake200.as_str())
+        );
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plugin_log_redaction_rewrites_request_log_before_enqueue() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(
+            &db_dir
+                .path()
+                .join("gateway-plugin-log-redaction-test.sqlite"),
+        )
+        .expect("init test db");
+        let (upstream_base_url, upstream_task) =
+            spawn_json_upstream(r#"{"id":"stub-ok","object":"chat.completion","choices":[]}"#)
+                .await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+
+        let executor =
+            InMemoryGatewayPluginExecutor::new().with_log_handler("test.log-redaction", |ctx| {
+                let message = ctx.log.message.expect("visible log message");
+                assert!(message.contains("secret-query"));
+                GatewayHookResult {
+                    log_message: Some(message.replace("secret-query", "[REDACTED]")),
+                    ..GatewayHookResult::continue_unchanged()
+                }
+            });
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![log_redaction_plugin()],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db,
+            log_tx,
+            plugin_pipeline,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/codex/_aio/provider/{provider_id}/v1/chat/completions?token=secret-query"
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"model":"gpt-plugin","messages":[{"role":"user","content":"hello"}]}"#,
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(log.status, Some(200));
+        assert_eq!(log.query.as_deref(), Some("token=[REDACTED]"));
+        assert_ne!(log.query.as_deref(), Some("token=secret-query"));
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_error_hook_rewrites_gateway_error_response() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let app_settings = settings::AppSettings::default();
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("gateway-plugin-error-test.sqlite"))
+            .expect("init test db");
+
+        let executor = InMemoryGatewayPluginExecutor::new().with_response_handler(
+            "test.gateway-error",
+            |ctx| {
+                assert_eq!(ctx.hook_name, "gateway.error");
+                assert_eq!(ctx.response.status, Some(503));
+                assert!(ctx
+                    .response
+                    .body
+                    .as_deref()
+                    .is_some_and(|body| body.contains("GW_NO_ENABLED_PROVIDER")));
+                let mut result = GatewayHookResult {
+                    response_body: Some(
+                        r#"{"error_code":"GW_NO_ENABLED_PROVIDER","message":"plugin-friendly error","attempts":[]}"#
+                            .to_string(),
+                    ),
+                    ..GatewayHookResult::continue_unchanged()
+                };
+                result
+                    .headers
+                    .insert("x-plugin-error".to_string(), "rewritten".to_string());
+                result
+            },
+        );
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![gateway_error_plugin()],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db,
+            log_tx,
+            plugin_pipeline,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"model":"gpt-plugin","messages":[{"role":"user","content":"hello"}]}"#,
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-plugin-error")
+                .and_then(|value| value.to_str().ok()),
+            Some("rewritten")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let payload: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            payload.get("message").and_then(Value::as_str),
+            Some("plugin-friendly error")
+        );
+
+        let log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(log.status, Some(503));
+        assert_eq!(
+            log.error_code.as_deref(),
+            Some(crate::gateway::proxy::GatewayErrorCode::NoEnabledProvider.as_str())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

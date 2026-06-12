@@ -126,6 +126,7 @@ impl<R: tauri::Runtime> RequestContext<R> {
             state.app.clone(),
             state.db.clone(),
             state.log_tx.clone(),
+            state.plugin_pipeline.clone(),
             trace_id.clone(),
             cli_key.clone(),
             method_hint.clone(),

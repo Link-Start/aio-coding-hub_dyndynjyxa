@@ -5,6 +5,7 @@
 
 use super::provider_iterator::PreparedProvider;
 use super::*;
+use crate::gateway::plugins::context::{GatewayPluginHookName, GatewayRequestHookInput};
 use crate::gateway::proxy::abort_guard::RequestAbortGuard;
 use crate::gateway::proxy::request_context::RequestContext;
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,8 @@ pub(super) enum AttemptSendOutcome {
     UrlBuildFailed(LoopControl),
     /// OAuth adapter injection failed; break out of retry loop for this provider.
     OAuthInjectFailed,
+    /// Plugin blocked the request before the upstream send.
+    PluginBlocked(String),
 }
 
 /// Build request headers, inject auth, clean body, send upstream, and return
@@ -131,6 +134,51 @@ where
         &clean_outcome,
     );
 
+    let mut upstream_body = clean_outcome.body;
+    let hook_input = GatewayRequestHookInput {
+        hook_name: GatewayPluginHookName::RequestBeforeSend,
+        trace_id: input.trace_id.clone(),
+        cli_key: input.cli_key.clone(),
+        method: input.req_method.clone(),
+        path: input.forwarded_path.clone(),
+        query: input.query.clone(),
+        headers: headers.clone(),
+        body: upstream_body.clone(),
+        requested_model: input.requested_model.clone(),
+    };
+    match ctx.state.plugin_pipeline.run_request_hook(hook_input).await {
+        Ok(output) => {
+            crate::gateway::plugins::audit::persist_gateway_plugin_audit_events(
+                &ctx.state.db,
+                &input.trace_id,
+                output.audit_events.clone(),
+            );
+            if let Some(blocked) = output.blocked {
+                tracing::warn!(
+                    trace_id = %input.trace_id,
+                    provider_id = prepared.provider_id,
+                    status = blocked.status,
+                    reason = %blocked.reason,
+                    "plugin blocked gateway request before upstream send"
+                );
+                return AttemptSendOutcome::PluginBlocked(blocked.reason);
+            }
+            headers = output.headers;
+            upstream_body = output.body;
+        }
+        Err(err) => {
+            tracing::warn!(
+                trace_id = %input.trace_id,
+                provider_id = prepared.provider_id,
+                "plugin beforeSend hook failed: {}",
+                err
+            );
+            return AttemptSendOutcome::PluginBlocked(format!(
+                "gateway plugin request hook failed: {err}"
+            ));
+        }
+    }
+
     emit_upstream_attempt_fingerprint(
         ctx,
         input,
@@ -138,7 +186,7 @@ where
         retry_index,
         &url,
         &headers,
-        &clean_outcome.body,
+        &upstream_body,
     );
 
     let timing = AttemptTiming {
@@ -146,14 +194,8 @@ where
         attempt_started: Instant::now(),
     };
 
-    let send_result = send::send_upstream(
-        ctx,
-        input.req_method.clone(),
-        url,
-        headers,
-        clean_outcome.body,
-    )
-    .await;
+    let send_result =
+        send::send_upstream(ctx, input.req_method.clone(), url, headers, upstream_body).await;
 
     match send_result {
         send::SendResult::Ok(resp) => AttemptSendOutcome::Response(resp, timing),
