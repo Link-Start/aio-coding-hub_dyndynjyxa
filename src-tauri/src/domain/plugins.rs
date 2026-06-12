@@ -48,6 +48,9 @@ pub enum PluginRuntime {
     DeclarativeRules {
         rules: Vec<String>,
     },
+    Native {
+        engine: String,
+    },
     Wasm {
         #[serde(rename = "abiVersion")]
         abi_version: String,
@@ -239,7 +242,7 @@ pub fn validate_manifest(
     validate_plugin_id(&manifest.id)?;
     validate_semver(&manifest.version, "PLUGIN_INVALID_VERSION")?;
     validate_semver(&manifest.api_version, "PLUGIN_INVALID_API_VERSION")?;
-    validate_runtime(&manifest.runtime)?;
+    validate_runtime(manifest)?;
     validate_hooks(&manifest.hooks)?;
     validate_permissions(&manifest.permissions)?;
     validate_hook_permissions(&manifest.hooks, &manifest.permissions)?;
@@ -303,13 +306,21 @@ fn validate_semver(version: &str, code: &str) -> Result<(), PluginValidationErro
         .ok_or_else(|| PluginValidationError::new(code, format!("invalid SemVer: {version}")))
 }
 
-fn validate_runtime(runtime: &PluginRuntime) -> Result<(), PluginValidationError> {
-    match runtime {
+fn validate_runtime(manifest: &PluginManifest) -> Result<(), PluginValidationError> {
+    match &manifest.runtime {
         PluginRuntime::DeclarativeRules { rules } => {
             if rules.is_empty() {
                 return Err(PluginValidationError::new(
                     "PLUGIN_INVALID_RUNTIME",
                     "declarativeRules runtime requires at least one rules file",
+                ));
+            }
+        }
+        PluginRuntime::Native { engine } => {
+            if manifest.id != "official.privacy-filter" || engine != "privacyFilter" {
+                return Err(PluginValidationError::new(
+                    "PLUGIN_UNSUPPORTED_RUNTIME",
+                    "native runtime is reserved for official plugins",
                 ));
             }
         }
@@ -604,5 +615,27 @@ mod tests {
         raw["runtime"] = serde_json::json!({ "kind": "node" });
         let err = serde_json::from_value::<PluginManifest>(raw).unwrap_err();
         assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn manifest_allows_only_official_privacy_filter_native_runtime() {
+        let mut official = valid_manifest();
+        official["id"] = serde_json::json!("official.privacy-filter");
+        official["runtime"] = serde_json::json!({
+            "kind": "native",
+            "engine": "privacyFilter"
+        });
+        let manifest: PluginManifest = serde_json::from_value(official).unwrap();
+        validate_manifest(&manifest, "0.56.0").unwrap();
+
+        let mut local = valid_manifest();
+        local["id"] = serde_json::json!("local.privacy-filter");
+        local["runtime"] = serde_json::json!({
+            "kind": "native",
+            "engine": "privacyFilter"
+        });
+        let manifest: PluginManifest = serde_json::from_value(local).unwrap();
+        let err = validate_manifest(&manifest, "0.56.0").unwrap_err();
+        assert_eq!(err.code, "PLUGIN_UNSUPPORTED_RUNTIME");
     }
 }

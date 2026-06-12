@@ -8,10 +8,12 @@ Required fields:
 - `name`: display name.
 - `version`: SemVer plugin version.
 - `apiVersion`: SemVer plugin API version.
-- `runtime`: either `declarativeRules` or `wasm`.
+- `runtime`: `declarativeRules` or `wasm` for community plugins. `native` is reserved for built-in official plugins.
 - `hooks`: hook declarations.
 - `permissions`: requested permission names.
 - `hostCompatibility`: app and plugin API compatibility constraints.
+
+The `official.*` namespace is reserved for built-in official plugins. Local, marketplace, and GitHub packages must use their own publisher namespace.
 
 Runtime examples:
 
@@ -22,5 +24,13 @@ Runtime examples:
 ```json
 { "kind": "wasm", "abiVersion": "1.0.0", "memoryLimitBytes": 16777216 }
 ```
+
+Official-only native runtime example:
+
+```json
+{ "kind": "native", "engine": "privacyFilter" }
+```
+
+Only built-in official plugins installed from the official source may use `native`.
 
 `hostCompatibility` must include `app` and `pluginApi`; `platforms` may restrict OS support.

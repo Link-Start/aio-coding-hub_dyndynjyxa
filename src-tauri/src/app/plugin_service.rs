@@ -66,6 +66,7 @@ pub(crate) fn install_plugin_manifest(
     host_version: &str,
 ) -> AppResult<PluginDetail> {
     validate_manifest(&manifest, host_version)?;
+    validate_reserved_official_source(&manifest, install_source)?;
     let plugin_id = manifest.id.clone();
     let detail = repository::insert_plugin(
         db,
@@ -574,9 +575,23 @@ fn validate_local_package_install(
     policy: &LocalPackageInstallPolicy,
 ) -> AppResult<PackageTrust> {
     validate_manifest(&extracted.manifest, host_version)?;
+    validate_reserved_official_source(&extracted.manifest, PluginInstallSource::Local)?;
     let trust = verify_local_package(extracted, policy)?;
     enforce_unsigned_install_policy(&extracted.manifest, policy, trust)?;
     Ok(trust)
+}
+
+fn validate_reserved_official_source(
+    manifest: &PluginManifest,
+    install_source: PluginInstallSource,
+) -> AppResult<()> {
+    if manifest.id.starts_with("official.") && install_source != PluginInstallSource::Official {
+        return Err(AppError::new(
+            "PLUGIN_RESERVED_OFFICIAL_ID",
+            "official plugin ids are reserved for built-in official plugins",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn enable_plugin(
@@ -1189,6 +1204,13 @@ mod tests {
 
         assert_eq!(installed.install_source, PluginInstallSource::Official);
         assert_eq!(installed.summary.status, PluginStatus::Disabled);
+        assert_eq!(installed.summary.runtime, "native:privacyFilter");
+        assert_eq!(
+            installed.manifest.runtime,
+            crate::plugins::PluginRuntime::Native {
+                engine: "privacyFilter".to_string()
+            }
+        );
         assert!(installed.installed_dir.as_deref().is_some_and(|path| {
             path.contains("tests/fixtures/plugins/official/privacy-filter")
         }));
@@ -1352,6 +1374,50 @@ mod tests {
         assert!(repository::get_plugin(&db, "local.bad").is_err());
         assert!(!installed_dir.join("local.bad").exists());
         assert!(!cache_dir.join("staging").exists());
+    }
+
+    #[test]
+    fn plugin_local_install_rejects_reserved_official_privacy_filter_native_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::init_for_tests(&dir.path().join("plugins.db")).unwrap();
+        let package_path = dir.path().join("fake-official-privacy-filter.aio-plugin");
+        let mut manifest = local_package_manifest("official.privacy-filter", "1.0.0");
+        manifest["runtime"] = serde_json::json!({
+            "kind": "native",
+            "engine": "privacyFilter"
+        });
+        manifest["hooks"] = serde_json::json!([
+            {
+                "name": "gateway.request.afterBodyRead",
+                "priority": 10,
+                "failurePolicy": "fail-open"
+            },
+            {
+                "name": "log.beforePersist",
+                "priority": 20,
+                "failurePolicy": "fail-closed"
+            }
+        ]);
+        manifest["permissions"] =
+            serde_json::json!(["request.body.read", "request.body.write", "log.redact"]);
+        write_local_package(&package_path, manifest);
+
+        let err = install_plugin_from_local_package_with_policy(
+            &db,
+            &package_path,
+            &dir.path().join("plugins/cache"),
+            &dir.path().join("plugins/installed"),
+            env!("CARGO_PKG_VERSION"),
+            LocalPackageInstallPolicy {
+                allow_unsigned: true,
+                developer_mode: true,
+                ..LocalPackageInstallPolicy::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().starts_with("PLUGIN_RESERVED_OFFICIAL_ID:"));
+        assert!(repository::get_plugin(&db, "official.privacy-filter").is_err());
     }
 
     #[test]

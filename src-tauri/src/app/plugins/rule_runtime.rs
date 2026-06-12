@@ -1,5 +1,6 @@
 //! Usage: Declarative, no-code plugin rule runtime.
 
+use super::privacy_filter::{PrivacyFilter, PrivacyFilterError};
 use crate::gateway::plugins::context::{
     GatewayHookAction, GatewayHookResult, GatewayVisibleHookContext,
 };
@@ -149,6 +150,7 @@ impl RuleRuntime {
 #[derive(Default)]
 pub(crate) struct RuleRuntimeGatewayPluginExecutor {
     cache: Mutex<HashMap<String, RuleRuntime>>,
+    privacy_filter_cache: Mutex<HashMap<String, PrivacyFilter>>,
 }
 
 impl RuleRuntimeGatewayPluginExecutor {
@@ -157,6 +159,10 @@ impl RuleRuntimeGatewayPluginExecutor {
         plugin: &PluginDetail,
         context: GatewayVisibleHookContext,
     ) -> Result<GatewayHookResult, GatewayPluginError> {
+        if plugin.summary.plugin_id == "official.privacy-filter" {
+            return self.execute_official_privacy_filter(plugin, context);
+        }
+
         let cache_key = rule_runtime_cache_key(plugin);
         let mut cache = self
             .cache
@@ -179,6 +185,33 @@ impl RuleRuntimeGatewayPluginExecutor {
             .execute(&context, &plugin.config)
             .map_err(to_gateway_plugin_error)
     }
+
+    fn execute_official_privacy_filter(
+        &self,
+        plugin: &PluginDetail,
+        context: GatewayVisibleHookContext,
+    ) -> Result<GatewayHookResult, GatewayPluginError> {
+        let cache_key = privacy_filter_cache_key(plugin);
+        let mut cache = self
+            .privacy_filter_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !cache.contains_key(&cache_key) {
+            let filter = load_official_privacy_filter(plugin).map_err(to_privacy_filter_error)?;
+            cache.insert(cache_key.clone(), filter);
+        }
+        let filter = cache.get(&cache_key).ok_or_else(|| {
+            GatewayPluginError::new(
+                "PLUGIN_PRIVACY_FILTER_RUNTIME_MISSING",
+                format!(
+                    "privacy filter runtime cache missing for plugin {}",
+                    plugin.summary.plugin_id
+                ),
+            )
+        })?;
+        execute_official_privacy_filter_hook(filter, &context, &plugin.config)
+            .map_err(to_privacy_filter_error)
+    }
 }
 
 fn rule_runtime_cache_key(plugin: &PluginDetail) -> String {
@@ -190,11 +223,25 @@ fn rule_runtime_cache_key(plugin: &PluginDetail) -> String {
     let installed_dir = plugin.installed_dir.as_deref().unwrap_or("");
     let rules = match &plugin.manifest.runtime {
         PluginRuntime::DeclarativeRules { rules } => rules.join("\u{1f}"),
+        PluginRuntime::Native { engine } => format!("native:{engine}"),
         PluginRuntime::Wasm { abi_version, .. } => format!("wasm:{abi_version}"),
     };
     format!(
         "{}\u{1e}{}\u{1e}{}\u{1e}{}",
         plugin.summary.plugin_id, version, installed_dir, rules
+    )
+}
+
+fn privacy_filter_cache_key(plugin: &PluginDetail) -> String {
+    let version = plugin
+        .summary
+        .current_version
+        .as_deref()
+        .unwrap_or(plugin.manifest.version.as_str());
+    let installed_dir = plugin.installed_dir.as_deref().unwrap_or("");
+    format!(
+        "{}\u{1e}{}\u{1e}{}",
+        plugin.summary.plugin_id, version, installed_dir
     )
 }
 
@@ -291,6 +338,105 @@ fn load_rule_runtime(plugin: &PluginDetail) -> Result<RuleRuntime, RuleRuntimeEr
     RuleRuntime::from_document(RuleDocument {
         rules: merged_rules,
     })
+}
+
+fn load_official_privacy_filter(
+    plugin: &PluginDetail,
+) -> Result<PrivacyFilter, PrivacyFilterError> {
+    let root_dir = plugin.installed_dir.as_deref().ok_or_else(|| {
+        PrivacyFilterError::new(format!(
+            "plugin {} has no installed_dir for privacy-filter rule loading",
+            plugin.summary.plugin_id
+        ))
+    })?;
+    let rules_path = std::path::Path::new(root_dir).join("rules/gitleaks.toml");
+    let raw = fs::read_to_string(&rules_path).map_err(|err| {
+        PrivacyFilterError::new(format!(
+            "failed to read privacy-filter gitleaks rules for plugin {}: {err}",
+            plugin.summary.plugin_id
+        ))
+    })?;
+    PrivacyFilter::from_gitleaks_toml(&raw)
+}
+
+fn execute_official_privacy_filter_hook(
+    filter: &PrivacyFilter,
+    context: &GatewayVisibleHookContext,
+    config: &Value,
+) -> Result<GatewayHookResult, PrivacyFilterError> {
+    let mut result = GatewayHookResult::continue_unchanged();
+    match context.hook_name.as_str() {
+        "gateway.request.afterBodyRead" => {
+            if config.get("redactBeforeUpstream") != Some(&Value::Bool(true)) {
+                return Ok(result);
+            }
+            let Some(body) = context.request.body.as_deref() else {
+                return Ok(result);
+            };
+            if let Some(next_body) = redact_request_body_strings(filter, body)? {
+                result.request_body = Some(next_body);
+            }
+        }
+        "log.beforePersist" => {
+            if config.get("redactLogs") != Some(&Value::Bool(true)) {
+                return Ok(result);
+            }
+            let Some(message) = context.log.message.as_deref() else {
+                return Ok(result);
+            };
+            let redacted = filter.redact(message);
+            if redacted.hit {
+                result.log_message = Some(redacted.redacted);
+            }
+        }
+        _ => {}
+    }
+    Ok(result)
+}
+
+fn redact_request_body_strings(
+    filter: &PrivacyFilter,
+    body: &str,
+) -> Result<Option<String>, PrivacyFilterError> {
+    let Ok(mut root) = serde_json::from_str::<Value>(body) else {
+        let redacted = filter.redact(body);
+        return Ok(redacted.hit.then_some(redacted.redacted));
+    };
+    let mut matched = false;
+    redact_json_strings_mut(&mut root, filter, &mut matched);
+    if !matched {
+        return Ok(None);
+    }
+    serde_json::to_string(&root)
+        .map(Some)
+        .map_err(|err| PrivacyFilterError::new(format!("failed to serialize redacted JSON: {err}")))
+}
+
+fn redact_json_strings_mut(value: &mut Value, filter: &PrivacyFilter, matched: &mut bool) {
+    match value {
+        Value::String(text) => {
+            let redacted = filter.redact(text);
+            if redacted.hit {
+                *text = redacted.redacted;
+                *matched = true;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_json_strings_mut(item, filter, matched);
+            }
+        }
+        Value::Object(map) => {
+            for value in map.values_mut() {
+                redact_json_strings_mut(value, filter, matched);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn to_privacy_filter_error(err: PrivacyFilterError) -> GatewayPluginError {
+    GatewayPluginError::new("PLUGIN_PRIVACY_FILTER_FAILED", err.to_string())
 }
 
 fn to_gateway_plugin_error(err: RuleRuntimeError) -> GatewayPluginError {

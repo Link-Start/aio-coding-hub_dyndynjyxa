@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "apiVersion": "1.0.0",
   "category": "privacy",
-  "description": "Official declarative privacy filter inspired by packyme/privacy-filter for pre-upstream prompt and log redaction.",
+  "description": "Official native privacy filter aligned with packyme/privacy-filter for pre-upstream prompt and log redaction.",
   "homepage": "https://github.com/packyme/privacy-filter",
   "repository": {
     "type": "git",
@@ -12,8 +12,8 @@
   },
   "license": "MIT",
   "runtime": {
-    "kind": "declarativeRules",
-    "rules": ["rules/privacy-filter.json"]
+    "kind": "native",
+    "engine": "privacyFilter"
   },
   "hooks": [
     {

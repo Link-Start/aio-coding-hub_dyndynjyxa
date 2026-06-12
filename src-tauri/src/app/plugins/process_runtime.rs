@@ -3,6 +3,7 @@
 
 use crate::shared::error::{AppError, AppResult};
 use serde_json::{json, Value};
+use std::io::ErrorKind;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -194,24 +195,18 @@ impl JsonRpcProcessRuntime {
                 "process plugin stdin is closed",
             ));
         };
-        stdin.write_all(bytes).await.map_err(|err| {
-            AppError::new(
-                "PLUGIN_PROCESS_WRITE_FAILED",
-                format!("failed to write process plugin request: {err}"),
-            )
-        })?;
-        stdin.write_all(b"\n").await.map_err(|err| {
-            AppError::new(
-                "PLUGIN_PROCESS_WRITE_FAILED",
-                format!("failed to terminate process plugin request line: {err}"),
-            )
-        })?;
-        stdin.flush().await.map_err(|err| {
-            AppError::new(
-                "PLUGIN_PROCESS_WRITE_FAILED",
-                format!("failed to flush process plugin request: {err}"),
-            )
-        })
+        stdin
+            .write_all(bytes)
+            .await
+            .map_err(|err| process_write_error("write process plugin request", err))?;
+        stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|err| process_write_error("terminate process plugin request line", err))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|err| process_write_error("flush process plugin request", err))
     }
 
     async fn read_json_line(&mut self) -> AppResult<Value> {
@@ -266,6 +261,22 @@ impl JsonRpcProcessRuntime {
             }
         }
     }
+}
+
+fn process_write_error(operation: &str, err: std::io::Error) -> AppError {
+    if matches!(
+        err.kind(),
+        ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+    ) {
+        return AppError::new(
+            "PLUGIN_PROCESS_CRASHED",
+            format!("process plugin pipe closed while attempting to {operation}: {err}"),
+        );
+    }
+    AppError::new(
+        "PLUGIN_PROCESS_WRITE_FAILED",
+        format!("failed to {operation}: {err}"),
+    )
 }
 
 fn validate_json_rpc_response(expected_id: u64, response: Value) -> AppResult<Value> {
@@ -484,5 +495,15 @@ mod tests {
 
         assert!(recycled);
         assert!(!runtime.is_running());
+    }
+
+    #[test]
+    fn plugin_process_runtime_maps_broken_pipe_write_to_crash() {
+        let err = process_write_error(
+            "write process plugin request",
+            std::io::Error::new(ErrorKind::BrokenPipe, "closed pipe"),
+        );
+
+        assert!(err.to_string().contains("PLUGIN_PROCESS_CRASHED"));
     }
 }

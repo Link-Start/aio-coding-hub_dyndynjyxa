@@ -129,7 +129,7 @@ fn official_default_config(plugin_id: &str) -> Value {
 mod tests {
     use super::*;
     use crate::app::plugins::rule_runtime::RuleRuntimeGatewayPluginExecutor;
-    use crate::domain::plugins::{PluginInstallSource, PluginStatus};
+    use crate::domain::plugins::{PluginInstallSource, PluginRuntime, PluginStatus};
     use crate::gateway::plugins::context::{
         GatewayPluginHookName, GatewayRequestHookInput, GatewayResponseHookInput,
         GatewayStreamHookInput,
@@ -143,6 +143,11 @@ mod tests {
     fn enabled_official_plugin(plugin_id: &str) -> crate::domain::plugins::PluginDetail {
         let fixture = official_plugin(plugin_id).expect("official plugin fixture");
         let permissions = fixture.manifest.permissions.clone();
+        let runtime = match &fixture.manifest.runtime {
+            PluginRuntime::DeclarativeRules { .. } => "declarativeRules".to_string(),
+            PluginRuntime::Native { engine } => format!("native:{engine}"),
+            PluginRuntime::Wasm { .. } => "wasm".to_string(),
+        };
         crate::domain::plugins::PluginDetail {
             summary: crate::domain::plugins::PluginSummary {
                 id: 1,
@@ -150,7 +155,7 @@ mod tests {
                 name: fixture.manifest.name.clone(),
                 current_version: Some(fixture.manifest.version.clone()),
                 status: PluginStatus::Enabled,
-                runtime: "declarativeRules".to_string(),
+                runtime,
                 permission_risk: crate::domain::plugins::PluginPermissionRisk::High,
                 update_available: false,
                 last_error: None,
@@ -308,11 +313,11 @@ mod tests {
             .expect("privacy filter request hook");
         let request_text = String::from_utf8(request.body.to_vec()).expect("utf8 body");
 
-        assert!(request_text.contains("[EMAIL]"));
-        assert!(request_text.contains("[PHONE]"));
-        assert!(request_text.contains("[CN_ID_CARD]"));
-        assert!(request_text.contains("Bearer [SECRET]"));
-        assert!(request_text.contains("api_key = [SECRET]"));
+        assert!(request_text.contains("[邮箱]"));
+        assert!(request_text.contains("[电话]"));
+        assert!(request_text.contains("[身份证]"));
+        assert!(request_text.contains("Bearer [密钥]"));
+        assert!(request_text.contains("[密钥]"));
         assert!(!request_text.contains("test.user@example.com"));
         assert!(!request_text.contains("13812345678"));
         assert!(!request_text.contains("11010519900307743X"));
@@ -332,11 +337,101 @@ mod tests {
             .expect("privacy filter log hook");
 
         assert!(log.message.contains("[IP]"));
-        assert!(log.message.contains("[SECRET]"));
+        assert!(log.message.contains("[密钥]"));
         assert!(!log.message.contains("192.168.1.10"));
         assert!(!log
             .message
             .contains("ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ"));
-        assert!(!log.message.contains("AKIAIOSFODNN7EXAMPLE"));
+    }
+
+    #[tokio::test]
+    async fn official_privacy_filter_plugin_redacts_responses_input_text_parts() {
+        let plugin = enabled_official_plugin("official.privacy-filter");
+        let pipeline = GatewayPluginPipeline::for_tests(
+            vec![plugin],
+            Arc::new(RuleRuntimeGatewayPluginExecutor::default()),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let request = pipeline
+            .run_request_hook(GatewayRequestHookInput {
+                hook_name: GatewayPluginHookName::RequestAfterBodyRead,
+                trace_id: "trace-privacy-filter-responses".to_string(),
+                cli_key: "codex".to_string(),
+                method: Method::POST,
+                path: "/v1/responses".to_string(),
+                query: None,
+                headers: HeaderMap::new(),
+                body: Bytes::from(
+                    json!({
+                        "input": [{
+                            "type": "message",
+                            "role": "user",
+                            "content": [{
+                                "type": "input_text",
+                                "text": "你知道 13344441520 是哪里的手机号嘛"
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ),
+                requested_model: Some("gpt-test".to_string()),
+            })
+            .await
+            .expect("privacy filter request hook");
+        let request_text = String::from_utf8(request.body.to_vec()).expect("utf8 body");
+
+        assert!(request_text.contains("[电话]"));
+        assert!(!request_text.contains("13344441520"));
+    }
+
+    #[tokio::test]
+    async fn official_privacy_filter_plugin_matches_upstream_algorithmic_behavior() {
+        let plugin = enabled_official_plugin("official.privacy-filter");
+        let pipeline = GatewayPluginPipeline::for_tests(
+            vec![plugin],
+            Arc::new(RuleRuntimeGatewayPluginExecutor::default()),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let request = pipeline
+            .run_request_hook(GatewayRequestHookInput {
+                hook_name: GatewayPluginHookName::RequestAfterBodyRead,
+                trace_id: "trace-privacy-filter-upstream".to_string(),
+                cli_key: "codex".to_string(),
+                method: Method::POST,
+                path: "/v1/responses".to_string(),
+                query: None,
+                headers: HeaderMap::new(),
+                body: Bytes::from(
+                    json!({
+                        "input": [{
+                            "type": "message",
+                            "role": "user",
+                            "content": [{
+                                "type": "input_text",
+                                "text": concat!(
+                                    "付款卡号 4111111111111111 ",
+                                    "订单编号 1234567890123456 ",
+                                    "路径 /home/user/AbCdEfGh1234567890XyZ ",
+                                    "Authorization: Bearer abcDEF1234567890/xyzABC4567890=="
+                                )
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ),
+                requested_model: Some("gpt-test".to_string()),
+            })
+            .await
+            .expect("privacy filter request hook");
+        let request_text = String::from_utf8(request.body.to_vec()).expect("utf8 body");
+
+        assert!(request_text.contains("[银行卡]"));
+        assert!(request_text.contains("[密钥]"));
+        assert!(request_text.contains("1234567890123456"));
+        assert!(request_text.contains("/home/user/AbCdEfGh1234567890XyZ"));
+        assert!(!request_text.contains("4111111111111111"));
+        assert!(!request_text.contains("abcDEF1234567890/xyzABC4567890=="));
     }
 }

@@ -269,7 +269,9 @@ function PluginDetailPanel({
   const runtime =
     detail.manifest.runtime.kind === "declarativeRules"
       ? `declarativeRules: ${detail.manifest.runtime.rules.join(", ")}`
-      : `wasm: ${detail.manifest.runtime.abiVersion}`;
+      : detail.manifest.runtime.kind === "native"
+        ? `native: ${detail.manifest.runtime.engine}`
+        : `wasm: ${detail.manifest.runtime.abiVersion}`;
   const unsigned = isUnsigned(detail);
   const rollbackVersion = previousVersion(detail);
 

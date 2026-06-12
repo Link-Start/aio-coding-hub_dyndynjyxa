@@ -2713,6 +2713,7 @@ export type PluginRevokePermissionInput = { pluginId: string; permission: string
 export type PluginRollbackInput = { pluginId: string; version: string };
 export type PluginRuntime =
   | { kind: "declarativeRules"; rules: string[] }
+  | { kind: "native"; engine: string }
   | { kind: "wasm"; abiVersion: string; memoryLimitBytes?: number | null };
 export type PluginRuntimeFailure = {
   id: number;

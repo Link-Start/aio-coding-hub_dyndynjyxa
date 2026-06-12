@@ -218,7 +218,7 @@ function officialPrivacyFilterDetail(): PluginDetail {
     name: "Privacy Filter",
     current_version: "1.0.0",
     status: "disabled",
-    runtime: "declarativeRules",
+    runtime: "native:privacyFilter",
     permission_risk: "high",
     update_available: false,
     last_error: null,
@@ -233,7 +233,7 @@ function officialPrivacyFilterDetail(): PluginDetail {
       name: "Privacy Filter",
       version: "1.0.0",
       apiVersion: "1.0.0",
-      runtime: { kind: "declarativeRules", rules: ["rules/privacy-filter.json"] },
+      runtime: { kind: "native", engine: "privacyFilter" },
       hooks: [
         { name: "gateway.request.afterBodyRead", priority: 10, failurePolicy: "fail-open" },
         { name: "log.beforePersist", priority: 10, failurePolicy: "fail-open" },

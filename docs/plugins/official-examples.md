@@ -90,9 +90,9 @@ Behavior:
 
 ID: `official.privacy-filter`
 
-Runtime: `declarativeRules`
+Runtime: `native:privacyFilter`
 
-Inspired by [packyme/privacy-filter](https://github.com/packyme/privacy-filter).
+Aligned with the core redaction behavior of [packyme/privacy-filter](https://github.com/packyme/privacy-filter).
 
 Demonstrates pre-upstream privacy filtering for prompts and request logs.
 
@@ -109,16 +109,14 @@ Permissions:
 
 Behavior:
 
-- Redacts emails.
-- Redacts Chinese mobile phone numbers.
-- Redacts Chinese ID card patterns.
-- Redacts bank card candidates.
-- Redacts IPv4 addresses.
-- Redacts OpenAI, AWS, GitHub, Google, Slack, JWT, private key, bearer token, URL query token, and contextual password/API key patterns.
+- Redacts emails, Chinese mobile phone numbers, Chinese ID card patterns, Luhn-valid bank cards, and IPv4 addresses.
+- Loads the upstream gitleaks-style rule set from `rules/gitleaks.toml`.
+- Redacts known vendor secrets, contextual passwords/API keys, and high-entropy secret candidates.
+- Uses span merging and false-positive mitigation for SSH command targets, paths, URLs, hashes, UUIDs, template variables, common placeholders, and business ID assignments.
 
 Important limitation:
 
-The upstream `packyme/privacy-filter` Go project includes richer algorithmic behavior such as Luhn checks, entropy scoring, gitleaks-style rule loading, span merging, and false-positive mitigation. The official `declarativeRules` example intentionally preserves only the high-value regex subset that can run safely without code execution.
+Like upstream, Privacy Filter is irreversible redaction. It does not restore original sensitive values into model responses after upstream processing.
 
 ## Where They Live
 

@@ -1,6 +1,6 @@
 # Plugin Manifest v1
 
-`plugin.json` is the stable package contract between a plugin and aio coding hub. Manifest v1 supports declarative rule plugins first and reserves explicit fields for future WASM/runtime artifacts.
+`plugin.json` is the stable package contract between a plugin and aio coding hub. Manifest v1 supports declarative rule plugins first, WASM code plugins when host policy enables them, and a small set of official-only native engines.
 
 ## 1. Required Fields
 
@@ -40,6 +40,7 @@ Plugin IDs use the format `publisher.plugin-name`.
 - Dots separate namespace segments.
 - Path separators, `..`, spaces, shell metacharacters, and empty segments are invalid.
 - `official.prompt-optimizer`, `official.safety-detector`, `official.redactor`, and `official.privacy-filter` are reserved official IDs.
+- The `official.*` namespace can only be installed through the built-in official plugin source; local, marketplace, and GitHub packages must use their own publisher namespace.
 
 Versions must follow SemVer. Pre-release versions are allowed for local development and unsigned packages but marketplace stable releases should use release versions.
 
@@ -47,7 +48,7 @@ Versions must follow SemVer. Pre-release versions are allowed for local developm
 
 ## 4. Runtime
 
-Runtime v1 supports:
+Runtime v1 supports community declarative rules:
 
 ```json
 {
@@ -56,7 +57,7 @@ Runtime v1 supports:
 }
 ```
 
-Reserved future runtime:
+WASM runtime:
 
 ```json
 {
@@ -67,6 +68,17 @@ Reserved future runtime:
 ```
 
 Short-term validation must reject arbitrary JavaScript/TypeScript, Node.js, Deno, native dynamic libraries, and WebView code.
+
+Official-only native runtime:
+
+```json
+{
+  "kind": "native",
+  "engine": "privacyFilter"
+}
+```
+
+`native` is reserved for built-in official plugins installed from the built-in official source. Third-party packages cannot declare host-native engines.
 
 ## 5. Host Compatibility
 
@@ -364,7 +376,7 @@ Upgrade failure restores the previous version, config snapshot, permissions, and
   "version": "1.0.0",
   "apiVersion": "1.0.0",
   "category": "privacy",
-  "description": "Official declarative privacy filter inspired by packyme/privacy-filter for pre-upstream prompt and log redaction.",
+  "description": "Official native privacy filter aligned with packyme/privacy-filter for pre-upstream prompt and log redaction.",
   "homepage": "https://github.com/packyme/privacy-filter",
   "repository": {
     "type": "git",
@@ -372,8 +384,8 @@ Upgrade failure restores the previous version, config snapshot, permissions, and
   },
   "license": "MIT",
   "runtime": {
-    "kind": "declarativeRules",
-    "rules": ["rules/privacy-filter.json"]
+    "kind": "native",
+    "engine": "privacyFilter"
   },
   "hooks": [
     {
