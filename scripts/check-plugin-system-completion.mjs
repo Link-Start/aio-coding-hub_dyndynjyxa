@@ -88,7 +88,8 @@ for (const phrase of [
   "pnpm check:plugin-system-docs",
   "pnpm check:generated-bindings",
   "pnpm plugin-sdk:typecheck",
-  "pnpm plugin-wasm-sdk:test",
+  "cargo test --manifest-path packages/plugin-wasm-sdk/Cargo.toml",
+  "cargo test --manifest-path packages/plugin-wasm-sdk/examples/redactor/Cargo.toml",
   "pnpm create-aio-plugin:test",
   "pnpm test:e2e",
 ]) {
