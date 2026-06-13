@@ -29,6 +29,22 @@ export function schemaEnum(schema: JsonValue | undefined): JsonValue[] {
   return schema.enum as JsonValue[];
 }
 
+export function schemaDefault(schema: JsonValue | undefined): JsonValue | undefined {
+  if (!isRecord(schema) || !("default" in schema)) return undefined;
+  return schema.default;
+}
+
+export function schemaItems(schema: JsonValue | undefined): JsonValue | undefined {
+  if (!isRecord(schema)) return undefined;
+  return schema.items;
+}
+
+export function schemaArrayItemEnum(schema: JsonValue | undefined): JsonValue[] {
+  const items = schemaItems(schema);
+  if (!isRecord(schema) || schema.type !== "array" || !isRecord(items)) return [];
+  return schemaEnum(items);
+}
+
 export function coerceConfigField(raw: string, type: string | null): JsonValue {
   switch (type) {
     case "integer": {
