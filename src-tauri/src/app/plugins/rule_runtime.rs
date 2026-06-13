@@ -520,7 +520,7 @@ fn redact_request_body_strings(
         return Ok(redacted.hit.then_some(redacted.redacted));
     };
     let mut matched = false;
-    redact_json_strings_mut(&mut root, filter, options, &mut matched);
+    redact_json_strings_mut(&mut root, filter, options, &mut matched, None, None);
     if !matched {
         return Ok(None);
     }
@@ -534,9 +534,14 @@ fn redact_json_strings_mut(
     filter: &PrivacyFilter,
     options: &PrivacyFilterOptions,
     matched: &mut bool,
+    key: Option<&str>,
+    parent_type: Option<&str>,
 ) {
     match value {
         Value::String(text) => {
+            if is_protocol_identifier_string(key, parent_type) {
+                return;
+            }
             let redacted = filter.redact_with_options(text, options);
             if redacted.hit {
                 *text = redacted.redacted;
@@ -545,16 +550,31 @@ fn redact_json_strings_mut(
         }
         Value::Array(items) => {
             for item in items {
-                redact_json_strings_mut(item, filter, options, matched);
+                redact_json_strings_mut(item, filter, options, matched, None, None);
             }
         }
         Value::Object(map) => {
-            for value in map.values_mut() {
-                redact_json_strings_mut(value, filter, options, matched);
+            let parent_type = map.get("type").and_then(Value::as_str).map(str::to_string);
+            for (key, value) in map.iter_mut() {
+                redact_json_strings_mut(
+                    value,
+                    filter,
+                    options,
+                    matched,
+                    Some(key.as_str()),
+                    parent_type.as_deref(),
+                );
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
+}
+
+fn is_protocol_identifier_string(key: Option<&str>, parent_type: Option<&str>) -> bool {
+    matches!(
+        (parent_type, key),
+        (Some("tool_use"), Some("id")) | (Some("tool_result"), Some("tool_use_id"))
+    )
 }
 
 fn to_privacy_filter_error(err: PrivacyFilterError) -> GatewayPluginError {
@@ -1272,6 +1292,58 @@ mod tests {
                 "{name} leaked phone number: {output}"
             );
         }
+    }
+
+    #[test]
+    fn official_privacy_filter_preserves_claude_tool_use_protocol_ids() {
+        let executor = RuleRuntimeGatewayPluginExecutor::default();
+        let plugin = official_privacy_filter_detail(json!({
+            "redactBeforeUpstream": true,
+            "redactLogs": true
+        }));
+        let tool_use_id = "ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ";
+        let context = context_for_request_body_text(
+            json!({
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": tool_use_id,
+                                "name": "lookup_phone",
+                                "input": { "query": "你知道 13344441520 是哪里的手机号嘛" }
+                            }
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": "手机号 13344441520 查询完成"
+                            }
+                        ]
+                    }
+                ]
+            })
+            .to_string(),
+        );
+
+        let result = executor
+            .execute_official_privacy_filter_plugin(&plugin, context)
+            .expect("privacy filter request hook");
+
+        let output = result
+            .request_body
+            .expect("request body should be redacted");
+        assert!(
+            output.contains(tool_use_id),
+            "tool id was changed: {output}"
+        );
+        assert!(output.contains("[电话]"));
+        assert!(!output.contains("13344441520"));
     }
 
     #[test]
