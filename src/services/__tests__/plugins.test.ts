@@ -48,8 +48,8 @@ vi.mock("../consoleLog", () => ({
 function pluginSummary() {
   return {
     id: 1,
-    plugin_id: "official.prompt-optimizer",
-    name: "Prompt Optimizer",
+    plugin_id: "community.prompt-helper",
+    name: "Community Prompt Helper",
     current_version: "1.0.0",
     status: "disabled" as const,
     runtime: "declarativeRules",
@@ -65,8 +65,8 @@ function pluginDetail(install_source: PluginDetail["install_source"] = "local"):
   return {
     summary: pluginSummary(),
     manifest: {
-      id: "official.prompt-optimizer",
-      name: "Prompt Optimizer",
+      id: "community.prompt-helper",
+      name: "Community Prompt Helper",
       version: "1.0.0",
       apiVersion: "1.0.0",
       runtime: { kind: "declarativeRules", rules: ["rules/main.json"] },
@@ -93,15 +93,15 @@ describe("services/plugins", () => {
     vi.mocked(commands.pluginList).mockResolvedValue({ status: "ok", data: [pluginSummary()] });
     vi.mocked(commands.pluginGet).mockResolvedValue({
       status: "ok",
-      data: pluginDetail("official"),
+      data: pluginDetail("local"),
     });
 
     await expect(pluginList()).resolves.toHaveLength(1);
-    await expect(pluginGet(" official.prompt-optimizer ")).resolves.toMatchObject({
-      summary: { plugin_id: "official.prompt-optimizer" },
+    await expect(pluginGet(" community.prompt-helper ")).resolves.toMatchObject({
+      summary: { plugin_id: "community.prompt-helper" },
     });
 
-    expect(commands.pluginGet).toHaveBeenCalledWith({ pluginId: "official.prompt-optimizer" });
+    expect(commands.pluginGet).toHaveBeenCalledWith({ pluginId: "community.prompt-helper" });
   });
 
   it("normalizes mutation inputs before invoking generated commands", async () => {
@@ -131,26 +131,26 @@ describe("services/plugins", () => {
       source: "github_release",
     });
     await pluginUpdateFromFile(" /tmp/plugin-update.aio-plugin ");
-    await pluginRollback(" official.prompt-optimizer ", " 1.0.0 ");
+    await pluginRollback(" community.prompt-helper ", " 1.0.0 ");
     await pluginParseMarketIndex(
       ' {"plugins":[]} ',
       " https://plugins.example.test/index.json ",
       " sig "
     );
-    await pluginInstallOfficial(" official.redactor ");
+    await pluginInstallOfficial(" official.privacy-filter ");
     await pluginQuarantineRevoked(" community.revoked ");
-    await pluginEnable(" official.prompt-optimizer ");
-    await pluginDisable(" official.prompt-optimizer ");
-    await pluginUninstall(" official.prompt-optimizer ");
-    await pluginSaveConfig(" official.prompt-optimizer ", { mode: "append_instruction" });
-    await pluginGrantPermissions(" official.prompt-optimizer ", [
+    await pluginEnable(" community.prompt-helper ");
+    await pluginDisable(" community.prompt-helper ");
+    await pluginUninstall(" community.prompt-helper ");
+    await pluginSaveConfig(" community.prompt-helper ", { mode: "append_instruction" });
+    await pluginGrantPermissions(" community.prompt-helper ", [
       " request.body.read ",
       "",
       "request.body.read",
       "request.body.write",
     ]);
-    await pluginRevokePermission(" official.prompt-optimizer ", " request.body.write ");
-    await pluginListAuditLogs({ pluginId: " official.prompt-optimizer ", limit: 9999 });
+    await pluginRevokePermission(" community.prompt-helper ", " request.body.write ");
+    await pluginListAuditLogs({ pluginId: " community.prompt-helper ", limit: 9999 });
 
     expect(commands.pluginInstallFromFile).toHaveBeenCalledWith({ filePath: "/tmp/plugin.json" });
     expect(commands.pluginInstallRemote).toHaveBeenCalledWith({
@@ -165,7 +165,7 @@ describe("services/plugins", () => {
       filePath: "/tmp/plugin-update.aio-plugin",
     });
     expect(commands.pluginRollback).toHaveBeenCalledWith({
-      pluginId: "official.prompt-optimizer",
+      pluginId: "community.prompt-helper",
       version: "1.0.0",
     });
     expect(commands.pluginParseMarketIndex).toHaveBeenCalledWith({
@@ -173,29 +173,31 @@ describe("services/plugins", () => {
       indexUrl: "https://plugins.example.test/index.json",
       signature: "sig",
     });
-    expect(commands.pluginInstallOfficial).toHaveBeenCalledWith({ pluginId: "official.redactor" });
+    expect(commands.pluginInstallOfficial).toHaveBeenCalledWith({
+      pluginId: "official.privacy-filter",
+    });
     expect(commands.pluginQuarantineRevoked).toHaveBeenCalledWith({
       pluginId: "community.revoked",
     });
-    expect(commands.pluginEnable).toHaveBeenCalledWith({ pluginId: "official.prompt-optimizer" });
-    expect(commands.pluginDisable).toHaveBeenCalledWith({ pluginId: "official.prompt-optimizer" });
+    expect(commands.pluginEnable).toHaveBeenCalledWith({ pluginId: "community.prompt-helper" });
+    expect(commands.pluginDisable).toHaveBeenCalledWith({ pluginId: "community.prompt-helper" });
     expect(commands.pluginUninstall).toHaveBeenCalledWith({
-      pluginId: "official.prompt-optimizer",
+      pluginId: "community.prompt-helper",
     });
     expect(commands.pluginSaveConfig).toHaveBeenCalledWith({
-      pluginId: "official.prompt-optimizer",
+      pluginId: "community.prompt-helper",
       config: { mode: "append_instruction" },
     });
     expect(commands.pluginGrantPermissions).toHaveBeenCalledWith({
-      pluginId: "official.prompt-optimizer",
+      pluginId: "community.prompt-helper",
       permissions: ["request.body.read", "request.body.write"],
     });
     expect(commands.pluginRevokePermission).toHaveBeenCalledWith({
-      pluginId: "official.prompt-optimizer",
+      pluginId: "community.prompt-helper",
       permission: "request.body.write",
     });
     expect(commands.pluginListAuditLogs).toHaveBeenCalledWith({
-      pluginId: "official.prompt-optimizer",
+      pluginId: "community.prompt-helper",
       limit: 500,
     });
   });

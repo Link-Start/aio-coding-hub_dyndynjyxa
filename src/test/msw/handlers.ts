@@ -160,7 +160,14 @@ export const handlers = [
 
   http.post(`${TAURI_ENDPOINT}/plugin_install_official`, async ({ request }) => {
     const payload = await withJson<PluginCommandPayload>(request);
-    return HttpResponse.json(installOfficialPluginState(pluginIdFromPayload(payload)));
+    try {
+      return HttpResponse.json(installOfficialPluginState(pluginIdFromPayload(payload)));
+    } catch (error) {
+      return HttpResponse.json(
+        { error: error instanceof Error ? error.message : "unknown official plugin" },
+        { status: 404 }
+      );
+    }
   }),
 
   http.post(`${TAURI_ENDPOINT}/plugin_enable`, async ({ request }) => {

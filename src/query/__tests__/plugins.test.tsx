@@ -55,8 +55,8 @@ vi.mock("../../services/plugins", async () => {
 function summary(overrides: Partial<PluginSummary> = {}): PluginSummary {
   return {
     id: 1,
-    plugin_id: "official.prompt-optimizer",
-    name: "Prompt Optimizer",
+    plugin_id: "community.prompt-helper",
+    name: "Community Prompt Helper",
     current_version: "1.0.0",
     status: "disabled",
     runtime: "declarativeRules",
@@ -83,7 +83,7 @@ function detail(overrides: Partial<PluginDetail> = {}): PluginDetail {
       permissions: ["request.body.read"],
       hostCompatibility: { app: ">=0.56.0 <1.0.0", pluginApi: "^1.0.0" },
     },
-    install_source: "official",
+    install_source: "local",
     installed_dir: null,
     config: {},
     granted_permissions: [],
@@ -94,6 +94,31 @@ function detail(overrides: Partial<PluginDetail> = {}): PluginDetail {
   };
 }
 
+function officialPrivacyFilterDetail(): PluginDetail {
+  return detail({
+    summary: summary({
+      plugin_id: "official.privacy-filter",
+      name: "Privacy Filter",
+      runtime: "native:privacyFilter",
+    }),
+    manifest: {
+      id: "official.privacy-filter",
+      name: "Privacy Filter",
+      version: "1.0.0",
+      apiVersion: "1.0.0",
+      runtime: { kind: "native", engine: "privacyFilter" },
+      hooks: [
+        { name: "gateway.request.afterBodyRead", priority: 10 },
+        { name: "log.beforePersist", priority: 10 },
+      ],
+      permissions: ["request.body.read", "request.body.write", "log.redact"],
+      hostCompatibility: { app: ">=0.56.0 <1.0.0", pluginApi: "^1.0.0" },
+    },
+    install_source: "official",
+    granted_permissions: ["request.body.read", "request.body.write", "log.redact"],
+  });
+}
+
 describe("query/plugins", () => {
   it("uses stable list and detail query keys", async () => {
     vi.mocked(pluginList).mockResolvedValue([summary()]);
@@ -102,22 +127,22 @@ describe("query/plugins", () => {
     const wrapper = createQueryWrapper(client);
 
     renderHook(() => usePluginsListQuery(), { wrapper });
-    renderHook(() => usePluginQuery(" official.prompt-optimizer "), { wrapper });
+    renderHook(() => usePluginQuery(" community.prompt-helper "), { wrapper });
 
     await waitFor(() => {
       expect(pluginList).toHaveBeenCalled();
-      expect(pluginGet).toHaveBeenCalledWith("official.prompt-optimizer");
+      expect(pluginGet).toHaveBeenCalledWith("community.prompt-helper");
     });
 
     expect(client.getQueryState(pluginKeys.list())).toBeTruthy();
-    expect(client.getQueryState(pluginKeys.detail("official.prompt-optimizer"))).toBeTruthy();
+    expect(client.getQueryState(pluginKeys.detail("community.prompt-helper"))).toBeTruthy();
   });
 
   it("invalidates list and detail queries after mutations", async () => {
     const next = detail({ summary: summary({ status: "enabled" }) });
     vi.mocked(pluginEnable).mockResolvedValue(next);
     vi.mocked(pluginInstallRemote).mockResolvedValue(next);
-    vi.mocked(pluginInstallOfficial).mockResolvedValue(next);
+    vi.mocked(pluginInstallOfficial).mockResolvedValue(officialPrivacyFilterDetail());
     vi.mocked(pluginQuarantineRevoked).mockResolvedValue(next);
     vi.mocked(pluginUpdateFromFile).mockResolvedValue(next);
     vi.mocked(pluginRollback).mockResolvedValue(next);
@@ -160,34 +185,37 @@ describe("query/plugins", () => {
     );
 
     await act(async () => {
-      await enableResult.current.mutateAsync("official.prompt-optimizer");
+      await enableResult.current.mutateAsync("community.prompt-helper");
       await installRemoteResult.current.mutateAsync({
-        pluginId: "official.prompt-optimizer",
+        pluginId: "community.prompt-helper",
         downloadUrl: "https://github.com/acme/plugin/releases/download/v1/plugin.aio-plugin",
         checksum: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       });
-      await installOfficialResult.current.mutateAsync("official.prompt-optimizer");
-      await quarantineRevokedResult.current.mutateAsync("official.prompt-optimizer");
-      await disableResult.current.mutateAsync("official.prompt-optimizer");
-      await uninstallResult.current.mutateAsync("official.prompt-optimizer");
+      await installOfficialResult.current.mutateAsync("official.privacy-filter");
+      await quarantineRevokedResult.current.mutateAsync("community.prompt-helper");
+      await disableResult.current.mutateAsync("community.prompt-helper");
+      await uninstallResult.current.mutateAsync("community.prompt-helper");
       await updateResult.current.mutateAsync("/tmp/plugin-update.aio-plugin");
       await rollbackResult.current.mutateAsync({
-        pluginId: "official.prompt-optimizer",
+        pluginId: "community.prompt-helper",
         version: "1.0.0",
       });
       await saveConfigResult.current.mutateAsync({
-        pluginId: "official.prompt-optimizer",
+        pluginId: "community.prompt-helper",
         config: { mode: "append_instruction" },
       });
       await revokePermissionResult.current.mutateAsync({
-        pluginId: "official.prompt-optimizer",
+        pluginId: "community.prompt-helper",
         permission: "request.body.write",
       });
     });
 
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: pluginKeys.list() });
     expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: pluginKeys.detail("official.prompt-optimizer"),
+      queryKey: pluginKeys.detail("community.prompt-helper"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: pluginKeys.detail("official.privacy-filter"),
     });
   });
 });
