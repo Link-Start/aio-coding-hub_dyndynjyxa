@@ -279,7 +279,12 @@ async fn apply_log_before_persist_hook(
                 );
             }
         }
-        Err(err) => {
+        Err(mut err) => {
+            crate::gateway::plugins::audit::persist_gateway_plugin_error_audit_events(
+                db,
+                &args.trace_id,
+                &mut err,
+            );
             tracing::warn!(
                 trace_id = %args.trace_id,
                 error = %err,

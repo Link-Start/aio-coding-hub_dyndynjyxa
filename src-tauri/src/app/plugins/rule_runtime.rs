@@ -1,6 +1,6 @@
 //! Usage: Declarative, no-code plugin rule runtime.
 
-use super::privacy_filter::{PrivacyFilter, PrivacyFilterError};
+use super::privacy_filter::{PrivacyFilter, PrivacyFilterError, PrivacyFilterOptions};
 use crate::gateway::plugins::context::{
     GatewayHookAction, GatewayHookResult, GatewayVisibleHookContext,
 };
@@ -10,14 +10,33 @@ use crate::plugins::{PluginDetail, PluginRuntime};
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
-use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub(crate) const MAX_RULE_REGEX_PATTERN_BYTES: usize = 4 * 1024;
 const MAX_RULE_REGEX_COMPILED_BYTES: usize = 2 * 1024 * 1024;
 const MAX_RULES_PER_RUNTIME: usize = 256;
+
+#[cfg(test)]
+static RULE_RUNTIME_TEST_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+thread_local! {
+    static RULE_RUNTIME_TEST_JSON_PARSE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_json_parse_count_for_tests() {
+    RULE_RUNTIME_TEST_JSON_PARSE_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn json_parse_count_for_tests() -> u64 {
+    RULE_RUNTIME_TEST_JSON_PARSE_COUNT.with(|count| count.get())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuleRuntimeError {
@@ -83,37 +102,62 @@ impl RuleRuntime {
         context: &GatewayVisibleHookContext,
         config: &Value,
     ) -> Result<GatewayHookResult, RuleRuntimeError> {
+        #[cfg(test)]
+        if let delay @ 1.. = RULE_RUNTIME_TEST_DELAY_MS.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
+
         let mut result = GatewayHookResult::continue_unchanged();
         let mut request_body = context.request.body.clone();
         let mut response_body = context.response.body.clone();
         let mut stream_chunk = context.stream.chunk.clone();
         let mut log_message = context.log.message.clone();
 
-        for rule in self
+        let rules = self
             .rules
             .iter()
             .filter(|rule| rule.hook == context.hook_name)
-        {
-            if !rule.when.matches(context, config) {
-                continue;
-            }
-
-            let matched = match rule.target.field {
-                TargetField::RequestBody => {
-                    apply_rule_to_text(&mut request_body, rule, OutputField::RequestBody)?
+            .filter(|rule| rule.when.matches(context, config))
+            .collect::<Vec<_>>();
+        let mut index = 0usize;
+        while index < rules.len() {
+            let rule = rules[index];
+            let batch_end = json_replace_batch_end(&rules, index);
+            let batch = &rules[index..batch_end];
+            let matched = if batch.len() > 1 {
+                match rule.target.field {
+                    TargetField::RequestBody => {
+                        apply_json_replace_batch_to_text(&mut request_body, batch)?
+                    }
+                    TargetField::ResponseBody => {
+                        apply_json_replace_batch_to_text(&mut response_body, batch)?
+                    }
+                    TargetField::StreamChunk => {
+                        apply_json_replace_batch_to_text(&mut stream_chunk, batch)?
+                    }
+                    TargetField::LogMessage => {
+                        apply_json_replace_batch_to_text(&mut log_message, batch)?
+                    }
                 }
-                TargetField::ResponseBody => {
-                    apply_rule_to_text(&mut response_body, rule, OutputField::ResponseBody)?
-                }
-                TargetField::StreamChunk => {
-                    apply_rule_to_text(&mut stream_chunk, rule, OutputField::StreamChunk)?
-                }
-                TargetField::LogMessage => {
-                    apply_rule_to_text(&mut log_message, rule, OutputField::LogMessage)?
+            } else {
+                match rule.target.field {
+                    TargetField::RequestBody => {
+                        apply_rule_to_text(&mut request_body, rule, OutputField::RequestBody)?
+                    }
+                    TargetField::ResponseBody => {
+                        apply_rule_to_text(&mut response_body, rule, OutputField::ResponseBody)?
+                    }
+                    TargetField::StreamChunk => {
+                        apply_rule_to_text(&mut stream_chunk, rule, OutputField::StreamChunk)?
+                    }
+                    TargetField::LogMessage => {
+                        apply_rule_to_text(&mut log_message, rule, OutputField::LogMessage)?
+                    }
                 }
             };
 
             if !matched {
+                index = batch_end;
                 continue;
             }
 
@@ -141,6 +185,7 @@ impl RuleRuntime {
                     }
                 }
             }
+            index = batch_end;
         }
 
         Ok(result)
@@ -149,68 +194,112 @@ impl RuleRuntime {
 
 #[derive(Default)]
 pub(crate) struct RuleRuntimeGatewayPluginExecutor {
-    cache: Mutex<HashMap<String, RuleRuntime>>,
-    privacy_filter_cache: Mutex<HashMap<String, PrivacyFilter>>,
+    cache: Mutex<HashMap<String, Arc<RuleRuntime>>>,
+    privacy_filter_cache: Mutex<HashMap<String, Arc<PrivacyFilter>>>,
 }
 
 impl RuleRuntimeGatewayPluginExecutor {
-    fn execute_plugin(
+    pub(crate) fn execute_declarative_rules_plugin(
         &self,
         plugin: &PluginDetail,
         context: GatewayVisibleHookContext,
     ) -> Result<GatewayHookResult, GatewayPluginError> {
-        if plugin.summary.plugin_id == "official.privacy-filter" {
-            return self.execute_official_privacy_filter(plugin, context);
-        }
-
-        let cache_key = rule_runtime_cache_key(plugin);
-        let mut cache = self
-            .cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !cache.contains_key(&cache_key) {
-            let runtime = load_rule_runtime(plugin).map_err(to_gateway_plugin_error)?;
-            cache.insert(cache_key.clone(), runtime);
-        }
-        let runtime = cache.get(&cache_key).ok_or_else(|| {
-            GatewayPluginError::new(
-                "PLUGIN_RULE_RUNTIME_MISSING",
-                format!(
-                    "rule runtime cache missing for plugin {}",
-                    plugin.summary.plugin_id
-                ),
-            )
-        })?;
+        let runtime = self.get_or_load_rule_runtime(plugin)?;
         runtime
             .execute(&context, &plugin.config)
             .map_err(to_gateway_plugin_error)
     }
 
-    fn execute_official_privacy_filter(
+    pub(crate) fn execute_official_privacy_filter_plugin(
         &self,
         plugin: &PluginDetail,
         context: GatewayVisibleHookContext,
     ) -> Result<GatewayHookResult, GatewayPluginError> {
+        let filter = self.get_or_load_privacy_filter(plugin)?;
+        execute_official_privacy_filter_hook(&filter, &context, &plugin.config)
+            .map_err(to_privacy_filter_error)
+    }
+
+    pub(crate) fn retain_runtime_caches_for_plugins(&self, plugins: &[PluginDetail]) {
+        let rule_keys: HashSet<String> = plugins
+            .iter()
+            .filter(|plugin| {
+                matches!(
+                    plugin.manifest.runtime,
+                    PluginRuntime::DeclarativeRules { .. }
+                )
+            })
+            .map(rule_runtime_cache_key)
+            .collect();
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|key, _| rule_keys.contains(key));
+
+        let privacy_keys: HashSet<String> = plugins
+            .iter()
+            .filter(|plugin| plugin.summary.plugin_id == "official.privacy-filter")
+            .map(privacy_filter_cache_key)
+            .collect();
+        self.privacy_filter_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|key, _| privacy_keys.contains(key));
+    }
+
+    fn get_or_load_rule_runtime(
+        &self,
+        plugin: &PluginDetail,
+    ) -> Result<Arc<RuleRuntime>, GatewayPluginError> {
+        let cache_key = rule_runtime_cache_key(plugin);
+        {
+            let cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(runtime) = cache.get(&cache_key) {
+                return Ok(Arc::clone(runtime));
+            }
+        }
+
+        let runtime = Arc::new(load_rule_runtime(plugin).map_err(to_gateway_plugin_error)?);
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(Arc::clone(
+            cache
+                .entry(cache_key)
+                .or_insert_with(|| Arc::clone(&runtime)),
+        ))
+    }
+
+    fn get_or_load_privacy_filter(
+        &self,
+        plugin: &PluginDetail,
+    ) -> Result<Arc<PrivacyFilter>, GatewayPluginError> {
         let cache_key = privacy_filter_cache_key(plugin);
+        {
+            let cache = self
+                .privacy_filter_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(filter) = cache.get(&cache_key) {
+                return Ok(Arc::clone(filter));
+            }
+        }
+
+        let filter =
+            Arc::new(load_official_privacy_filter(plugin).map_err(to_privacy_filter_error)?);
         let mut cache = self
             .privacy_filter_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !cache.contains_key(&cache_key) {
-            let filter = load_official_privacy_filter(plugin).map_err(to_privacy_filter_error)?;
-            cache.insert(cache_key.clone(), filter);
-        }
-        let filter = cache.get(&cache_key).ok_or_else(|| {
-            GatewayPluginError::new(
-                "PLUGIN_PRIVACY_FILTER_RUNTIME_MISSING",
-                format!(
-                    "privacy filter runtime cache missing for plugin {}",
-                    plugin.summary.plugin_id
-                ),
-            )
-        })?;
-        execute_official_privacy_filter_hook(filter, &context, &plugin.config)
-            .map_err(to_privacy_filter_error)
+        Ok(Arc::clone(
+            cache
+                .entry(cache_key)
+                .or_insert_with(|| Arc::clone(&filter)),
+        ))
     }
 }
 
@@ -221,14 +310,15 @@ fn rule_runtime_cache_key(plugin: &PluginDetail) -> String {
         .as_deref()
         .unwrap_or(plugin.manifest.version.as_str());
     let installed_dir = plugin.installed_dir.as_deref().unwrap_or("");
+    let updated_at = plugin.summary.updated_at;
     let rules = match &plugin.manifest.runtime {
         PluginRuntime::DeclarativeRules { rules } => rules.join("\u{1f}"),
         PluginRuntime::Native { engine } => format!("native:{engine}"),
         PluginRuntime::Wasm { abi_version, .. } => format!("wasm:{abi_version}"),
     };
     format!(
-        "{}\u{1e}{}\u{1e}{}\u{1e}{}",
-        plugin.summary.plugin_id, version, installed_dir, rules
+        "{}\u{1e}{}\u{1e}{}\u{1e}{}\u{1e}{}",
+        plugin.summary.plugin_id, version, installed_dir, updated_at, rules
     )
 }
 
@@ -239,10 +329,21 @@ fn privacy_filter_cache_key(plugin: &PluginDetail) -> String {
         .as_deref()
         .unwrap_or(plugin.manifest.version.as_str());
     let installed_dir = plugin.installed_dir.as_deref().unwrap_or("");
+    let updated_at = plugin.summary.updated_at;
     format!(
-        "{}\u{1e}{}\u{1e}{}",
-        plugin.summary.plugin_id, version, installed_dir
+        "{}\u{1e}{}\u{1e}{}\u{1e}{}",
+        plugin.summary.plugin_id, version, installed_dir, updated_at
     )
+}
+
+#[cfg(test)]
+impl RuleRuntimeGatewayPluginExecutor {
+    fn cache_sizes_for_tests(&self) -> (usize, usize) {
+        (
+            self.cache.lock().unwrap().len(),
+            self.privacy_filter_cache.lock().unwrap().len(),
+        )
+    }
 }
 
 impl GatewayPluginExecutor for RuleRuntimeGatewayPluginExecutor {
@@ -251,7 +352,7 @@ impl GatewayPluginExecutor for RuleRuntimeGatewayPluginExecutor {
         plugin: &PluginDetail,
         context: GatewayVisibleHookContext,
     ) -> GatewayHookFuture {
-        let result = self.execute_plugin(plugin, context);
+        let result = self.execute_declarative_rules_plugin(plugin, context);
         Box::pin(async move { result })
     }
 
@@ -260,7 +361,7 @@ impl GatewayPluginExecutor for RuleRuntimeGatewayPluginExecutor {
         plugin: &PluginDetail,
         context: GatewayVisibleHookContext,
     ) -> GatewayHookFuture {
-        let result = self.execute_plugin(plugin, context);
+        let result = self.execute_declarative_rules_plugin(plugin, context);
         Box::pin(async move { result })
     }
 
@@ -269,7 +370,7 @@ impl GatewayPluginExecutor for RuleRuntimeGatewayPluginExecutor {
         plugin: &PluginDetail,
         context: GatewayVisibleHookContext,
     ) -> GatewayHookFuture {
-        let result = self.execute_plugin(plugin, context);
+        let result = self.execute_declarative_rules_plugin(plugin, context);
         Box::pin(async move { result })
     }
 
@@ -278,7 +379,7 @@ impl GatewayPluginExecutor for RuleRuntimeGatewayPluginExecutor {
         plugin: &PluginDetail,
         context: GatewayVisibleHookContext,
     ) -> GatewayHookFuture {
-        let result = self.execute_plugin(plugin, context);
+        let result = self.execute_declarative_rules_plugin(plugin, context);
         Box::pin(async move { result })
     }
 }
@@ -365,6 +466,7 @@ fn execute_official_privacy_filter_hook(
     config: &Value,
 ) -> Result<GatewayHookResult, PrivacyFilterError> {
     let mut result = GatewayHookResult::continue_unchanged();
+    let options = privacy_filter_options_from_config(config);
     match context.hook_name.as_str() {
         "gateway.request.afterBodyRead" => {
             if config.get("redactBeforeUpstream") != Some(&Value::Bool(true)) {
@@ -373,7 +475,7 @@ fn execute_official_privacy_filter_hook(
             let Some(body) = context.request.body.as_deref() else {
                 return Ok(result);
             };
-            if let Some(next_body) = redact_request_body_strings(filter, body)? {
+            if let Some(next_body) = redact_request_body_strings(filter, body, &options)? {
                 result.request_body = Some(next_body);
             }
         }
@@ -384,7 +486,7 @@ fn execute_official_privacy_filter_hook(
             let Some(message) = context.log.message.as_deref() else {
                 return Ok(result);
             };
-            let redacted = filter.redact(message);
+            let redacted = filter.redact_with_options(message, &options);
             if redacted.hit {
                 result.log_message = Some(redacted.redacted);
             }
@@ -394,16 +496,31 @@ fn execute_official_privacy_filter_hook(
     Ok(result)
 }
 
+fn privacy_filter_options_from_config(config: &Value) -> PrivacyFilterOptions {
+    let sensitive_types = config
+        .get("sensitiveTypes")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        });
+    PrivacyFilterOptions::from_sensitive_types(sensitive_types.as_deref())
+}
+
 fn redact_request_body_strings(
     filter: &PrivacyFilter,
     body: &str,
+    options: &PrivacyFilterOptions,
 ) -> Result<Option<String>, PrivacyFilterError> {
     let Ok(mut root) = serde_json::from_str::<Value>(body) else {
-        let redacted = filter.redact(body);
+        let redacted = filter.redact_with_options(body, options);
         return Ok(redacted.hit.then_some(redacted.redacted));
     };
     let mut matched = false;
-    redact_json_strings_mut(&mut root, filter, &mut matched);
+    redact_json_strings_mut(&mut root, filter, options, &mut matched);
     if !matched {
         return Ok(None);
     }
@@ -412,10 +529,15 @@ fn redact_request_body_strings(
         .map_err(|err| PrivacyFilterError::new(format!("failed to serialize redacted JSON: {err}")))
 }
 
-fn redact_json_strings_mut(value: &mut Value, filter: &PrivacyFilter, matched: &mut bool) {
+fn redact_json_strings_mut(
+    value: &mut Value,
+    filter: &PrivacyFilter,
+    options: &PrivacyFilterOptions,
+    matched: &mut bool,
+) {
     match value {
         Value::String(text) => {
-            let redacted = filter.redact(text);
+            let redacted = filter.redact_with_options(text, options);
             if redacted.hit {
                 *text = redacted.redacted;
                 *matched = true;
@@ -423,12 +545,12 @@ fn redact_json_strings_mut(value: &mut Value, filter: &PrivacyFilter, matched: &
         }
         Value::Array(items) => {
             for item in items {
-                redact_json_strings_mut(item, filter, matched);
+                redact_json_strings_mut(item, filter, options, matched);
             }
         }
         Value::Object(map) => {
             for value in map.values_mut() {
-                redact_json_strings_mut(value, filter, matched);
+                redact_json_strings_mut(value, filter, options, matched);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
@@ -646,6 +768,79 @@ fn compile_regex(
         })
 }
 
+fn json_replace_batch_end(rules: &[&CompiledRule], start: usize) -> usize {
+    let Some(first) = rules.get(start) else {
+        return start;
+    };
+    let Some(path) = first.target.json_path.as_deref() else {
+        return start.saturating_add(1);
+    };
+    if !matches!(first.action, RuleAction::Replace { .. }) {
+        return start.saturating_add(1);
+    }
+
+    let mut end = start.saturating_add(1);
+    while let Some(rule) = rules.get(end) {
+        if rule.target.field != first.target.field
+            || rule.target.json_path.as_deref() != Some(path)
+            || !matches!(rule.action, RuleAction::Replace { .. })
+        {
+            break;
+        }
+        end = end.saturating_add(1);
+    }
+    end
+}
+
+fn apply_json_replace_batch_to_text(
+    text: &mut Option<String>,
+    rules: &[&CompiledRule],
+) -> Result<bool, RuleRuntimeError> {
+    let Some(first) = rules.first() else {
+        return Ok(false);
+    };
+    let Some(path) = first.target.json_path.as_deref() else {
+        return Ok(false);
+    };
+    let Some(current) = text.as_mut() else {
+        return Ok(false);
+    };
+    let Some(mut root) = parse_json_or_skip(current)? else {
+        return Ok(false);
+    };
+
+    let mut matched = false;
+    apply_to_json_strings_mut(&mut root, path, &mut |candidate| {
+        for rule in rules {
+            let RuleAction::Replace { replacement } = &rule.action else {
+                continue;
+            };
+            if rule.regex.is_match(candidate) {
+                let next = rule
+                    .regex
+                    .replace_all(candidate, replacement.as_str())
+                    .into_owned();
+                *candidate = next;
+                matched = true;
+            }
+        }
+    });
+
+    if matched {
+        *current = serde_json::to_string(&root).map_err(|err| {
+            RuleRuntimeError::new(
+                "PLUGIN_RULE_INVALID_OUTPUT",
+                format!(
+                    "failed to serialize rewritten JSON for rule {}: {err}",
+                    first.id
+                ),
+            )
+        })?;
+    }
+
+    Ok(matched)
+}
+
 fn apply_rule_to_text(
     text: &mut Option<String>,
     rule: &CompiledRule,
@@ -711,6 +906,11 @@ fn apply_rule_to_text(
 }
 
 fn parse_json_or_skip(text: &str) -> Result<Option<Value>, RuleRuntimeError> {
+    #[cfg(test)]
+    RULE_RUNTIME_TEST_JSON_PARSE_COUNT.with(|count| {
+        count.set(count.get().saturating_add(1));
+    });
+
     match serde_json::from_str::<Value>(text) {
         Ok(value) => Ok(Some(value)),
         Err(err) if err.is_syntax() || err.is_eof() => Ok(None),
@@ -845,6 +1045,10 @@ mod tests {
     use std::fs;
 
     fn context_for_request_body(body: serde_json::Value) -> GatewayVisibleHookContext {
+        context_for_request_body_text(body.to_string())
+    }
+
+    fn context_for_request_body_text(body: impl Into<String>) -> GatewayVisibleHookContext {
         GatewayVisibleHookContext {
             hook_name: "gateway.request.afterBodyRead".to_string(),
             trace_id: "trace-rule-test".to_string(),
@@ -854,12 +1058,26 @@ mod tests {
                 path: Some("/v1/chat/completions".to_string()),
                 query: None,
                 headers: None,
-                body: Some(body.to_string()),
+                body: Some(body.into()),
                 requested_model: Some("gpt-test".to_string()),
+                ..GatewayVisibleRequestContext::default()
             },
             response: GatewayVisibleResponseContext::default(),
             stream: GatewayVisibleStreamContext::default(),
             log: GatewayVisibleLogContext::default(),
+        }
+    }
+
+    fn context_for_log_message(message: &str) -> GatewayVisibleHookContext {
+        GatewayVisibleHookContext {
+            hook_name: "log.beforePersist".to_string(),
+            trace_id: "trace-rule-test".to_string(),
+            request: GatewayVisibleRequestContext::default(),
+            response: GatewayVisibleResponseContext::default(),
+            stream: GatewayVisibleStreamContext::default(),
+            log: GatewayVisibleLogContext {
+                message: Some(message.to_string()),
+            },
         }
     }
 
@@ -954,6 +1172,46 @@ mod tests {
         }
     }
 
+    fn rule_plugin_with_updated_at(
+        plugin_id: &str,
+        version: &str,
+        installed_dir: String,
+        updated_at: i64,
+    ) -> PluginDetail {
+        let mut plugin = rule_plugin(plugin_id, version, installed_dir);
+        plugin.summary.updated_at = updated_at;
+        plugin
+    }
+
+    fn official_privacy_filter_detail(config: serde_json::Value) -> PluginDetail {
+        let fixture = crate::app::plugins::official::official_plugin("official.privacy-filter")
+            .expect("official privacy filter fixture");
+        let permissions = fixture.manifest.permissions.clone();
+        PluginDetail {
+            summary: PluginSummary {
+                id: 1,
+                plugin_id: fixture.manifest.id.clone(),
+                name: fixture.manifest.name.clone(),
+                current_version: Some(fixture.manifest.version.clone()),
+                status: PluginStatus::Enabled,
+                runtime: "native:privacyFilter".to_string(),
+                permission_risk: PluginPermissionRisk::High,
+                update_available: false,
+                last_error: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+            manifest: fixture.manifest,
+            install_source: PluginInstallSource::Official,
+            installed_dir: Some(fixture.root_dir.to_string_lossy().to_string()),
+            config,
+            granted_permissions: permissions,
+            pending_permissions: vec![],
+            audit_logs: vec![],
+            runtime_failures: vec![],
+        }
+    }
+
     fn write_rule_file(root: &std::path::Path, replacement: &str) {
         let rules_dir = root.join("rules");
         fs::create_dir_all(&rules_dir).expect("create rules dir");
@@ -977,6 +1235,89 @@ mod tests {
             .to_string(),
         )
         .expect("write rule file");
+    }
+
+    #[test]
+    fn official_privacy_filter_redacts_phone_numbers_in_provider_request_shapes() {
+        let executor = RuleRuntimeGatewayPluginExecutor::default();
+        let plugin = official_privacy_filter_detail(json!({
+            "redactBeforeUpstream": true,
+            "redactLogs": true
+        }));
+
+        for (name, body) in [
+            (
+                "claude",
+                r#"{"messages":[{"role":"user","content":[{"type":"text","text":"phone 13344441520"}]}]}"#,
+            ),
+            (
+                "openai_chat",
+                r#"{"messages":[{"role":"user","content":"phone 13344441520"}]}"#,
+            ),
+            (
+                "codex_responses",
+                r#"{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"phone 13344441520"}]}]}"#,
+            ),
+            ("raw_text", "phone 13344441520"),
+        ] {
+            let context = context_for_request_body_text(body);
+            let result = executor
+                .execute_official_privacy_filter_plugin(&plugin, context)
+                .unwrap_or_else(|err| panic!("{name} privacy filter failed: {err}"));
+            let output = result
+                .request_body
+                .expect("request body should be redacted");
+            assert!(
+                !output.contains("13344441520"),
+                "{name} leaked phone number: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn official_privacy_filter_redacts_log_messages_after_request_redaction() {
+        let executor = RuleRuntimeGatewayPluginExecutor::default();
+        let plugin = official_privacy_filter_detail(json!({
+            "redactBeforeUpstream": true,
+            "redactLogs": true
+        }));
+        let context = context_for_log_message("trace log 13344441520");
+
+        let result = executor
+            .execute_official_privacy_filter_plugin(&plugin, context)
+            .expect("privacy filter log hook");
+
+        let message = result.log_message.expect("log message should be redacted");
+        assert!(!message.contains("13344441520"));
+    }
+
+    #[test]
+    fn official_privacy_filter_respects_sensitive_types_config() {
+        let executor = RuleRuntimeGatewayPluginExecutor::default();
+        let plugin = official_privacy_filter_detail(json!({
+            "redactBeforeUpstream": true,
+            "redactLogs": true,
+            "sensitiveTypes": ["email"]
+        }));
+
+        let result = executor
+            .execute_official_privacy_filter_plugin(
+                &plugin,
+                context_for_request_body_text(
+                    r#"{"messages":[{"role":"user","content":"email test@example.com phone 13344441520"}]}"#,
+                ),
+            )
+            .expect("privacy filter request hook");
+
+        let output = result
+            .request_body
+            .expect("request body should be redacted");
+        assert!(output.contains("[邮箱]"));
+        assert!(!output.contains("test@example.com"));
+        assert!(
+            output.contains("13344441520"),
+            "cn_phone should remain visible when sensitiveTypes omits it: {output}"
+        );
     }
 
     #[test]
@@ -1009,6 +1350,63 @@ mod tests {
         let body = result.request_body.expect("rewritten body");
         assert!(body.contains("[REDACTED]"));
         assert!(!body.contains("sk-12345678"));
+    }
+
+    #[test]
+    fn rule_runtime_batches_same_target_json_rewrites() {
+        let runtime = RuleRuntime::from_value(json!({
+            "rules": [
+                {
+                    "id": "redact-api-key",
+                    "hook": "gateway.request.afterBodyRead",
+                    "target": {
+                        "field": "request.body",
+                        "jsonPath": "$.messages[*].content"
+                    },
+                    "match": { "regex": "sk-[A-Za-z0-9]{8}" },
+                    "action": {
+                        "kind": "replace",
+                        "replacement": "[KEY]"
+                    }
+                },
+                {
+                    "id": "redact-phone",
+                    "hook": "gateway.request.afterBodyRead",
+                    "target": {
+                        "field": "request.body",
+                        "jsonPath": "$.messages[*].content"
+                    },
+                    "match": { "regex": "1[3-9][0-9]{9}" },
+                    "action": {
+                        "kind": "replace",
+                        "replacement": "[PHONE]"
+                    }
+                }
+            ]
+        }))
+        .expect("rules parse");
+        let ctx = context_for_request_body(json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "token sk-12345678 phone 13812345678"
+                }
+            ]
+        }));
+
+        reset_json_parse_count_for_tests();
+        let result = runtime.execute(&ctx, &json!({})).expect("rules execute");
+
+        let body = result.request_body.expect("rewritten body");
+        assert!(body.contains("[KEY]"));
+        assert!(body.contains("[PHONE]"));
+        assert!(!body.contains("sk-12345678"));
+        assert!(!body.contains("13812345678"));
+        assert_eq!(
+            json_parse_count_for_tests(),
+            1,
+            "same target JSON rewrites should parse the body once"
+        );
     }
 
     #[test]
@@ -1133,7 +1531,7 @@ mod tests {
         }));
 
         let v1 = executor
-            .execute_plugin(
+            .execute_declarative_rules_plugin(
                 &rule_plugin(
                     "test.same-plugin",
                     "1.0.0",
@@ -1145,7 +1543,7 @@ mod tests {
         assert!(v1.request_body.expect("v1 body").contains("[V1]"));
 
         let v2 = executor
-            .execute_plugin(
+            .execute_declarative_rules_plugin(
                 &rule_plugin(
                     "test.same-plugin",
                     "2.0.0",
@@ -1163,6 +1561,127 @@ mod tests {
         assert!(
             !body.contains("[V1]"),
             "stale v1 rules leaked into v2: {body}"
+        );
+    }
+
+    #[test]
+    fn rule_runtime_executor_reloads_when_same_version_path_updated_at_changes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_rule_file(dir.path(), "[OLD]");
+        let executor = RuleRuntimeGatewayPluginExecutor::default();
+        let ctx = context_for_request_body(json!({
+            "messages": [{ "role": "user", "content": "secret" }]
+        }));
+        let root = dir.path().to_string_lossy().to_string();
+
+        let old = executor
+            .execute_declarative_rules_plugin(
+                &rule_plugin_with_updated_at("test.same-plugin", "1.0.0", root.clone(), 1),
+                ctx.clone(),
+            )
+            .expect("execute old rules");
+        assert!(old.request_body.expect("old body").contains("[OLD]"));
+
+        write_rule_file(dir.path(), "[NEW]");
+        let new = executor
+            .execute_declarative_rules_plugin(
+                &rule_plugin_with_updated_at("test.same-plugin", "1.0.0", root, 2),
+                ctx,
+            )
+            .expect("execute new rules");
+
+        let body = new.request_body.expect("new body");
+        assert!(
+            body.contains("[NEW]"),
+            "expected updated same-version rules, got {body}"
+        );
+        assert!(
+            !body.contains("[OLD]"),
+            "stale same-version rules leaked after updated_at changed: {body}"
+        );
+    }
+
+    #[test]
+    fn rule_runtime_prunes_cache_entries_not_in_active_plugin_keys() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let first_dir = dir.path().join("first");
+        let second_dir = dir.path().join("second");
+        write_rule_file(&first_dir, "[FIRST]");
+        write_rule_file(&second_dir, "[SECOND]");
+        let executor = RuleRuntimeGatewayPluginExecutor::default();
+        let first = rule_plugin(
+            "acme.rules",
+            "1.0.0",
+            first_dir.to_string_lossy().to_string(),
+        );
+        let second = rule_plugin(
+            "acme.other",
+            "1.0.0",
+            second_dir.to_string_lossy().to_string(),
+        );
+        let context = context_for_request_body(json!({
+            "messages": [{ "role": "user", "content": "secret" }]
+        }));
+
+        executor
+            .execute_declarative_rules_plugin(&first, context.clone())
+            .expect("first rule runtime loads");
+        executor
+            .execute_declarative_rules_plugin(&second, context)
+            .expect("second rule runtime loads");
+        assert_eq!(executor.cache_sizes_for_tests().0, 2);
+
+        executor.retain_runtime_caches_for_plugins(&[first]);
+
+        assert_eq!(executor.cache_sizes_for_tests().0, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rule_runtime_cache_does_not_hold_mutex_during_execution() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_rule_file(dir.path(), "[REDACTED]");
+        let plugin = Arc::new(rule_plugin(
+            "test.slow-plugin",
+            "1.0.0",
+            dir.path().to_string_lossy().to_string(),
+        ));
+        let context = Arc::new(context_for_request_body(json!({
+            "messages": [{
+                "role": "user",
+                "content": "aaaaaaaaaaaaaaaaaaaaaaaaa"
+            }]
+        })));
+        let executor = Arc::new(RuleRuntimeGatewayPluginExecutor::default());
+        executor
+            .execute_declarative_rules_plugin(&plugin, (*context).clone())
+            .expect("warm cache");
+
+        RULE_RUNTIME_TEST_DELAY_MS.store(120, Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        let first_executor = Arc::clone(&executor);
+        let first_plugin = Arc::clone(&plugin);
+        let first_context = Arc::clone(&context);
+        let second_executor = Arc::clone(&executor);
+        let second_plugin = Arc::clone(&plugin);
+        let second_context = Arc::clone(&context);
+        let (first, second) = tokio::join!(
+            tokio::task::spawn_blocking(move || {
+                first_executor
+                    .execute_declarative_rules_plugin(&first_plugin, (*first_context).clone())
+            }),
+            tokio::task::spawn_blocking(move || {
+                second_executor
+                    .execute_declarative_rules_plugin(&second_plugin, (*second_context).clone())
+            }),
+        );
+
+        first.expect("first join").expect("first execution");
+        second.expect("second join").expect("second execution");
+        RULE_RUNTIME_TEST_DELAY_MS.store(0, Ordering::SeqCst);
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(180),
+            "runtime executions appear serialized by cache lock: {:?}",
+            start.elapsed()
         );
     }
 }

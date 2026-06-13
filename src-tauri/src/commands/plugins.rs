@@ -282,9 +282,15 @@ pub(crate) async fn plugin_install_official(
 ) -> Result<PluginDetail, String> {
     let db = ensure_db_ready(app.clone(), db_state.inner()).await?;
     blocking::run("plugin_install_official", move || {
-        plugin_service::install_official_plugin(&db, &input.plugin_id, env!("CARGO_PKG_VERSION"))
-            .and_then(|detail| refresh_running_gateway_plugins(&app, &db, detail))
-            .and_then(|detail| ensure_plugin_runtime_dirs(&app, detail))
+        let installed_dir = crate::app_paths::plugins_installed_dir(&app)?;
+        plugin_service::install_official_plugin(
+            &db,
+            &input.plugin_id,
+            env!("CARGO_PKG_VERSION"),
+            &installed_dir,
+        )
+        .and_then(|detail| refresh_running_gateway_plugins(&app, &db, detail))
+        .and_then(|detail| ensure_plugin_runtime_dirs(&app, detail))
     })
     .await
     .map_err(Into::into)

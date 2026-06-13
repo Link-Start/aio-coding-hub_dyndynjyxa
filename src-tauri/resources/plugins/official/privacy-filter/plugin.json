@@ -1,0 +1,69 @@
+{
+  "id": "official.privacy-filter",
+  "name": "Privacy Filter",
+  "version": "1.0.0",
+  "apiVersion": "1.0.0",
+  "category": "privacy",
+  "description": "Official native privacy filter aligned with packyme/privacy-filter for pre-upstream prompt and log redaction.",
+  "homepage": "https://github.com/packyme/privacy-filter",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/packyme/privacy-filter.git"
+  },
+  "license": "MIT",
+  "runtime": {
+    "kind": "native",
+    "engine": "privacyFilter"
+  },
+  "hooks": [
+    {
+      "name": "gateway.request.afterBodyRead",
+      "priority": 5,
+      "failurePolicy": "fail-closed"
+    },
+    {
+      "name": "log.beforePersist",
+      "priority": 1,
+      "failurePolicy": "fail-closed"
+    }
+  ],
+  "permissions": ["request.body.read", "request.body.write", "log.redact"],
+  "hostCompatibility": {
+    "app": ">=0.56.0 <1.0.0",
+    "pluginApi": "^1.0.0",
+    "platforms": ["macos", "windows", "linux"]
+  },
+  "configSchema": {
+    "type": "object",
+    "required": ["redactBeforeUpstream", "redactLogs", "profile"],
+    "properties": {
+      "redactBeforeUpstream": { "type": "boolean" },
+      "redactLogs": { "type": "boolean" },
+      "profile": {
+        "type": "string",
+        "enum": ["balanced"]
+      },
+      "sensitiveTypes": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "email",
+            "cn_phone",
+            "cn_id_card",
+            "bank_card_candidate",
+            "ipv4",
+            "openai_key",
+            "aws_access_key",
+            "github_token",
+            "google_api_key",
+            "slack_token",
+            "jwt",
+            "private_key",
+            "context_secret"
+          ]
+        }
+      }
+    }
+  }
+}

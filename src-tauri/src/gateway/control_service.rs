@@ -1,7 +1,7 @@
 //! Usage: Gateway start and circuit-control orchestration.
 
 use crate::{
-    app::plugin_service, app::plugins::rule_runtime::RuleRuntimeGatewayPluginExecutor,
+    app::plugin_service, app::plugins::runtime_executor::RuntimeGatewayPluginExecutor,
     circuit_breaker, db, provider_circuit_breakers, providers, session_manager, settings,
 };
 use std::net::SocketAddr;
@@ -272,7 +272,7 @@ fn load_gateway_plugin_pipeline(
             Arc::new(
                 super::plugins::pipeline::GatewayPluginPipeline::for_runtime(
                     plugins,
-                    Arc::new(RuleRuntimeGatewayPluginExecutor::default()),
+                    Arc::new(RuntimeGatewayPluginExecutor::default()),
                     super::plugins::pipeline::GatewayPluginPipelineConfig::default(),
                 ),
             )

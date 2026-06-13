@@ -13,12 +13,14 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(crate) type GatewayHookFuture =
     Pin<Box<dyn Future<Output = Result<GatewayHookResult, GatewayPluginError>> + Send>>;
 
 pub(crate) trait GatewayPluginExecutor: Send + Sync {
+    fn retain_runtime_caches_for_plugins(&self, _plugins: &[PluginDetail]) {}
+
     fn execute_request_hook(
         &self,
         plugin: &PluginDetail,
@@ -84,6 +86,7 @@ impl GatewayPluginExecutor for NoopGatewayPluginExecutor {
 pub(crate) struct GatewayPluginPipelineConfig {
     pub(crate) hook_timeout: Duration,
     pub(crate) circuit_failure_threshold: u32,
+    pub(crate) circuit_cooldown: Duration,
 }
 
 impl Default for GatewayPluginPipelineConfig {
@@ -91,6 +94,7 @@ impl Default for GatewayPluginPipelineConfig {
         Self {
             hook_timeout: Duration::from_millis(150),
             circuit_failure_threshold: 3,
+            circuit_cooldown: Duration::from_secs(30),
         }
     }
 }
@@ -99,6 +103,8 @@ impl Default for GatewayPluginPipelineConfig {
 pub(crate) struct GatewayPluginCircuitSnapshot {
     pub(crate) failure_count: u32,
     pub(crate) open: bool,
+    pub(crate) opened_at: Option<Instant>,
+    pub(crate) half_open: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -146,8 +152,13 @@ pub(crate) struct GatewayLogHookOutput {
     pub(crate) audit_events: Vec<GatewayPluginAuditEvent>,
 }
 
+#[derive(Clone, Default)]
+struct GatewayPluginSnapshot {
+    by_hook: HashMap<GatewayPluginHookName, Arc<Vec<PluginDetail>>>,
+}
+
 pub(crate) struct GatewayPluginPipeline {
-    plugins: RwLock<Arc<Vec<PluginDetail>>>,
+    plugins: RwLock<Arc<GatewayPluginSnapshot>>,
     executor: Arc<dyn GatewayPluginExecutor>,
     config: GatewayPluginPipelineConfig,
     circuits: Mutex<HashMap<String, GatewayPluginCircuitSnapshot>>,
@@ -156,7 +167,7 @@ pub(crate) struct GatewayPluginPipeline {
 impl GatewayPluginPipeline {
     pub(crate) fn empty_shared() -> Arc<Self> {
         Arc::new(Self {
-            plugins: RwLock::new(Arc::new(Vec::new())),
+            plugins: RwLock::new(Arc::new(GatewayPluginSnapshot::default())),
             executor: Arc::new(NoopGatewayPluginExecutor),
             config: GatewayPluginPipelineConfig::default(),
             circuits: Mutex::new(HashMap::new()),
@@ -170,7 +181,7 @@ impl GatewayPluginPipeline {
         config: GatewayPluginPipelineConfig,
     ) -> Self {
         Self {
-            plugins: RwLock::new(Arc::new(plugins)),
+            plugins: RwLock::new(Arc::new(build_plugin_snapshot(plugins))),
             executor,
             config,
             circuits: Mutex::new(HashMap::new()),
@@ -183,7 +194,7 @@ impl GatewayPluginPipeline {
         config: GatewayPluginPipelineConfig,
     ) -> Self {
         Self {
-            plugins: RwLock::new(Arc::new(plugins)),
+            plugins: RwLock::new(Arc::new(build_plugin_snapshot(plugins))),
             executor,
             config,
             circuits: Mutex::new(HashMap::new()),
@@ -207,8 +218,9 @@ impl GatewayPluginPipeline {
         let mut body = input.body.clone();
         let mut audit_events = Vec::new();
 
-        for plugin in self.plugins_for_hook(input.hook_name) {
-            if self.circuit_snapshot(&plugin.summary.plugin_id).open {
+        let plugins = self.plugins_for_hook(input.hook_name);
+        for plugin in plugins.iter() {
+            if self.should_skip_for_circuit(&plugin.summary.plugin_id) {
                 audit_events.push(audit_event(
                     &plugin,
                     input.hook_name,
@@ -240,7 +252,7 @@ impl GatewayPluginPipeline {
                         serde_json::json!({ "error": err.to_string() }),
                     ));
                     if failure_policy(&plugin, input.hook_name) == FailurePolicy::FailClosed {
-                        return Err(err);
+                        return Err(err.with_audit_events(audit_events));
                     }
                     continue;
                 }
@@ -264,7 +276,8 @@ impl GatewayPluginPipeline {
                         return Err(GatewayPluginError::new(
                             "PLUGIN_HOOK_TIMEOUT",
                             format!("plugin hook timed out: {}", plugin.summary.plugin_id),
-                        ));
+                        )
+                        .with_audit_events(audit_events));
                     }
                     continue;
                 }
@@ -285,13 +298,14 @@ impl GatewayPluginPipeline {
                     serde_json::json!({ "error": err.to_string() }),
                 ));
                 if failure_policy(&plugin, input.hook_name) == FailurePolicy::FailClosed {
-                    return Err(err);
+                    return Err(err.with_audit_events(audit_events));
                 }
                 continue;
             }
 
             self.record_success(&plugin.summary.plugin_id);
-            apply_header_patch(&mut headers, &result.headers)?;
+            apply_header_patch(&mut headers, &result.headers)
+                .map_err(|err| err.with_audit_events(audit_events.clone()))?;
             if let Some(next_body) = result.request_body {
                 body = Bytes::from(next_body);
             }
@@ -343,8 +357,9 @@ impl GatewayPluginPipeline {
         let mut body = input.body.clone();
         let mut audit_events = Vec::new();
 
-        for plugin in self.plugins_for_hook(input.hook_name) {
-            if self.circuit_snapshot(&plugin.summary.plugin_id).open {
+        let plugins = self.plugins_for_hook(input.hook_name);
+        for plugin in plugins.iter() {
+            if self.should_skip_for_circuit(&plugin.summary.plugin_id) {
                 audit_events.push(audit_event(
                     &plugin,
                     input.hook_name,
@@ -373,7 +388,7 @@ impl GatewayPluginPipeline {
                     self.record_failure(&plugin.summary.plugin_id);
                     audit_events.push(failed_event(&plugin, input.hook_name, &err.to_string()));
                     if failure_policy(&plugin, input.hook_name) == FailurePolicy::FailClosed {
-                        return Err(err);
+                        return Err(err.with_audit_events(audit_events));
                     }
                     continue;
                 }
@@ -381,7 +396,8 @@ impl GatewayPluginPipeline {
                     self.record_failure(&plugin.summary.plugin_id);
                     audit_events.push(timeout_event(&plugin, input.hook_name));
                     if failure_policy(&plugin, input.hook_name) == FailurePolicy::FailClosed {
-                        return Err(timeout_error(&plugin.summary.plugin_id));
+                        return Err(timeout_error(&plugin.summary.plugin_id)
+                            .with_audit_events(audit_events));
                     }
                     continue;
                 }
@@ -395,13 +411,14 @@ impl GatewayPluginPipeline {
                 self.record_failure(&plugin.summary.plugin_id);
                 audit_events.push(failed_event(&plugin, input.hook_name, &err.to_string()));
                 if failure_policy(&plugin, input.hook_name) == FailurePolicy::FailClosed {
-                    return Err(err);
+                    return Err(err.with_audit_events(audit_events));
                 }
                 continue;
             }
 
             self.record_success(&plugin.summary.plugin_id);
-            apply_header_patch(&mut headers, &result.headers)?;
+            apply_header_patch(&mut headers, &result.headers)
+                .map_err(|err| err.with_audit_events(audit_events.clone()))?;
             if let Some(next_body) = result.response_body {
                 body = Bytes::from(next_body);
             }
@@ -446,8 +463,9 @@ impl GatewayPluginPipeline {
         let mut chunk = input.chunk.clone();
         let mut audit_events = Vec::new();
 
-        for plugin in self.plugins_for_hook(hook_name) {
-            if self.circuit_snapshot(&plugin.summary.plugin_id).open {
+        let plugins = self.plugins_for_hook(hook_name);
+        for plugin in plugins.iter() {
+            if self.should_skip_for_circuit(&plugin.summary.plugin_id) {
                 audit_events.push(audit_event(
                     &plugin,
                     hook_name,
@@ -475,7 +493,7 @@ impl GatewayPluginPipeline {
                     self.record_failure(&plugin.summary.plugin_id);
                     audit_events.push(failed_event(&plugin, hook_name, &err.to_string()));
                     if failure_policy(&plugin, hook_name) == FailurePolicy::FailClosed {
-                        return Err(err);
+                        return Err(err.with_audit_events(audit_events));
                     }
                     continue;
                 }
@@ -483,7 +501,8 @@ impl GatewayPluginPipeline {
                     self.record_failure(&plugin.summary.plugin_id);
                     audit_events.push(timeout_event(&plugin, hook_name));
                     if failure_policy(&plugin, hook_name) == FailurePolicy::FailClosed {
-                        return Err(timeout_error(&plugin.summary.plugin_id));
+                        return Err(timeout_error(&plugin.summary.plugin_id)
+                            .with_audit_events(audit_events));
                     }
                     continue;
                 }
@@ -495,7 +514,7 @@ impl GatewayPluginPipeline {
                 self.record_failure(&plugin.summary.plugin_id);
                 audit_events.push(failed_event(&plugin, hook_name, &err.to_string()));
                 if failure_policy(&plugin, hook_name) == FailurePolicy::FailClosed {
-                    return Err(err);
+                    return Err(err.with_audit_events(audit_events));
                 }
                 continue;
             }
@@ -525,7 +544,6 @@ impl GatewayPluginPipeline {
                     audit_events,
                 });
             }
-            audit_events.push(completed_event(&plugin, hook_name));
         }
 
         Ok(GatewayStreamHookOutput {
@@ -543,8 +561,9 @@ impl GatewayPluginPipeline {
         let mut message = input.message.clone();
         let mut audit_events = Vec::new();
 
-        for plugin in self.plugins_for_hook(hook_name) {
-            if self.circuit_snapshot(&plugin.summary.plugin_id).open {
+        let plugins = self.plugins_for_hook(hook_name);
+        for plugin in plugins.iter() {
+            if self.should_skip_for_circuit(&plugin.summary.plugin_id) {
                 audit_events.push(audit_event(
                     &plugin,
                     hook_name,
@@ -572,7 +591,7 @@ impl GatewayPluginPipeline {
                     self.record_failure(&plugin.summary.plugin_id);
                     audit_events.push(failed_event(&plugin, hook_name, &err.to_string()));
                     if failure_policy(&plugin, hook_name) == FailurePolicy::FailClosed {
-                        return Err(err);
+                        return Err(err.with_audit_events(audit_events));
                     }
                     continue;
                 }
@@ -580,7 +599,8 @@ impl GatewayPluginPipeline {
                     self.record_failure(&plugin.summary.plugin_id);
                     audit_events.push(timeout_event(&plugin, hook_name));
                     if failure_policy(&plugin, hook_name) == FailurePolicy::FailClosed {
-                        return Err(timeout_error(&plugin.summary.plugin_id));
+                        return Err(timeout_error(&plugin.summary.plugin_id)
+                            .with_audit_events(audit_events));
                     }
                     continue;
                 }
@@ -592,7 +612,7 @@ impl GatewayPluginPipeline {
                 self.record_failure(&plugin.summary.plugin_id);
                 audit_events.push(failed_event(&plugin, hook_name, &err.to_string()));
                 if failure_policy(&plugin, hook_name) == FailurePolicy::FailClosed {
-                    return Err(err);
+                    return Err(err.with_audit_events(audit_events));
                 }
                 continue;
             }
@@ -610,6 +630,7 @@ impl GatewayPluginPipeline {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn circuit_snapshot(&self, plugin_id: &str) -> GatewayPluginCircuitSnapshot {
         self.circuits
             .lock()
@@ -624,37 +645,76 @@ impl GatewayPluginPipeline {
             .iter()
             .map(|plugin| plugin.summary.plugin_id.clone())
             .collect();
+        self.executor.retain_runtime_caches_for_plugins(&plugins);
         *self
             .plugins
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::new(plugins);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Arc::new(build_plugin_snapshot(plugins));
         self.circuits
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .retain(|plugin_id, _| active_ids.contains(plugin_id));
     }
 
-    fn plugins_for_hook(&self, hook_name: GatewayPluginHookName) -> Vec<PluginDetail> {
-        let snapshot = self
-            .plugins
+    fn plugins_for_hook(&self, hook_name: GatewayPluginHookName) -> Arc<Vec<PluginDetail>> {
+        self.plugins
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let mut plugins: Vec<PluginDetail> = snapshot
-            .iter()
-            .filter(|plugin| plugin.summary.status == PluginStatus::Enabled)
-            .filter(|plugin| plugin_hook(plugin, hook_name).is_some())
+            .by_hook
+            .get(&hook_name)
             .cloned()
-            .collect();
-        plugins.sort_by_key(|plugin| {
-            (
-                plugin_hook(plugin, hook_name)
-                    .map(|hook| hook.priority)
-                    .unwrap_or_default(),
-                plugin.summary.plugin_id.clone(),
-            )
-        });
-        plugins
+            .unwrap_or_else(|| Arc::new(Vec::new()))
+    }
+
+    pub(crate) fn has_plugins_for_hook(&self, hook_name: GatewayPluginHookName) -> bool {
+        !self.plugins_for_hook(hook_name).is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn plugins_for_hook_count_for_tests(
+        &self,
+        hook_name: GatewayPluginHookName,
+    ) -> usize {
+        self.plugins_for_hook(hook_name).len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_open_circuit_for_tests(&self, plugin_id: &str) {
+        let mut circuits = self
+            .circuits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        circuits.insert(
+            plugin_id.to_string(),
+            GatewayPluginCircuitSnapshot {
+                failure_count: self.config.circuit_failure_threshold.max(1),
+                open: true,
+                opened_at: Some(Instant::now()),
+                half_open: false,
+            },
+        );
+    }
+
+    fn should_skip_for_circuit(&self, plugin_id: &str) -> bool {
+        let mut circuits = self
+            .circuits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(entry) = circuits.get_mut(plugin_id) else {
+            return false;
+        };
+        if !entry.open {
+            return false;
+        }
+        let cooldown_elapsed = entry
+            .opened_at
+            .is_none_or(|opened_at| opened_at.elapsed() >= self.config.circuit_cooldown);
+        if cooldown_elapsed && !entry.half_open {
+            entry.half_open = true;
+            return false;
+        }
+        true
     }
 
     fn record_failure(&self, plugin_id: &str) {
@@ -666,6 +726,8 @@ impl GatewayPluginPipeline {
         entry.failure_count = entry.failure_count.saturating_add(1);
         if entry.failure_count >= self.config.circuit_failure_threshold.max(1) {
             entry.open = true;
+            entry.opened_at = Some(Instant::now());
+            entry.half_open = false;
         }
     }
 
@@ -709,6 +771,55 @@ fn plugin_hook(
         .hooks
         .iter()
         .find(|hook| hook.name == hook_name.as_str())
+}
+
+fn build_plugin_snapshot(plugins: Vec<PluginDetail>) -> GatewayPluginSnapshot {
+    let mut by_hook: HashMap<GatewayPluginHookName, Vec<PluginDetail>> = HashMap::new();
+    for plugin in plugins.iter() {
+        if plugin.summary.status != PluginStatus::Enabled {
+            continue;
+        }
+        for hook in &plugin.manifest.hooks {
+            let Some(hook_name) = hook_name_from_str(&hook.name) else {
+                continue;
+            };
+            by_hook.entry(hook_name).or_default().push(plugin.clone());
+        }
+    }
+
+    let by_hook = by_hook
+        .into_iter()
+        .map(|(hook_name, mut plugins)| {
+            plugins.sort_by_key(|plugin| {
+                (
+                    plugin_hook(plugin, hook_name)
+                        .map(|hook| hook.priority)
+                        .unwrap_or_default(),
+                    plugin.summary.plugin_id.clone(),
+                )
+            });
+            (hook_name, Arc::new(plugins))
+        })
+        .collect();
+
+    GatewayPluginSnapshot { by_hook }
+}
+
+fn hook_name_from_str(raw: &str) -> Option<GatewayPluginHookName> {
+    match raw {
+        "gateway.request.received" => Some(GatewayPluginHookName::RequestReceived),
+        "gateway.request.afterBodyRead" => Some(GatewayPluginHookName::RequestAfterBodyRead),
+        "gateway.request.beforeProviderResolution" => {
+            Some(GatewayPluginHookName::RequestBeforeProviderResolution)
+        }
+        "gateway.request.beforeSend" => Some(GatewayPluginHookName::RequestBeforeSend),
+        "gateway.response.headers" => Some(GatewayPluginHookName::ResponseHeaders),
+        "gateway.response.chunk" => Some(GatewayPluginHookName::ResponseChunk),
+        "gateway.response.after" => Some(GatewayPluginHookName::ResponseAfter),
+        "gateway.error" => Some(GatewayPluginHookName::Error),
+        "log.beforePersist" => Some(GatewayPluginHookName::LogBeforePersist),
+        _ => None,
+    }
 }
 
 fn audit_event(
@@ -1072,6 +1183,135 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct PruneRecordingExecutor {
+        last_retain_ids: Mutex<Vec<String>>,
+    }
+
+    impl PruneRecordingExecutor {
+        fn last_retain_ids(&self) -> Vec<String> {
+            self.last_retain_ids.lock().unwrap().clone()
+        }
+    }
+
+    impl GatewayPluginExecutor for PruneRecordingExecutor {
+        fn retain_runtime_caches_for_plugins(&self, plugins: &[PluginDetail]) {
+            *self.last_retain_ids.lock().unwrap() = plugins
+                .iter()
+                .map(|plugin| plugin.summary.plugin_id.clone())
+                .collect();
+        }
+
+        fn execute_request_hook(
+            &self,
+            _plugin: &PluginDetail,
+            _context: GatewayVisibleHookContext,
+        ) -> GatewayHookFuture {
+            Box::pin(async { Ok(GatewayHookResult::continue_unchanged()) })
+        }
+
+        fn execute_response_hook(
+            &self,
+            _plugin: &PluginDetail,
+            _context: GatewayVisibleHookContext,
+        ) -> GatewayHookFuture {
+            Box::pin(async { Ok(GatewayHookResult::continue_unchanged()) })
+        }
+
+        fn execute_stream_hook(
+            &self,
+            _plugin: &PluginDetail,
+            _context: GatewayVisibleHookContext,
+        ) -> GatewayHookFuture {
+            Box::pin(async { Ok(GatewayHookResult::continue_unchanged()) })
+        }
+
+        fn execute_log_hook(
+            &self,
+            _plugin: &PluginDetail,
+            _context: GatewayVisibleHookContext,
+        ) -> GatewayHookFuture {
+            Box::pin(async { Ok(GatewayHookResult::continue_unchanged()) })
+        }
+    }
+
+    #[test]
+    fn replace_plugins_notifies_executor_to_prune_runtime_caches() {
+        let executor = Arc::new(PruneRecordingExecutor::default());
+        let pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![plugin("acme.a", 1, vec!["request.body.read"])],
+            executor.clone(),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        pipeline.replace_plugins(vec![plugin("acme.b", 1, vec!["request.body.read"])]);
+
+        assert_eq!(executor.last_retain_ids(), vec!["acme.b"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "performance smoke: run manually before plugin API releases"]
+    async fn perf_empty_pipeline_request_hook_budget() {
+        let pipeline = GatewayPluginPipeline::empty_shared();
+        let iterations = 10_000_u32;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let output = pipeline
+                .run_request_hook(request_input())
+                .await
+                .expect("empty pipeline should pass");
+            assert_eq!(output.body.as_ref(), b"hello");
+        }
+        let elapsed = start.elapsed();
+        let avg_nanos = elapsed.as_nanos() / u128::from(iterations);
+        eprintln!("plugin perf empty request hook avg_nanos={avg_nanos}");
+        assert!(
+            avg_nanos < 25_000,
+            "empty plugin pipeline exceeded 25us budget: {avg_nanos}ns"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "performance smoke: run manually before plugin API releases"]
+    async fn perf_one_noop_plugin_request_hook_budget() {
+        let pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![plugin("plugin.noop", 10, vec!["request.body.read"])],
+            Arc::new(InMemoryGatewayPluginExecutor::new()),
+            GatewayPluginPipelineConfig::default(),
+        );
+        let iterations = 5_000_u32;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let output = pipeline
+                .run_request_hook(request_input())
+                .await
+                .expect("one-plugin pipeline should pass");
+            assert_eq!(output.body.as_ref(), b"hello");
+        }
+        let avg_nanos = start.elapsed().as_nanos() / u128::from(iterations);
+        eprintln!("plugin perf one noop request hook avg_nanos={avg_nanos}");
+        assert!(
+            avg_nanos < 250_000,
+            "one noop plugin exceeded 250us budget: {avg_nanos}ns"
+        );
+    }
+
+    #[test]
+    fn gateway_plugin_pipeline_has_plugins_for_hook_reports_hook_presence() {
+        let pipeline = GatewayPluginPipeline::for_tests(
+            vec![plugin(
+                "plugin.request",
+                100,
+                vec!["request.body.read", "request.body.write"],
+            )],
+            Arc::new(InMemoryGatewayPluginExecutor::new()),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        assert!(pipeline.has_plugins_for_hook(GatewayPluginHookName::RequestAfterBodyRead));
+        assert!(!pipeline.has_plugins_for_hook(GatewayPluginHookName::ResponseChunk));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn gateway_plugin_pipeline_orders_plugins_and_applies_body_changes() {
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -1111,6 +1351,7 @@ mod tests {
             GatewayPluginPipelineConfig {
                 hook_timeout: Duration::from_secs(1),
                 circuit_failure_threshold: 2,
+                circuit_cooldown: Duration::from_secs(30),
             },
         );
 
@@ -1148,6 +1389,7 @@ mod tests {
             GatewayPluginPipelineConfig {
                 hook_timeout: Duration::from_millis(1),
                 circuit_failure_threshold: 1,
+                circuit_cooldown: Duration::from_secs(60),
             },
         );
 
@@ -1167,6 +1409,82 @@ mod tests {
         assert!(second.audit_events.iter().any(|event| {
             event.plugin_id == "plugin.slow" && event.event_type == "plugin.hook.skipped"
         }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_pipeline_returns_fail_closed_audit_events_on_error() {
+        let executor = InMemoryGatewayPluginExecutor::new().with_request_async_handler(
+            "plugin.slow",
+            |_ctx| async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                GatewayHookResult::continue_unchanged()
+            },
+        );
+        let mut plugin = plugin("plugin.slow", 10, vec!["request.body.read"]);
+        plugin.manifest.hooks[0].failure_policy = Some("fail-closed".to_string());
+        let pipeline = GatewayPluginPipeline::for_tests(
+            vec![plugin],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig {
+                hook_timeout: Duration::from_millis(1),
+                circuit_failure_threshold: 1,
+                circuit_cooldown: Duration::from_secs(60),
+            },
+        );
+
+        let err = pipeline
+            .run_request_hook(request_input())
+            .await
+            .expect_err("fail-closed timeout should fail the request");
+
+        assert_eq!(err.code(), "PLUGIN_HOOK_TIMEOUT");
+        assert!(err.audit_events().iter().any(|event| {
+            event.plugin_id == "plugin.slow"
+                && event.hook_name == "gateway.request.afterBodyRead"
+                && event.event_type == "plugin.hook.failed"
+                && event
+                    .details
+                    .get("failureKind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("timeout")
+        }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_pipeline_allows_half_open_probe_after_cooldown() {
+        let executor = InMemoryGatewayPluginExecutor::new().with_request_async_handler(
+            "plugin.flaky",
+            |_ctx| async {
+                GatewayHookResult {
+                    request_body: Some("recovered".to_string()),
+                    ..GatewayHookResult::continue_unchanged()
+                }
+            },
+        );
+        let pipeline = GatewayPluginPipeline::for_tests(
+            vec![plugin(
+                "plugin.flaky",
+                10,
+                vec!["request.body.read", "request.body.write"],
+            )],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig {
+                hook_timeout: Duration::from_secs(1),
+                circuit_failure_threshold: 1,
+                circuit_cooldown: Duration::from_millis(1),
+            },
+        );
+
+        pipeline.force_open_circuit_for_tests("plugin.flaky");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+
+        let output = pipeline
+            .run_request_hook(request_input())
+            .await
+            .expect("half-open probe");
+
+        assert_eq!(output.body.as_ref(), b"recovered");
+        assert!(!pipeline.circuit_snapshot("plugin.flaky").open);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1190,6 +1508,7 @@ mod tests {
             GatewayPluginPipelineConfig {
                 hook_timeout: Duration::from_secs(1),
                 circuit_failure_threshold: 2,
+                circuit_cooldown: Duration::from_secs(30),
             },
         );
 
@@ -1211,6 +1530,26 @@ mod tests {
             .expect("pipeline should execute refreshed plugin");
         assert_eq!(after.body.as_ref(), b"new");
         assert_eq!(pipeline.circuit_snapshot("plugin.old").failure_count, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_pipeline_reuses_hook_index_after_refresh() {
+        let pipeline = GatewayPluginPipeline::for_tests(
+            vec![plugin("plugin.a", 10, vec!["request.body.read"])],
+            Arc::new(InMemoryGatewayPluginExecutor::new()),
+            GatewayPluginPipelineConfig::default(),
+        );
+        assert_eq!(
+            pipeline.plugins_for_hook_count_for_tests(GatewayPluginHookName::RequestAfterBodyRead),
+            1
+        );
+
+        pipeline.replace_plugins(vec![plugin("plugin.b", 20, vec!["request.body.read"])]);
+
+        assert_eq!(
+            pipeline.plugins_for_hook_count_for_tests(GatewayPluginHookName::RequestAfterBodyRead),
+            1
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1383,6 +1722,35 @@ mod tests {
             .expect("stream pipeline should succeed");
 
         assert_eq!(output.chunk.as_ref(), b"data: redacted\n\n");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_stream_pipeline_omits_success_completed_audit_events() {
+        let executor =
+            InMemoryGatewayPluginExecutor::new().with_stream_handler("plugin.stream", |_ctx| {
+                GatewayHookResult {
+                    stream_chunk: Some("data: redacted\n\n".to_string()),
+                    ..GatewayHookResult::continue_unchanged()
+                }
+            });
+        let mut plugin = plugin("plugin.stream", 10, vec!["stream.inspect", "stream.modify"]);
+        plugin.manifest.hooks[0].name = "gateway.response.chunk".to_string();
+
+        let pipeline = GatewayPluginPipeline::for_tests(
+            vec![plugin],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let output = pipeline
+            .run_stream_hook(stream_input())
+            .await
+            .expect("stream pipeline should succeed");
+
+        assert!(output.audit_events.iter().all(|event| {
+            !(event.hook_name == "gateway.response.chunk"
+                && event.event_type == "plugin.hook.completed")
+        }));
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -179,7 +179,10 @@ pub(super) async fn apply_gateway_error_hook(
             );
             output
         }
-        Err(err) => {
+        Err(mut err) => {
+            crate::gateway::plugins::audit::persist_gateway_plugin_error_audit_events(
+                db, &trace_id, &mut err,
+            );
             tracing::warn!(
                 trace_id = %trace_id,
                 error = %err,

@@ -1,12 +1,14 @@
 //! Usage: Gateway plugin permission trimming and result enforcement.
 
 use super::context::{GatewayHookResult, GatewayPluginHookName};
+use super::pipeline::GatewayPluginAuditEvent;
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct GatewayPluginError {
     code: &'static str,
     message: String,
+    audit_events: Vec<GatewayPluginAuditEvent>,
 }
 
 impl GatewayPluginError {
@@ -14,12 +16,30 @@ impl GatewayPluginError {
         Self {
             code,
             message: message.into(),
+            audit_events: Vec::new(),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn code(&self) -> &'static str {
         self.code
+    }
+
+    pub(crate) fn with_audit_events(
+        mut self,
+        mut audit_events: Vec<GatewayPluginAuditEvent>,
+    ) -> Self {
+        audit_events.extend(self.audit_events);
+        self.audit_events = audit_events;
+        self
+    }
+
+    pub(crate) fn audit_events(&self) -> &[GatewayPluginAuditEvent] {
+        &self.audit_events
+    }
+
+    pub(crate) fn take_audit_events(&mut self) -> Vec<GatewayPluginAuditEvent> {
+        std::mem::take(&mut self.audit_events)
     }
 }
 

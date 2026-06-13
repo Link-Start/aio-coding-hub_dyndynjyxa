@@ -1,9 +1,22 @@
 //! Usage: Best-effort persistence for gateway plugin hook audit events.
 
+use super::permissions::GatewayPluginError;
 use super::pipeline::GatewayPluginAuditEvent;
 use crate::infra::plugins::repository::{
     self, AppendPluginAuditLogInput, RecordPluginRuntimeFailureInput,
 };
+
+pub(crate) fn persist_gateway_plugin_error_audit_events(
+    db: &crate::db::Db,
+    trace_id: &str,
+    err: &mut GatewayPluginError,
+) {
+    let events = err.take_audit_events();
+    if events.is_empty() {
+        return;
+    }
+    persist_gateway_plugin_audit_events(db, trace_id, events);
+}
 
 pub(crate) fn persist_gateway_plugin_audit_events(
     db: &crate::db::Db,

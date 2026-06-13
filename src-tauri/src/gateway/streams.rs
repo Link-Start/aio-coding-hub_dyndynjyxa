@@ -13,7 +13,7 @@ mod gunzip;
 pub(super) use gunzip::GunzipStream;
 
 mod plugin_chunk;
-pub(super) use plugin_chunk::PluginChunkStream;
+pub(super) use plugin_chunk::MaybePluginChunkStream;
 
 mod usage_tee;
 pub(super) use usage_tee::{

@@ -1,9 +1,11 @@
 //! Usage: Sandboxed WASM plugin runtime foundation for community code plugins.
 #![allow(dead_code)]
 
+use crate::gateway::plugins::context::{GatewayHookAction, GatewayHookResult};
 use crate::shared::error::{AppError, AppResult};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use wasmtime::{Config, Engine, Linker, Module, ResourceLimiter, Store};
 
 const DEFAULT_MAX_JSON_BYTES: usize = 256 * 1024;
@@ -232,6 +234,99 @@ fn map_wasm_call_error(prefix: &str, err: wasmtime::Error, fuel_exhausted: bool)
     )
 }
 
+fn gateway_hook_result_from_wasm_output(value: Value) -> AppResult<GatewayHookResult> {
+    let object = value.as_object().ok_or_else(|| {
+        AppError::new(
+            "PLUGIN_WASM_INVALID_OUTPUT",
+            "WASM plugin output must be a JSON object",
+        )
+    })?;
+    if object.contains_key("contextPatch") {
+        return Err(AppError::new(
+            "PLUGIN_WASM_INVALID_OUTPUT",
+            "WASM plugin output used legacy contextPatch; use requestBody, responseBody, streamChunk, logMessage, or headers",
+        ));
+    }
+
+    let action = object
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            AppError::new(
+                "PLUGIN_WASM_INVALID_OUTPUT",
+                "WASM plugin output must include string action",
+            )
+        })?;
+    let mut result = GatewayHookResult::continue_unchanged();
+    match action {
+        "pass" => {}
+        "warn" => {
+            result.reason = optional_string(object, "message")?;
+        }
+        "block" => {
+            result.action = GatewayHookAction::Block;
+            result.reason = optional_string(object, "reason")?;
+        }
+        "replace" => {
+            result.request_body = optional_string(object, "requestBody")?;
+            result.response_body = optional_string(object, "responseBody")?;
+            result.stream_chunk = optional_string(object, "streamChunk")?;
+            result.log_message = optional_string(object, "logMessage")?;
+            result.headers = optional_string_map(object, "headers")?.unwrap_or_default();
+        }
+        other => {
+            return Err(AppError::new(
+                "PLUGIN_WASM_INVALID_OUTPUT",
+                format!("unsupported WASM plugin action: {other}"),
+            ));
+        }
+    }
+    Ok(result)
+}
+
+fn optional_string(
+    object: &serde_json::Map<String, Value>,
+    key: &'static str,
+) -> AppResult<Option<String>> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(AppError::new(
+            "PLUGIN_WASM_INVALID_OUTPUT",
+            format!("WASM plugin output field {key} must be a string"),
+        )),
+    }
+}
+
+fn optional_string_map(
+    object: &serde_json::Map<String, Value>,
+    key: &'static str,
+) -> AppResult<Option<BTreeMap<String, String>>> {
+    let Some(value) = object.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(map) = value.as_object() else {
+        return Err(AppError::new(
+            "PLUGIN_WASM_INVALID_OUTPUT",
+            format!("WASM plugin output field {key} must be an object"),
+        ));
+    };
+    let mut out = BTreeMap::new();
+    for (name, value) in map {
+        let Some(header_value) = value.as_str() else {
+            return Err(AppError::new(
+                "PLUGIN_WASM_INVALID_OUTPUT",
+                format!("WASM plugin output header {name} must be a string"),
+            ));
+        };
+        out.insert(name.clone(), header_value.to_string());
+    }
+    Ok(Some(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +447,32 @@ mod tests {
             err.to_string().contains("PLUGIN_WASM_FUEL_EXHAUSTED"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn wasm_output_replace_request_body_maps_to_gateway_hook_result() {
+        let result = gateway_hook_result_from_wasm_output(json!({
+            "action": "replace",
+            "requestBody": "{\"messages\":[]}",
+            "headers": { "x-plugin-redacted": "1" }
+        }))
+        .expect("wasm output maps");
+
+        assert_eq!(result.request_body.as_deref(), Some("{\"messages\":[]}"));
+        assert_eq!(
+            result.headers.get("x-plugin-redacted").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn wasm_output_rejects_legacy_context_patch_in_vnext() {
+        let err = gateway_hook_result_from_wasm_output(json!({
+            "action": "replace",
+            "contextPatch": { "request": { "body": "x" } }
+        }))
+        .expect_err("legacy contextPatch is not active vNext ABI");
+
+        assert_eq!(err.code(), "PLUGIN_WASM_INVALID_OUTPUT");
     }
 }

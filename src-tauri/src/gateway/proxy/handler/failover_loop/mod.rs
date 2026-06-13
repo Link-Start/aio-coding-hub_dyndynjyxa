@@ -123,7 +123,7 @@ use crate::gateway::events::{
 };
 use crate::gateway::response_fixer;
 use crate::gateway::streams::{
-    spawn_usage_sse_relay_body, FirstChunkStream, GunzipStream, PluginChunkStream,
+    spawn_usage_sse_relay_body, FirstChunkStream, GunzipStream, MaybePluginChunkStream,
     TimingOnlyTeeStream, UsageBodyBufferTeeStream, UsageSseTeeStream,
 };
 use crate::gateway::thinking_signature_rectifier;

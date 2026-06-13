@@ -276,17 +276,34 @@ pub fn permission_risk(permission: &str) -> Option<PluginPermissionRisk> {
 }
 
 pub fn is_known_hook(hook: &str) -> bool {
+    is_active_gateway_hook(hook) || is_reserved_gateway_hook(hook)
+}
+
+pub fn is_active_gateway_hook(hook: &str) -> bool {
     matches!(
         hook,
-        "gateway.request.received"
-            | "gateway.request.afterBodyRead"
-            | "gateway.request.beforeProviderResolution"
+        "gateway.request.afterBodyRead"
             | "gateway.request.beforeSend"
-            | "gateway.response.headers"
             | "gateway.response.chunk"
             | "gateway.response.after"
             | "gateway.error"
             | "log.beforePersist"
+    )
+}
+
+pub fn is_reserved_gateway_hook(hook: &str) -> bool {
+    matches!(
+        hook,
+        "gateway.request.received"
+            | "gateway.request.beforeProviderResolution"
+            | "gateway.response.headers"
+    )
+}
+
+pub fn is_reserved_permission(permission: &str) -> bool {
+    matches!(
+        permission,
+        "plugin.storage" | "network.fetch" | "file.read" | "file.write" | "secret.read"
     )
 }
 
@@ -350,6 +367,15 @@ fn validate_hooks(hooks: &[PluginHook]) -> Result<(), PluginValidationError> {
         ));
     }
     for hook in hooks {
+        if is_reserved_gateway_hook(&hook.name) {
+            return Err(PluginValidationError::new(
+                "PLUGIN_RESERVED_HOOK",
+                format!(
+                    "hook is reserved for a future host integration and is not active in plugin API v1: {}",
+                    hook.name
+                ),
+            ));
+        }
         if !is_known_hook(&hook.name) {
             return Err(PluginValidationError::new(
                 "PLUGIN_UNKNOWN_HOOK",
@@ -362,6 +388,14 @@ fn validate_hooks(hooks: &[PluginHook]) -> Result<(), PluginValidationError> {
 
 fn validate_permissions(permissions: &[String]) -> Result<(), PluginValidationError> {
     for permission in permissions {
+        if is_reserved_permission(permission) {
+            return Err(PluginValidationError::new(
+                "PLUGIN_RESERVED_PERMISSION",
+                format!(
+                    "permission is reserved for a future host-mediated API and is not active in plugin API v1: {permission}"
+                ),
+            ));
+        }
         if permission_risk(permission).is_none() {
             return Err(PluginValidationError::new(
                 "PLUGIN_UNKNOWN_PERMISSION",
@@ -551,8 +585,8 @@ mod tests {
 
     fn valid_manifest() -> serde_json::Value {
         serde_json::json!({
-            "id": "official.prompt-optimizer",
-            "name": "Prompt Optimizer",
+            "id": "community.prompt-helper",
+            "name": "Community Prompt Helper",
             "version": "1.0.0",
             "apiVersion": "1.0.0",
             "runtime": {
@@ -579,7 +613,7 @@ mod tests {
     fn manifest_json_deserializes_and_validates() {
         let manifest: PluginManifest = serde_json::from_value(valid_manifest()).unwrap();
         validate_manifest(&manifest, "0.56.0").unwrap();
-        assert_eq!(manifest.id.as_str(), "official.prompt-optimizer");
+        assert_eq!(manifest.id.as_str(), "community.prompt-helper");
     }
 
     #[test]
@@ -598,6 +632,69 @@ mod tests {
         let manifest: PluginManifest = serde_json::from_value(raw).unwrap();
         let err = validate_manifest(&manifest, "0.56.0").unwrap_err();
         assert_eq!(err.code, "PLUGIN_UNKNOWN_HOOK");
+    }
+
+    #[test]
+    fn validate_manifest_rejects_reserved_hook_until_it_is_wired() {
+        let mut raw = valid_manifest();
+        raw["hooks"][0]["name"] = serde_json::json!("gateway.request.received");
+        raw["permissions"] = serde_json::json!(["request.meta.read"]);
+        let manifest: PluginManifest = serde_json::from_value(raw).unwrap();
+        let err = validate_manifest(&manifest, "0.56.0").unwrap_err();
+        assert_eq!(err.code, "PLUGIN_RESERVED_HOOK");
+        assert!(err.message.contains("gateway.request.received"));
+    }
+
+    #[test]
+    fn validate_manifest_accepts_active_vnext_hooks() {
+        let cases = [
+            (
+                "gateway.request.afterBodyRead",
+                serde_json::json!(["request.body.read", "request.body.write"]),
+            ),
+            (
+                "gateway.request.beforeSend",
+                serde_json::json!(["request.body.read", "request.body.write"]),
+            ),
+            (
+                "gateway.response.chunk",
+                serde_json::json!(["stream.inspect", "stream.modify"]),
+            ),
+            (
+                "gateway.response.after",
+                serde_json::json!(["response.body.read", "response.body.write"]),
+            ),
+            ("gateway.error", serde_json::json!(["response.body.read"])),
+            ("log.beforePersist", serde_json::json!(["log.redact"])),
+        ];
+
+        for (hook_name, permissions) in cases {
+            let mut raw = valid_manifest();
+            raw["hooks"][0]["name"] = serde_json::json!(hook_name);
+            raw["permissions"] = permissions;
+            let manifest: PluginManifest = serde_json::from_value(raw).unwrap();
+            validate_manifest(&manifest, "0.56.0")
+                .unwrap_or_else(|err| panic!("active hook {hook_name} rejected: {err:?}"));
+        }
+    }
+
+    #[test]
+    fn validate_manifest_rejects_reserved_permissions_until_host_apis_exist() {
+        for permission in [
+            "plugin.storage",
+            "network.fetch",
+            "file.read",
+            "file.write",
+            "secret.read",
+        ] {
+            let mut raw = valid_manifest();
+            raw["permissions"] =
+                serde_json::json!(["request.body.read", "request.body.write", permission]);
+            let manifest: PluginManifest = serde_json::from_value(raw).unwrap();
+            let err = validate_manifest(&manifest, "0.56.0").unwrap_err();
+            assert_eq!(err.code, "PLUGIN_RESERVED_PERMISSION");
+            assert!(err.message.contains(permission));
+        }
     }
 
     #[test]

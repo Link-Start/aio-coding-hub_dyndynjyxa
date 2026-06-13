@@ -125,6 +125,6 @@ mod plugin_path_tests {
         assert!(super::plugin_id_path_segment("official/evil").is_err());
         assert!(super::plugin_id_path_segment("official\\evil").is_err());
         assert!(super::plugin_id_path_segment(".").is_err());
-        assert!(super::plugin_id_path_segment("official.prompt-optimizer").is_ok());
+        assert!(super::plugin_id_path_segment("community.prompt-helper").is_ok());
     }
 }

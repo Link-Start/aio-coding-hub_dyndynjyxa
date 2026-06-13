@@ -84,7 +84,9 @@ impl GatewayRequestHookInput {
             ));
         }
         if has_permission(permissions, "request.body.read") {
-            ctx.request.body = Some(bytes_to_visible_string(&self.body));
+            let body = bytes_to_visible_string(&self.body);
+            ctx.request.normalized_messages = normalized_messages_from_body(&body);
+            ctx.request.body = Some(body);
         }
 
         ctx
@@ -181,6 +183,14 @@ impl GatewayVisibleHookContext {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GatewayNormalizedMessage {
+    pub(crate) role: String,
+    pub(crate) text: String,
+    pub(crate) source: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct GatewayVisibleRequestContext {
     pub(crate) cli_key: Option<String>,
@@ -189,6 +199,7 @@ pub(crate) struct GatewayVisibleRequestContext {
     pub(crate) query: Option<String>,
     pub(crate) headers: Option<serde_json::Map<String, serde_json::Value>>,
     pub(crate) body: Option<String>,
+    pub(crate) normalized_messages: Vec<GatewayNormalizedMessage>,
     pub(crate) requested_model: Option<String>,
 }
 
@@ -247,6 +258,108 @@ fn has_permission(permissions: &[String], permission: &str) -> bool {
 
 fn bytes_to_visible_string(bytes: &Bytes) -> String {
     String::from_utf8_lossy(bytes.as_ref()).into_owned()
+}
+
+fn normalized_messages_from_body(body: &str) -> Vec<GatewayNormalizedMessage> {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+
+    if let Some(messages) = root.get("messages").and_then(serde_json::Value::as_array) {
+        for message in messages {
+            collect_message_content(message, "messages.content", &mut out);
+        }
+    }
+
+    if let Some(input) = root.get("input") {
+        match input {
+            serde_json::Value::String(text) => {
+                push_normalized_message(&mut out, "user", text, "openai.responses.input")
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    collect_responses_input_item(item, &mut out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    out
+}
+
+fn collect_message_content(
+    message: &serde_json::Value,
+    source_prefix: &'static str,
+    out: &mut Vec<GatewayNormalizedMessage>,
+) {
+    let role = message_role(message, "user");
+    match message.get("content") {
+        Some(serde_json::Value::String(text)) => {
+            push_normalized_message(out, &role, text, source_prefix);
+        }
+        Some(serde_json::Value::Array(parts)) => {
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
+                    push_normalized_message(out, &role, text, "messages.content.text");
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_responses_input_item(item: &serde_json::Value, out: &mut Vec<GatewayNormalizedMessage>) {
+    let role = message_role(item, "user");
+    match item.get("content") {
+        Some(serde_json::Value::String(text)) => {
+            push_normalized_message(out, &role, text, "openai.responses.content");
+        }
+        Some(serde_json::Value::Array(parts)) => {
+            for part in parts {
+                let Some(text) = part.get("text").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                let source = if part
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| kind == "input_text")
+                {
+                    "openai.responses.input_text"
+                } else {
+                    "openai.responses.content.text"
+                };
+                push_normalized_message(out, &role, text, source);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn message_role(message: &serde_json::Value, default_role: &'static str) -> String {
+    message
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .filter(|role| !role.trim().is_empty())
+        .unwrap_or(default_role)
+        .to_string()
+}
+
+fn push_normalized_message(
+    out: &mut Vec<GatewayNormalizedMessage>,
+    role: &str,
+    text: &str,
+    source: &'static str,
+) {
+    if text.is_empty() {
+        return;
+    }
+    out.push(GatewayNormalizedMessage {
+        role: role.to_string(),
+        text: text.to_string(),
+        source: source.to_string(),
+    });
 }
 
 fn headers_to_json_map(
@@ -338,6 +451,62 @@ mod tests {
                 .get("authorization")
                 .and_then(|v| v.as_str()),
             Some("Bearer secret")
+        );
+    }
+
+    #[test]
+    fn visible_request_context_extracts_codex_input_text_messages() {
+        let input = GatewayRequestHookInput {
+            hook_name: GatewayPluginHookName::RequestAfterBodyRead,
+            trace_id: "trace-codex".to_string(),
+            cli_key: "codex".to_string(),
+            method: Method::POST,
+            path: "/v1/responses".to_string(),
+            query: None,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(
+                br#"{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}"#,
+            ),
+            requested_model: Some("gpt-5.3-codex".to_string()),
+        };
+
+        let visible = input.visible_context(&["request.body.read".to_string()]);
+
+        assert_eq!(
+            visible.request.normalized_messages,
+            vec![GatewayNormalizedMessage {
+                role: "user".to_string(),
+                text: "hello".to_string(),
+                source: "openai.responses.input_text".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn visible_request_context_extracts_claude_content_messages() {
+        let input = GatewayRequestHookInput {
+            hook_name: GatewayPluginHookName::RequestAfterBodyRead,
+            trace_id: "trace-claude".to_string(),
+            cli_key: "claude".to_string(),
+            method: Method::POST,
+            path: "/v1/messages".to_string(),
+            query: None,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(
+                br#"{"messages":[{"role":"user","content":[{"type":"text","text":"hello claude"}]}]}"#,
+            ),
+            requested_model: Some("claude-sonnet".to_string()),
+        };
+
+        let visible = input.visible_context(&["request.body.read".to_string()]);
+
+        assert_eq!(
+            visible.request.normalized_messages,
+            vec![GatewayNormalizedMessage {
+                role: "user".to_string(),
+                text: "hello claude".to_string(),
+                source: "messages.content.text".to_string(),
+            }]
         );
     }
 

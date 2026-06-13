@@ -1,6 +1,6 @@
 use crate::domain::plugins::{
     permission_risk, validate_manifest, PluginDetail, PluginInstallSource, PluginManifest,
-    PluginPermissionRisk, PluginStatus,
+    PluginPermissionRisk, PluginRuntime, PluginStatus,
 };
 use crate::infra::plugins::{package, repository, signing};
 use crate::shared::error::{AppError, AppResult};
@@ -29,13 +29,20 @@ pub(crate) fn install_official_plugin(
     db: &crate::db::Db,
     plugin_id: &str,
     host_version: &str,
+    installed_root: &Path,
 ) -> AppResult<PluginDetail> {
     let fixture = crate::app::plugins::official::official_plugin(plugin_id)?;
+    let installed_dir = crate::app::plugins::official_assets::materialize_official_plugin(
+        plugin_id,
+        &fixture.root_dir,
+        installed_root,
+        &fixture.manifest.version,
+    )?;
     install_plugin_manifest(
         db,
         fixture.manifest.clone(),
         PluginInstallSource::Official,
-        Some(fixture.root_dir.to_string_lossy().to_string()),
+        Some(installed_dir.to_string_lossy().to_string()),
         host_version,
     )?;
     repository::save_plugin_config(
@@ -68,6 +75,7 @@ pub(crate) fn install_plugin_manifest(
     validate_manifest(&manifest, host_version)?;
     validate_reserved_official_source(&manifest, install_source)?;
     let plugin_id = manifest.id.clone();
+    let requested_permissions = manifest.permissions.clone();
     let detail = repository::insert_plugin(
         db,
         repository::InsertPluginInput {
@@ -77,9 +85,14 @@ pub(crate) fn install_plugin_manifest(
             installed_dir,
         },
     )?;
+    let detail = if install_source == PluginInstallSource::Official {
+        detail
+    } else {
+        repository::save_plugin_permissions(db, &plugin_id, &[], &requested_permissions)?
+    };
     append_audit(
         db,
-        Some(plugin_id),
+        Some(plugin_id.clone()),
         "plugin.installed",
         "low",
         "Plugin installed",
@@ -196,7 +209,8 @@ pub(crate) fn install_plugin_from_local_package_with_policy(
         })?;
 
         replace_dir(&extracted.root_dir, &installed_dir)?;
-        let detail = repository::insert_plugin(
+        let requested_permissions = extracted.manifest.permissions.clone();
+        repository::insert_plugin(
             db,
             repository::InsertPluginInput {
                 manifest: extracted.manifest.clone(),
@@ -205,6 +219,8 @@ pub(crate) fn install_plugin_from_local_package_with_policy(
                 installed_dir: Some(installed_dir.to_string_lossy().to_string()),
             },
         )?;
+        let detail =
+            repository::save_plugin_permissions(db, &plugin_id, &[], &requested_permissions)?;
         append_audit(
             db,
             Some(plugin_id.clone()),
@@ -613,6 +629,7 @@ pub(crate) fn enable_plugin(
         ));
     }
     validate_manifest(&detail.manifest, host_version)?;
+    ensure_runtime_enabled(&detail.manifest)?;
     ensure_required_permissions_granted(&detail)?;
     validate_config_against_schema(detail.manifest.config_schema.as_ref(), &detail.config)?;
     let next = repository::update_plugin_status(db, plugin_id, PluginStatus::Enabled, None)?;
@@ -753,6 +770,25 @@ fn ensure_required_permissions_granted(detail: &PluginDetail) -> AppResult<()> {
                 missing.join(", ")
             ),
         ))
+    }
+}
+
+fn ensure_runtime_enabled(manifest: &PluginManifest) -> AppResult<()> {
+    match &manifest.runtime {
+        PluginRuntime::DeclarativeRules { .. } => Ok(()),
+        PluginRuntime::Native { engine }
+            if manifest.id == "official.privacy-filter" && engine == "privacyFilter" =>
+        {
+            Ok(())
+        }
+        PluginRuntime::Wasm { .. } => Err(AppError::new(
+            "PLUGIN_RUNTIME_DISABLED",
+            "wasm runtime execution is disabled by host policy",
+        )),
+        PluginRuntime::Native { .. } => Err(AppError::new(
+            "PLUGIN_UNSUPPORTED_RUNTIME",
+            "native runtime is reserved for official plugins",
+        )),
     }
 }
 
@@ -957,8 +993,8 @@ mod tests {
 
     fn manifest() -> PluginManifest {
         serde_json::from_value(serde_json::json!({
-            "id": "official.prompt-optimizer",
-            "name": "Prompt Optimizer",
+            "id": "community.prompt-helper",
+            "name": "Community Prompt Helper",
             "version": "1.0.0",
             "apiVersion": "1.0.0",
             "runtime": {
@@ -992,6 +1028,35 @@ mod tests {
         .unwrap()
     }
 
+    fn wasm_manifest(plugin_id: &str) -> PluginManifest {
+        serde_json::from_value(serde_json::json!({
+            "id": plugin_id,
+            "name": "WASM Policy Plugin",
+            "version": "1.0.0",
+            "apiVersion": "1.0.0",
+            "runtime": {
+                "kind": "wasm",
+                "abiVersion": "1.0.0",
+                "memoryLimitBytes": 16777216
+            },
+            "entry": "plugin.wasm",
+            "hooks": [
+                {
+                    "name": "gateway.request.afterBodyRead",
+                    "priority": 100,
+                    "failurePolicy": "fail-open"
+                }
+            ],
+            "permissions": ["request.body.read"],
+            "hostCompatibility": {
+                "app": ">=0.56.0 <1.0.0",
+                "pluginApi": "^1.0.0",
+                "platforms": ["macos", "windows", "linux"]
+            }
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn service_requires_permissions_before_enable_and_preserves_config_on_disable() {
         let dir = tempfile::tempdir().unwrap();
@@ -1000,25 +1065,25 @@ mod tests {
         install_plugin_manifest(
             &db,
             manifest(),
-            PluginInstallSource::Official,
+            PluginInstallSource::Local,
             None,
             env!("CARGO_PKG_VERSION"),
         )
         .unwrap();
 
         let err =
-            enable_plugin(&db, "official.prompt-optimizer", env!("CARGO_PKG_VERSION")).unwrap_err();
+            enable_plugin(&db, "community.prompt-helper", env!("CARGO_PKG_VERSION")).unwrap_err();
         assert!(err.to_string().starts_with("PLUGIN_PERMISSION_REQUIRED:"));
 
         save_plugin_config(
             &db,
-            "official.prompt-optimizer",
+            "community.prompt-helper",
             serde_json::json!({"mode": "append_instruction"}),
         )
         .unwrap();
         grant_plugin_permissions(
             &db,
-            "official.prompt-optimizer",
+            "community.prompt-helper",
             vec![
                 "request.body.read".to_string(),
                 "request.body.write".to_string(),
@@ -1026,12 +1091,33 @@ mod tests {
         )
         .unwrap();
         let enabled =
-            enable_plugin(&db, "official.prompt-optimizer", env!("CARGO_PKG_VERSION")).unwrap();
+            enable_plugin(&db, "community.prompt-helper", env!("CARGO_PKG_VERSION")).unwrap();
         assert_eq!(enabled.summary.status, PluginStatus::Enabled);
 
-        let disabled = disable_plugin(&db, "official.prompt-optimizer").unwrap();
+        let disabled = disable_plugin(&db, "community.prompt-helper").unwrap();
         assert_eq!(disabled.summary.status, PluginStatus::Disabled);
         assert_eq!(disabled.config["mode"], "append_instruction");
+    }
+
+    #[test]
+    fn local_plugin_install_records_manifest_permissions_as_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::init_for_tests(&dir.path().join("plugins.db")).unwrap();
+
+        let installed = install_plugin_manifest(
+            &db,
+            manifest(),
+            PluginInstallSource::Local,
+            None,
+            env!("CARGO_PKG_VERSION"),
+        )
+        .unwrap();
+
+        assert_eq!(installed.granted_permissions, Vec::<String>::new());
+        assert_eq!(
+            installed.pending_permissions,
+            vec!["request.body.read", "request.body.write"]
+        );
     }
 
     #[test]
@@ -1042,33 +1128,33 @@ mod tests {
         install_plugin_manifest(
             &db,
             manifest(),
-            PluginInstallSource::Official,
+            PluginInstallSource::Local,
             None,
             env!("CARGO_PKG_VERSION"),
         )
         .unwrap();
         save_plugin_config(
             &db,
-            "official.prompt-optimizer",
+            "community.prompt-helper",
             serde_json::json!({"mode": "append_instruction"}),
         )
         .unwrap();
         grant_plugin_permissions(
             &db,
-            "official.prompt-optimizer",
+            "community.prompt-helper",
             vec![
                 "request.body.read".to_string(),
                 "request.body.write".to_string(),
             ],
         )
         .unwrap();
-        quarantine_revoked_plugin(&db, "official.prompt-optimizer", "revoked").unwrap();
+        quarantine_revoked_plugin(&db, "community.prompt-helper", "revoked").unwrap();
 
         let err =
-            enable_plugin(&db, "official.prompt-optimizer", env!("CARGO_PKG_VERSION")).unwrap_err();
+            enable_plugin(&db, "community.prompt-helper", env!("CARGO_PKG_VERSION")).unwrap_err();
 
         assert!(err.to_string().starts_with("PLUGIN_INVALID_STATUS:"));
-        let detail = get_plugin_detail(&db, "official.prompt-optimizer").unwrap();
+        let detail = get_plugin_detail(&db, "community.prompt-helper").unwrap();
         assert_eq!(detail.summary.status, PluginStatus::Quarantined);
     }
 
@@ -1080,34 +1166,59 @@ mod tests {
         install_plugin_manifest(
             &db,
             manifest(),
-            PluginInstallSource::Official,
+            PluginInstallSource::Local,
             None,
             env!("CARGO_PKG_VERSION"),
         )
         .unwrap();
         save_plugin_config(
             &db,
-            "official.prompt-optimizer",
+            "community.prompt-helper",
             serde_json::json!({"mode": "append_instruction"}),
         )
         .unwrap();
         grant_plugin_permissions(
             &db,
-            "official.prompt-optimizer",
+            "community.prompt-helper",
             vec![
                 "request.body.read".to_string(),
                 "request.body.write".to_string(),
             ],
         )
         .unwrap();
-        uninstall_plugin(&db, "official.prompt-optimizer").unwrap();
+        uninstall_plugin(&db, "community.prompt-helper").unwrap();
 
         let err =
-            enable_plugin(&db, "official.prompt-optimizer", env!("CARGO_PKG_VERSION")).unwrap_err();
+            enable_plugin(&db, "community.prompt-helper", env!("CARGO_PKG_VERSION")).unwrap_err();
 
         assert!(err.to_string().starts_with("PLUGIN_INVALID_STATUS:"));
-        let detail = get_plugin_detail(&db, "official.prompt-optimizer").unwrap();
+        let detail = get_plugin_detail(&db, "community.prompt-helper").unwrap();
         assert_eq!(detail.summary.status, PluginStatus::Uninstalled);
+    }
+
+    #[test]
+    fn enable_plugin_rejects_wasm_when_host_policy_disables_execution() {
+        let dir = tempfile::tempdir().expect("db dir");
+        let db = crate::db::init_for_tests(&dir.path().join("plugins.db")).expect("db");
+        install_plugin_manifest(
+            &db,
+            wasm_manifest("acme.wasm-policy"),
+            PluginInstallSource::Local,
+            Some(dir.path().to_string_lossy().to_string()),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("install");
+        grant_plugin_permissions(
+            &db,
+            "acme.wasm-policy",
+            vec!["request.body.read".to_string()],
+        )
+        .expect("grant");
+
+        let err = enable_plugin(&db, "acme.wasm-policy", env!("CARGO_PKG_VERSION"))
+            .expect_err("wasm should not enable without policy");
+
+        assert_eq!(err.code(), "PLUGIN_RUNTIME_DISABLED");
     }
 
     #[test]
@@ -1118,14 +1229,14 @@ mod tests {
         install_plugin_manifest(
             &db,
             manifest(),
-            PluginInstallSource::Official,
+            PluginInstallSource::Local,
             None,
             env!("CARGO_PKG_VERSION"),
         )
         .unwrap();
 
-        uninstall_plugin(&db, "official.prompt-optimizer").unwrap();
-        let detail = get_plugin_detail(&db, "official.prompt-optimizer").unwrap();
+        uninstall_plugin(&db, "community.prompt-helper").unwrap();
+        let detail = get_plugin_detail(&db, "community.prompt-helper").unwrap();
         assert_eq!(detail.summary.status, PluginStatus::Uninstalled);
         assert!(!detail.audit_logs.is_empty());
     }
@@ -1138,14 +1249,14 @@ mod tests {
         install_plugin_manifest(
             &db,
             manifest(),
-            PluginInstallSource::Official,
+            PluginInstallSource::Local,
             None,
             env!("CARGO_PKG_VERSION"),
         )
         .unwrap();
         grant_plugin_permissions(
             &db,
-            "official.prompt-optimizer",
+            "community.prompt-helper",
             vec![
                 "request.body.read".to_string(),
                 "request.body.write".to_string(),
@@ -1154,8 +1265,7 @@ mod tests {
         .unwrap();
 
         let detail =
-            revoke_plugin_permission(&db, "official.prompt-optimizer", "request.body.write")
-                .unwrap();
+            revoke_plugin_permission(&db, "community.prompt-helper", "request.body.write").unwrap();
 
         assert_eq!(detail.granted_permissions, vec!["request.body.read"]);
         assert!(detail
@@ -1168,28 +1278,39 @@ mod tests {
     fn official_plugin_install_enable_and_uninstall_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::init_for_tests(&dir.path().join("official-plugins.db")).unwrap();
+        let installed_root = dir.path().join("installed");
 
-        let installed =
-            install_official_plugin(&db, "official.redactor", env!("CARGO_PKG_VERSION")).unwrap();
+        let installed = install_official_plugin(
+            &db,
+            "official.privacy-filter",
+            env!("CARGO_PKG_VERSION"),
+            &installed_root,
+        )
+        .unwrap();
         assert_eq!(installed.install_source, PluginInstallSource::Official);
         assert_eq!(installed.summary.status, PluginStatus::Disabled);
         assert!(installed
             .installed_dir
             .as_deref()
-            .is_some_and(|path| { path.contains("tests/fixtures/plugins/official/redactor") }));
+            .is_some_and(|path| { path.contains("official.privacy-filter") }));
+        let installed_dir = std::path::Path::new(installed.installed_dir.as_deref().unwrap());
+        assert!(installed_dir.join("plugin.json").exists());
+        assert!(installed_dir.join("rules/gitleaks.toml").exists());
         assert!(installed
             .granted_permissions
             .contains(&"log.redact".to_string()));
-        assert_eq!(installed.config["redactLogsAndGuiOnly"], true);
+        assert_eq!(installed.config["redactBeforeUpstream"], true);
+        assert_eq!(installed.config["redactLogs"], true);
 
-        let enabled = enable_plugin(&db, "official.redactor", env!("CARGO_PKG_VERSION")).unwrap();
+        let enabled =
+            enable_plugin(&db, "official.privacy-filter", env!("CARGO_PKG_VERSION")).unwrap();
         assert_eq!(enabled.summary.status, PluginStatus::Enabled);
 
         let active = enabled_plugins_for_gateway(&db).unwrap();
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].summary.plugin_id, "official.redactor");
+        assert_eq!(active[0].summary.plugin_id, "official.privacy-filter");
 
-        let uninstalled = uninstall_plugin(&db, "official.redactor").unwrap();
+        let uninstalled = uninstall_plugin(&db, "official.privacy-filter").unwrap();
         assert_eq!(uninstalled.summary.status, PluginStatus::Uninstalled);
     }
 
@@ -1197,10 +1318,15 @@ mod tests {
     fn official_privacy_filter_install_uses_upstream_redaction_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::init_for_tests(&dir.path().join("official-privacy-filter.db")).unwrap();
+        let installed_root = dir.path().join("installed");
 
-        let installed =
-            install_official_plugin(&db, "official.privacy-filter", env!("CARGO_PKG_VERSION"))
-                .unwrap();
+        let installed = install_official_plugin(
+            &db,
+            "official.privacy-filter",
+            env!("CARGO_PKG_VERSION"),
+            &installed_root,
+        )
+        .unwrap();
 
         assert_eq!(installed.install_source, PluginInstallSource::Official);
         assert_eq!(installed.summary.status, PluginStatus::Disabled);
@@ -1211,9 +1337,14 @@ mod tests {
                 engine: "privacyFilter".to_string()
             }
         );
-        assert!(installed.installed_dir.as_deref().is_some_and(|path| {
-            path.contains("tests/fixtures/plugins/official/privacy-filter")
-        }));
+        assert!(installed
+            .installed_dir
+            .as_deref()
+            .is_some_and(|path| { path.contains("official.privacy-filter") }));
+        assert!(installed
+            .installed_dir
+            .as_deref()
+            .is_some_and(|path| path.starts_with(installed_root.to_string_lossy().as_ref())));
         assert_eq!(installed.config["redactBeforeUpstream"], true);
         assert_eq!(installed.config["redactLogs"], true);
         assert_eq!(installed.config["profile"], "balanced");
@@ -1514,6 +1645,34 @@ mod tests {
     }
 
     #[test]
+    fn plugin_local_package_install_records_manifest_permissions_as_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::init_for_tests(&dir.path().join("plugins.db")).unwrap();
+        let package_path = dir.path().join("signed-pending-permissions.aio-plugin");
+        let mut manifest = local_package_manifest("local.pending-permissions", "1.0.0");
+        manifest["permissions"] = serde_json::json!(["request.body.read", "request.body.write"]);
+        write_local_package(&package_path, manifest);
+        let (expected_checksum, mut policy) = signed_package_policy(&package_path, 9);
+        policy.expected_checksum = Some(expected_checksum);
+
+        let detail = install_plugin_from_local_package_with_policy(
+            &db,
+            &package_path,
+            &dir.path().join("plugins/cache"),
+            &dir.path().join("plugins/installed"),
+            env!("CARGO_PKG_VERSION"),
+            policy,
+        )
+        .unwrap();
+
+        assert_eq!(detail.granted_permissions, Vec::<String>::new());
+        assert_eq!(
+            detail.pending_permissions,
+            vec!["request.body.read", "request.body.write"]
+        );
+    }
+
+    #[test]
     fn plugin_market_revoked_quarantines_installed_plugin() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::init_for_tests(&dir.path().join("plugins.db")).unwrap();
@@ -1679,6 +1838,8 @@ INSERT INTO plugin_market_sources(
         .unwrap();
 
         assert_eq!(detail.summary.plugin_id, "market.signed-risky");
+        assert_eq!(detail.granted_permissions, Vec::<String>::new());
+        assert_eq!(detail.pending_permissions, vec!["request.body.read"]);
         let install_audit = detail
             .audit_logs
             .iter()

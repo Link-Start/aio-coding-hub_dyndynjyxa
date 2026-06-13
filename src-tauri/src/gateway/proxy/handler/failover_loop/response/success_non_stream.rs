@@ -1068,7 +1068,12 @@ where
             body_bytes = output.body;
             response_headers.remove(header::CONTENT_LENGTH);
         }
-        Err(err) => {
+        Err(mut err) => {
+            crate::gateway::plugins::audit::persist_gateway_plugin_error_audit_events(
+                &state.db,
+                &common.trace_id,
+                &mut err,
+            );
             tracing::warn!(
                 trace_id = %common.trace_id,
                 provider_id,

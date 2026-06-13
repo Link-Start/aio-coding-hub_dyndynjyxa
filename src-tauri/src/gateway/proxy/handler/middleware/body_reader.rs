@@ -102,7 +102,12 @@ impl BodyReaderMiddleware {
                 ctx.introspection_json =
                     serde_json::from_slice::<serde_json::Value>(introspection_body.as_ref()).ok();
             }
-            Err(err) => {
+            Err(mut err) => {
+                crate::gateway::plugins::audit::persist_gateway_plugin_error_audit_events(
+                    &ctx.state.db,
+                    &ctx.trace_id,
+                    &mut err,
+                );
                 tracing::warn!(
                     trace_id = %ctx.trace_id,
                     "plugin afterBodyRead hook failed: {}",

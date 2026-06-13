@@ -42,6 +42,36 @@ pub(crate) struct PrivacyFilterStats {
     pub(crate) skipped: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PrivacyFilterOptions {
+    allowed_labels: Option<std::collections::HashSet<&'static str>>,
+}
+
+impl PrivacyFilterOptions {
+    pub(crate) fn from_sensitive_types(types: Option<&[String]>) -> Self {
+        let Some(types) = types else {
+            return Self::default();
+        };
+        if types.is_empty() {
+            return Self::default();
+        }
+
+        let allowed_labels = types
+            .iter()
+            .filter_map(|item| sensitive_type_label(item.as_str()))
+            .collect::<std::collections::HashSet<_>>();
+        Self {
+            allowed_labels: Some(allowed_labels),
+        }
+    }
+
+    fn allows(&self, span: &Span) -> bool {
+        self.allowed_labels
+            .as_ref()
+            .is_none_or(|labels| labels.contains(span.label))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PrivacyFilter {
     secrets: SecretDetector,
@@ -63,8 +93,17 @@ impl PrivacyFilter {
     }
 
     pub(crate) fn redact(&self, text: &str) -> PrivacyFilterResult {
+        self.redact_with_options(text, &PrivacyFilterOptions::default())
+    }
+
+    pub(crate) fn redact_with_options(
+        &self,
+        text: &str,
+        options: &PrivacyFilterOptions,
+    ) -> PrivacyFilterResult {
         let mut spans = detect_pii(text);
         spans.extend(self.secrets.detect(text));
+        spans.retain(|span| options.allows(span));
 
         let merged = merge_spans(spans);
         let mut redacted = String::with_capacity(text.len());
@@ -92,6 +131,21 @@ impl PrivacyFilter {
             count: merged.len(),
             entities,
         }
+    }
+}
+
+fn sensitive_type_label(value: &str) -> Option<&'static str> {
+    match value {
+        "email" => Some("[邮箱]"),
+        "cn_phone" | "phone" => Some("[电话]"),
+        "cn_id_card" | "id_card" => Some("[身份证]"),
+        "ip" | "ipv4" => Some("[IP]"),
+        "bank_card" | "bank_card_candidate" => Some("[银行卡]"),
+        "secret" | "token" | "api_key" | "openai_key" | "aws_access_key" | "github_token"
+        | "google_api_key" | "slack_token" | "jwt" | "private_key" | "context_secret" => {
+            Some("[密钥]")
+        }
+        _ => None,
     }
 }
 

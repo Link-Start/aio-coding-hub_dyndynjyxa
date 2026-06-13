@@ -325,7 +325,7 @@ where
                     response_fixer_stream_config,
                     common.special_settings.clone(),
                 );
-                let upstream = PluginChunkStream::new(
+                let upstream = MaybePluginChunkStream::new(
                     upstream,
                     plugin_pipeline.clone(),
                     plugin_db.clone(),
@@ -363,7 +363,7 @@ where
                     response_fixer_stream_config,
                     common.special_settings.clone(),
                 );
-                let upstream = PluginChunkStream::new(
+                let upstream = MaybePluginChunkStream::new(
                     upstream,
                     plugin_pipeline.clone(),
                     plugin_db.clone(),
@@ -397,7 +397,7 @@ where
                     common.requested_model.clone(),
                     common.cx2cc_settings.clone(),
                 );
-                let upstream = PluginChunkStream::new(
+                let upstream = MaybePluginChunkStream::new(
                     upstream,
                     plugin_pipeline.clone(),
                     plugin_db.clone(),
@@ -430,7 +430,7 @@ where
                     common.requested_model.clone(),
                     common.cx2cc_settings.clone(),
                 );
-                let upstream = PluginChunkStream::new(
+                let upstream = MaybePluginChunkStream::new(
                     upstream,
                     plugin_pipeline.clone(),
                     plugin_db.clone(),

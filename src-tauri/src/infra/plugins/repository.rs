@@ -809,8 +809,8 @@ mod tests {
 
     fn manifest() -> PluginManifest {
         serde_json::from_value(serde_json::json!({
-            "id": "official.prompt-optimizer",
-            "name": "Prompt Optimizer",
+            "id": "community.prompt-helper",
+            "name": "Community Prompt Helper",
             "version": "1.0.0",
             "apiVersion": "1.0.0",
             "runtime": {
@@ -844,7 +844,7 @@ mod tests {
             &db,
             InsertPluginInput {
                 manifest: manifest.clone(),
-                install_source: PluginInstallSource::Official,
+                install_source: PluginInstallSource::Local,
                 status: PluginStatus::Disabled,
                 installed_dir: None,
             },
@@ -853,7 +853,7 @@ mod tests {
 
         save_plugin_config(
             &db,
-            "official.prompt-optimizer",
+            "community.prompt-helper",
             1,
             &serde_json::json!({"mode": "append_instruction"}),
             &[],
@@ -861,7 +861,7 @@ mod tests {
         .unwrap();
         save_plugin_permissions(
             &db,
-            "official.prompt-optimizer",
+            "community.prompt-helper",
             &[
                 "request.body.read".to_string(),
                 "request.body.write".to_string(),
@@ -869,17 +869,11 @@ mod tests {
             &[],
         )
         .unwrap();
-        update_plugin_status(
-            &db,
-            "official.prompt-optimizer",
-            PluginStatus::Enabled,
-            None,
-        )
-        .unwrap();
+        update_plugin_status(&db, "community.prompt-helper", PluginStatus::Enabled, None).unwrap();
         append_audit_log(
             &db,
             AppendPluginAuditLogInput {
-                plugin_id: Some("official.prompt-optimizer".to_string()),
+                plugin_id: Some("community.prompt-helper".to_string()),
                 trace_id: Some("trace-1".to_string()),
                 event_type: "plugin.enabled".to_string(),
                 risk_level: "low".to_string(),
@@ -891,7 +885,7 @@ mod tests {
         record_runtime_failure(
             &db,
             RecordPluginRuntimeFailureInput {
-                plugin_id: "official.prompt-optimizer".to_string(),
+                plugin_id: "community.prompt-helper".to_string(),
                 hook_name: Some("gateway.request.afterBodyRead".to_string()),
                 failure_kind: "timeout".to_string(),
                 message: "Hook timed out".to_string(),
@@ -902,11 +896,11 @@ mod tests {
 
         let list = list_plugins(&db).unwrap();
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].plugin_id, "official.prompt-optimizer");
+        assert_eq!(list[0].plugin_id, "community.prompt-helper");
         assert_eq!(list[0].status, PluginStatus::Enabled);
         assert_eq!(list[0].runtime, "declarativeRules");
 
-        let detail = get_plugin(&db, "official.prompt-optimizer").unwrap();
+        let detail = get_plugin(&db, "community.prompt-helper").unwrap();
         assert_eq!(detail.manifest, manifest);
         assert_eq!(detail.config["mode"], "append_instruction");
         assert_eq!(
@@ -1001,7 +995,7 @@ INSERT INTO plugin_market_sources(
             &db,
             InsertPluginInput {
                 manifest,
-                install_source: PluginInstallSource::Official,
+                install_source: PluginInstallSource::Local,
                 status: PluginStatus::Disabled,
                 installed_dir: None,
             },

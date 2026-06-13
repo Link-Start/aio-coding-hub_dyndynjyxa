@@ -166,7 +166,12 @@ where
             headers = output.headers;
             upstream_body = output.body;
         }
-        Err(err) => {
+        Err(mut err) => {
+            crate::gateway::plugins::audit::persist_gateway_plugin_error_audit_events(
+                &ctx.state.db,
+                &input.trace_id,
+                &mut err,
+            );
             tracing::warn!(
                 trace_id = %input.trace_id,
                 provider_id = prepared.provider_id,
