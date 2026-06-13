@@ -246,9 +246,127 @@ function officialPrivacyFilterDetail(): PluginDetail {
       },
       configSchema: {
         type: "object",
+        required: ["redactBeforeUpstream", "redactLogs", "profile"],
+        "x-aio-ui": {
+          sections: [
+            {
+              id: "routing",
+              title: "处理位置",
+              description: "选择隐私过滤在哪些阶段生效。",
+              order: 10,
+            },
+            {
+              id: "content",
+              title: "要保护的内容",
+              description: "选择需要自动替换的敏感信息类型。",
+              order: 20,
+            },
+          ],
+        },
         properties: {
-          redactEmails: { type: "boolean", default: true },
-          redactSecrets: { type: "boolean", default: true },
+          redactBeforeUpstream: {
+            type: "boolean",
+            title: "发送给模型前处理",
+            description: "在请求离开本机前替换你选择的敏感信息。",
+            default: true,
+            "x-aio-ui": { section: "routing", widget: "switch", order: 10 },
+          },
+          redactLogs: {
+            type: "boolean",
+            title: "保存日志前处理",
+            description: "在本地日志写入前替换你选择的敏感信息。",
+            default: true,
+            "x-aio-ui": { section: "routing", widget: "switch", order: 20 },
+          },
+          profile: {
+            type: "string",
+            title: "保护强度",
+            description: "当前版本提供平衡模式。",
+            default: "balanced",
+            enum: ["balanced"],
+            "x-aio-ui": {
+              section: "routing",
+              widget: "select",
+              order: 30,
+              enumLabels: { balanced: "平衡" },
+            },
+          },
+          sensitiveTypes: {
+            type: "array",
+            title: "要保护的内容",
+            description: "关闭某一项后，这类内容不会被该插件处理。",
+            default: [
+              "email",
+              "cn_phone",
+              "cn_id_card",
+              "bank_card_candidate",
+              "ipv4",
+              "openai_key",
+              "aws_access_key",
+              "github_token",
+              "google_api_key",
+              "slack_token",
+              "jwt",
+              "private_key",
+              "context_secret",
+            ],
+            items: {
+              type: "string",
+              enum: [
+                "email",
+                "cn_phone",
+                "cn_id_card",
+                "bank_card_candidate",
+                "ipv4",
+                "openai_key",
+                "aws_access_key",
+                "github_token",
+                "google_api_key",
+                "slack_token",
+                "jwt",
+                "private_key",
+                "context_secret",
+              ],
+              "x-aio-ui": {
+                enumLabels: {
+                  email: "邮箱地址",
+                  cn_phone: "中国手机号",
+                  cn_id_card: "身份证号",
+                  bank_card_candidate: "银行卡号",
+                  ipv4: "IP 地址",
+                  openai_key: "OpenAI Key",
+                  aws_access_key: "AWS Access Key",
+                  github_token: "GitHub Token",
+                  google_api_key: "Google API Key",
+                  slack_token: "Slack Token",
+                  jwt: "JWT",
+                  private_key: "私钥片段",
+                  context_secret: "上下文密钥",
+                },
+                enumDescriptions: {
+                  email: "例如 name@example.com。",
+                  cn_phone: "例如 13344441520。",
+                  cn_id_card: "中国大陆居民身份证号码。",
+                  bank_card_candidate: "通过校验规则识别常见银行卡号。",
+                  ipv4: "例如 192.168.1.10。",
+                  openai_key: "常见 sk- 开头的 OpenAI 密钥。",
+                  aws_access_key: "常见 AKIA 开头的访问密钥。",
+                  github_token: "ghp、github_pat 等令牌。",
+                  google_api_key: "常见 AIza 开头的 Google API Key。",
+                  slack_token: "Slack bot、user、app token。",
+                  jwt: "常见 JSON Web Token。",
+                  private_key: "PEM 私钥内容。",
+                  context_secret: "password、api_key、token 等上下文中的敏感值。",
+                },
+              },
+            },
+            "x-aio-ui": {
+              section: "content",
+              widget: "checkboxGroup",
+              order: 10,
+              warningWhenPartial: "关闭后，这类内容会原样发送给模型，也可能出现在本地日志中。",
+            },
+          },
         },
       },
       description: "Official privacy filter for PII and secrets.",
@@ -256,7 +374,26 @@ function officialPrivacyFilterDetail(): PluginDetail {
     },
     install_source: "official",
     installed_dir: null,
-    config: { redactEmails: true, redactSecrets: true },
+    config: {
+      redactBeforeUpstream: true,
+      redactLogs: true,
+      profile: "balanced",
+      sensitiveTypes: [
+        "email",
+        "cn_phone",
+        "cn_id_card",
+        "bank_card_candidate",
+        "ipv4",
+        "openai_key",
+        "aws_access_key",
+        "github_token",
+        "google_api_key",
+        "slack_token",
+        "jwt",
+        "private_key",
+        "context_secret",
+      ],
+    },
     granted_permissions: ["request.body.read", "request.body.write", "log.redact"],
     pending_permissions: [],
     audit_logs: [
@@ -284,22 +421,10 @@ export function getPluginDetailState(pluginId: string): PluginDetail | null {
 }
 
 export function installOfficialPluginState(pluginId: string): PluginDetail {
-  const detail =
-    pluginId === "official.privacy-filter"
-      ? officialPrivacyFilterDetail()
-      : {
-          ...officialPrivacyFilterDetail(),
-          summary: {
-            ...officialPrivacyFilterDetail().summary,
-            plugin_id: pluginId,
-            name: pluginId.split(".").pop() ?? pluginId,
-          },
-          manifest: {
-            ...officialPrivacyFilterDetail().manifest,
-            id: pluginId,
-            name: pluginId.split(".").pop() ?? pluginId,
-          },
-        };
+  if (pluginId !== "official.privacy-filter") {
+    throw new Error(`unknown official plugin: ${pluginId}`);
+  }
+  const detail = officialPrivacyFilterDetail();
   pluginState.set(pluginId, clone(detail));
   return clone(detail);
 }
