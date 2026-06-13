@@ -221,10 +221,23 @@ describe("pages/PluginsPage", () => {
           permissions: ["request.body.read", "request.body.write", "log.redact"],
           configSchema: {
             type: "object",
+            "x-aio-ui": {
+              sections: [
+                {
+                  id: "content",
+                  title: "检测策略",
+                  description:
+                    "这里展示的是可配置的策略大类；密钥类检测由打包的 200+ Gitleaks 规则、上下文规则和熵检测共同支撑。",
+                  order: 10,
+                },
+              ],
+            },
             properties: {
               sensitiveTypes: {
                 type: "array",
-                title: "要保护的内容",
+                title: "策略大类",
+                description:
+                  "这些不是全部底层规则。密钥相关选项会控制打包的 200+ Gitleaks 规则以及上下文/熵检测结果是否生效。",
                 items: {
                   type: "string",
                   enum: ["email", "cn_phone"],
@@ -232,7 +245,7 @@ describe("pages/PluginsPage", () => {
                     enumLabels: { email: "邮箱地址", cn_phone: "中国手机号" },
                   },
                 },
-                "x-aio-ui": { widget: "checkboxGroup" },
+                "x-aio-ui": { section: "content", widget: "checkboxGroup", order: 10 },
               },
             },
           },
@@ -247,6 +260,8 @@ describe("pages/PluginsPage", () => {
 
     renderWithProviders(<PluginsPage />);
 
+    expect(screen.getByText("检测策略")).toBeInTheDocument();
+    expect(screen.getAllByText(/200\+ Gitleaks/).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByLabelText("邮箱地址")).toBeChecked();
     expect(screen.queryByLabelText("sensitiveTypes")).not.toBeInTheDocument();
   });

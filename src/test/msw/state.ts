@@ -257,8 +257,9 @@ function officialPrivacyFilterDetail(): PluginDetail {
             },
             {
               id: "content",
-              title: "要保护的内容",
-              description: "选择需要自动替换的敏感信息类型。",
+              title: "检测策略",
+              description:
+                "这里展示的是可配置的策略大类；密钥类检测由打包的 200+ Gitleaks 规则、上下文规则和熵检测共同支撑。",
               order: 20,
             },
           ],
@@ -281,7 +282,8 @@ function officialPrivacyFilterDetail(): PluginDetail {
           profile: {
             type: "string",
             title: "保护强度",
-            description: "当前版本提供平衡模式。",
+            description:
+              "平衡模式会覆盖常见个人信息、200+ Gitleaks 密钥规则、上下文密钥和高熵密钥候选。",
             default: "balanced",
             enum: ["balanced"],
             "x-aio-ui": {
@@ -293,8 +295,9 @@ function officialPrivacyFilterDetail(): PluginDetail {
           },
           sensitiveTypes: {
             type: "array",
-            title: "要保护的内容",
-            description: "关闭某一项后，这类内容不会被该插件处理。",
+            title: "策略大类",
+            description:
+              "这些不是全部底层规则。密钥相关选项会控制打包的 200+ Gitleaks 规则以及上下文/熵检测结果是否生效。",
             default: [
               "email",
               "cn_phone",

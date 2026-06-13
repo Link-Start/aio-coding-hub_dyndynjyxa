@@ -20,7 +20,8 @@ describe("MSW plugin state", () => {
         },
         sensitiveTypes: {
           type: "array",
-          title: "要保护的内容",
+          title: "策略大类",
+          description: expect.stringContaining("200+ Gitleaks"),
           "x-aio-ui": { widget: "checkboxGroup" },
         },
       },
