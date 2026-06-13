@@ -32,6 +32,18 @@ function initialObject(value: JsonValue): PluginConfigObject {
   return isRecord(value) ? { ...value } : {};
 }
 
+function selectValueForField(value: JsonValue | undefined): string {
+  return value == null ? "" : String(value);
+}
+
+function selectedValueForField(field: PluginConfigFieldModel, raw: string): JsonValue {
+  if (field.type === "number" || field.type === "integer") {
+    return coerceConfigField(raw, field.type);
+  }
+  const option = field.options.find((item) => String(item.value) === raw);
+  return option?.value ?? raw;
+}
+
 export function PluginConfigSchemaForm({
   identity,
   schema,
@@ -118,8 +130,10 @@ export function PluginConfigSchemaForm({
           <select
             aria-label={ariaLabel}
             className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-            value={fieldToText(current, field.type)}
-            onChange={(event) => setField(field.key, event.target.value)}
+            value={selectValueForField(current)}
+            onChange={(event) => {
+              setField(field.key, selectedValueForField(field, event.target.value));
+            }}
           >
             {field.options.map((option) => (
               <option key={String(option.value)} value={String(option.value)}>
@@ -179,6 +193,26 @@ export function PluginConfigSchemaForm({
             </div>
           ) : null}
         </fieldset>
+      );
+    }
+
+    if (field.widget === "textarea") {
+      return (
+        <label key={field.key} className="grid gap-1.5 text-sm">
+          <span className="font-medium">{label}</span>
+          {field.description ? (
+            <span className="text-xs text-muted-foreground">{field.description}</span>
+          ) : null}
+          <Textarea
+            aria-label={ariaLabel}
+            placeholder={field.placeholder ?? undefined}
+            value={fieldToText(current, field.type)}
+            onChange={(event) =>
+              setField(field.key, coerceConfigField(event.target.value, field.type))
+            }
+          />
+          {field.warning ? <span className="text-xs text-warning">{field.warning}</span> : null}
+        </label>
       );
     }
 

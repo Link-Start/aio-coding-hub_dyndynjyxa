@@ -223,4 +223,58 @@ describe("PluginConfigSchemaForm", () => {
 
     expect(onSubmit).toHaveBeenCalledWith({ advanced: { retries: 3 } });
   });
+
+  it("submits numeric enum select values without converting them to strings", () => {
+    const onSubmit = vi.fn();
+
+    render(
+      <PluginConfigSchemaForm
+        identity="publisher.numeric-enum:1"
+        schema={{
+          type: "object",
+          properties: {
+            retryLimit: {
+              type: "integer",
+              title: "重试次数",
+              enum: [1, 2, 3],
+              default: 1,
+            },
+          },
+        }}
+        value={{ retryLimit: 1 }}
+        pending={false}
+        onSubmit={onSubmit}
+      />
+    );
+
+    fireEvent.change(screen.getByRole("combobox", { name: "重试次数" }), {
+      target: { value: "3" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+
+    expect(onSubmit).toHaveBeenCalledWith({ retryLimit: 3 });
+  });
+
+  it("renders textarea widget hints as multiline controls", () => {
+    render(
+      <PluginConfigSchemaForm
+        identity="publisher.textarea:1"
+        schema={{
+          type: "object",
+          properties: {
+            promptTemplate: {
+              type: "string",
+              title: "提示词模板",
+              "x-aio-ui": { widget: "textarea" },
+            },
+          },
+        }}
+        value={{ promptTemplate: "第一行\n第二行" }}
+        pending={false}
+        onSubmit={vi.fn()}
+      />
+    );
+
+    expect(screen.getByLabelText("提示词模板").tagName).toBe("TEXTAREA");
+  });
 });
