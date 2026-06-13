@@ -39,7 +39,7 @@ Plugin IDs use the format `publisher.plugin-name`.
 - Each segment may contain letters, digits, and hyphens.
 - Dots separate namespace segments.
 - Path separators, `..`, spaces, shell metacharacters, and empty segments are invalid.
-- `official.prompt-optimizer`, `official.safety-detector`, `official.redactor`, and `official.privacy-filter` are reserved official IDs.
+- `official.privacy-filter` is the only bundled official plugin ID.
 - The `official.*` namespace can only be installed through the built-in official plugin source; local, marketplace, and GitHub packages must use their own publisher namespace.
 
 Versions must follow SemVer. Pre-release versions are allowed for local development and unsigned packages but marketplace stable releases should use release versions.
@@ -66,6 +66,8 @@ WASM runtime:
   "memoryLimitBytes": 16777216
 }
 ```
+
+WASM packages are installable only when host policy enables execution. A host that has not enabled WASM execution must reject or disable WASM plugins instead of routing them through another runtime.
 
 Short-term validation must reject arbitrary JavaScript/TypeScript, Node.js, Deno, native dynamic libraries, and WebView code.
 
@@ -96,13 +98,12 @@ Incompatible plugins are marked `incompatible` and never enter the hook pipeline
 
 ## 6. Hook v1
 
+Active hooks in plugin API v1 are the hooks currently wired into the gateway or log pipeline. Reserved hooks for future host integration are documented so the names can stay stable, but manifest validation rejects them with `PLUGIN_RESERVED_HOOK` until the host implements their call sites.
+
 | Hook | Trigger | Modification | Default timeout | Default failure policy | Matching permissions |
 | --- | --- | --- | --- | --- | --- |
-| `gateway.request.received` | HTTP request entered gateway | headers only | 50 ms | fail-open | `request.meta.read`, `request.header.read`, `request.header.write` |
 | `gateway.request.afterBodyRead` | Body reader finished buffering allowed body | JSON body, raw body metadata | 200 ms | fail-open | `request.body.read`, `request.body.write` |
-| `gateway.request.beforeProviderResolution` | Before provider list and route decisions are finalized | route hints, request metadata | 50 ms | fail-open | `request.meta.read` |
 | `gateway.request.beforeSend` | Before reqwest sends upstream request | headers and body | 300 ms | fail-open or security fail-closed | `request.header.write`, `request.body.write` |
-| `gateway.response.headers` | Upstream response headers received | safe response headers | 100 ms | fail-open | `response.header.read`, `response.header.write` |
 | `gateway.response.chunk` | Stream chunk before CLI output | chunk pass, replace, block, warn | 20 ms | security fail-closed, non-security fail-open | `stream.inspect`, `stream.modify` |
 | `gateway.response.after` | Complete non-stream response below size budget | body pass, replace, block, warn | 300 ms | security fail-closed, non-security fail-open | `response.body.read`, `response.body.write` |
 | `gateway.error` | Host or upstream error observed | no host-error hiding | 100 ms | fail-open | `request.meta.read` |
@@ -110,7 +111,15 @@ Incompatible plugins are marked `incompatible` and never enter the hook pipeline
 
 Streaming hooks receive bounded chunks plus a fixed-size sliding window. They do not receive an unlimited full response.
 
+Reserved hooks:
+
+- `gateway.request.received`
+- `gateway.request.beforeProviderResolution`
+- `gateway.response.headers`
+
 ## 7. Permission v1
+
+Reserved permissions for future host-mediated APIs are documented for naming stability, but manifest validation rejects them with `PLUGIN_RESERVED_PERMISSION` until those APIs exist.
 
 | Permission | Risk | Description |
 | --- | --- | --- |
@@ -127,6 +136,11 @@ Streaming hooks receive bounded chunks plus a fixed-size sliding window. They do
 | `stream.inspect` | high | Inspect streamed chunks and sliding window. |
 | `stream.modify` | high | Replace or block streamed chunks. |
 | `log.redact` | medium | Redact log fields before persistence. |
+
+Reserved permissions:
+
+| Permission | Risk | Future host-mediated API |
+| --- | --- | --- |
 | `plugin.storage` | medium | Use isolated plugin storage. |
 | `network.fetch` | high | Make host-mediated network requests. |
 | `file.read` | high | Read host-mediated files. |
@@ -142,12 +156,14 @@ Streaming hooks receive bounded chunks plus a fixed-size sliding window. They do
 Validation rejects:
 
 - Unknown hook names.
+- Reserved hook names.
 - Unknown permissions.
+- Reserved permissions.
 - Write permissions requested for hooks that cannot modify.
 - Sensitive header reads without `request.header.readSensitive`.
 - Body writes without matching body read/write permission.
 - `stream.modify` actions without `stream.modify`.
-- `network.fetch`, `file.read`, `file.write`, or `secret.read` for unsigned packages.
+- `network.fetch`, `file.read`, `file.write`, or `secret.read` until the host provides those APIs.
 
 ## 9. Config Schema Subset
 
@@ -198,17 +214,17 @@ Allowed transitions:
 
 Upgrade failure restores the previous version, config snapshot, permissions, and enabled state. Signature failure moves the plugin to `quarantined`. Runtime crash and repeated timeout can move an enabled plugin to `quarantined`.
 
-## 11. Example Manifest: Prompt Optimizer
+## 11. Example Manifest: Community Prompt Helper
 
 ```json
 {
-  "id": "official.prompt-optimizer",
-  "name": "Prompt Optimizer",
+  "id": "acme.prompt-helper",
+  "name": "Prompt Helper",
   "version": "1.0.0",
   "apiVersion": "1.0.0",
   "runtime": {
     "kind": "declarativeRules",
-    "rules": ["rules/prompt-optimizer.json"]
+    "rules": ["rules/main.json"]
   },
   "hooks": [
     {
@@ -229,7 +245,7 @@ Upgrade failure restores the previous version, config snapshot, permissions, and
     "properties": {
       "mode": {
         "type": "string",
-        "enum": ["append_instruction", "rewrite_system_message", "prepend_context"]
+        "enum": ["append_instruction", "prepend_context"]
       },
       "onlyModels": {
         "type": "array",
@@ -244,130 +260,7 @@ Upgrade failure restores the previous version, config snapshot, permissions, and
 }
 ```
 
-## 12. Example Manifest: Safety Detector
-
-```json
-{
-  "id": "official.safety-detector",
-  "name": "Safety Detector",
-  "version": "1.0.0",
-  "apiVersion": "1.0.0",
-  "category": "security",
-  "runtime": {
-    "kind": "declarativeRules",
-    "rules": ["rules/safety-detector.json"]
-  },
-  "hooks": [
-    {
-      "name": "gateway.response.chunk",
-      "priority": 10,
-      "failurePolicy": "fail-closed"
-    },
-    {
-      "name": "gateway.response.after",
-      "priority": 10,
-      "failurePolicy": "fail-closed"
-    }
-  ],
-  "permissions": ["response.body.read", "stream.inspect", "stream.modify"],
-  "hostCompatibility": {
-    "app": ">=0.56.0 <1.0.0",
-    "pluginApi": "^1.0.0",
-    "platforms": ["macos", "windows", "linux"]
-  },
-  "configSchema": {
-    "type": "object",
-    "required": ["strategy", "categories"],
-    "properties": {
-      "strategy": {
-        "type": "string",
-        "enum": ["warn", "block", "redact"]
-      },
-      "categories": {
-        "type": "array",
-        "items": {
-          "type": "string",
-          "enum": ["dangerous_shell", "secret_leak", "data_exfiltration", "destructive_file_operation"]
-        }
-      },
-      "blockMessage": {
-        "type": "string"
-      }
-    }
-  }
-}
-```
-
-## 13. Example Manifest: Redactor
-
-```json
-{
-  "id": "official.redactor",
-  "name": "Sensitive Data Redactor",
-  "version": "1.0.0",
-  "apiVersion": "1.0.0",
-  "category": "redaction",
-  "runtime": {
-    "kind": "declarativeRules",
-    "rules": ["rules/redactor.json"]
-  },
-  "hooks": [
-    {
-      "name": "gateway.request.beforeSend",
-      "priority": 20,
-      "failurePolicy": "fail-open"
-    },
-    {
-      "name": "gateway.response.chunk",
-      "priority": 20,
-      "failurePolicy": "fail-open"
-    },
-    {
-      "name": "gateway.response.after",
-      "priority": 20,
-      "failurePolicy": "fail-open"
-    },
-    {
-      "name": "log.beforePersist",
-      "priority": 1,
-      "failurePolicy": "fail-closed-to-host-redaction"
-    }
-  ],
-  "permissions": ["request.body.read", "response.body.read", "log.redact"],
-  "hostCompatibility": {
-    "app": ">=0.56.0 <1.0.0",
-    "pluginApi": "^1.0.0",
-    "platforms": ["macos", "windows", "linux"]
-  },
-  "configSchema": {
-    "type": "object",
-    "required": ["redactLogsAndGuiOnly", "sensitiveTypes"],
-    "properties": {
-      "redactLogsAndGuiOnly": {
-        "type": "boolean"
-      },
-      "redactBeforeUpstream": {
-        "type": "boolean"
-      },
-      "sensitiveTypes": {
-        "type": "array",
-        "items": {
-          "type": "string",
-          "enum": ["bearer_token", "github_token", "url_query_token", "database_connection_string"]
-        }
-      },
-      "keepPrefixChars": {
-        "type": "integer"
-      },
-      "keepSuffixChars": {
-        "type": "integer"
-      }
-    }
-  }
-}
-```
-
-## 14. Example Manifest: Privacy Filter
+## 12. Example Manifest: Privacy Filter
 
 ```json
 {

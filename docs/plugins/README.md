@@ -9,7 +9,7 @@ Plugins extend the local gateway, request and response hooks, log redaction, and
 - [Getting Started](./getting-started.md): first local plugin, validation, replay, packaging, and import flow.
 - [Plugin SDK](./sdk.md): TypeScript types and validation helpers for plugin authors and tooling.
 - [Declarative Rules](./declarative-rules.md): no-code rule runtime for request/log redaction, safety checks, and prompt edits.
-- [Official Examples](./official-examples.md): built-in official plugins and what each demonstrates.
+- [Official Examples](./official-examples.md): the built-in Privacy Filter and what it demonstrates.
 
 ## Core Contracts
 
@@ -27,6 +27,7 @@ Plugins extend the local gateway, request and response hooks, log redaction, and
 - [WASM Runtime](./wasm-runtime.md): ABI v1 design and execution limits.
 - [Process Runtime PoC](./process-runtime-poc.md): disabled-by-default process isolation design.
 - [Publishing](./publishing.md): `.aio-plugin` packaging, checksum, signatures, updates, and rollback.
+- [Architecture Audit](./architecture-audit.md): trust boundaries, runtime choices, performance, and stability guidance.
 
 ## Recommended Development Order
 
@@ -41,4 +42,5 @@ Plugins extend the local gateway, request and response hooks, log redaction, and
 
 - Arbitrary JavaScript and TypeScript plugins are not supported.
 - WASM and process runtime docs describe the isolation contract; marketplace enablement is still guarded by host policy.
-- Official example plugins live in the host repository while plugin API v1 is stabilizing.
+- Active hooks and permissions are the only capabilities accepted by manifest validation; reserved hooks and permissions are documented for future host integration.
+- Only `official.privacy-filter` is bundled as an official native plugin. Community extensions should use `declarativeRules`, WASM, or a future isolated process runtime rather than `native`.

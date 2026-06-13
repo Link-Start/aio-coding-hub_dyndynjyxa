@@ -6,7 +6,7 @@ For a full map of plugin documentation, see [Plugin Development](./README.md).
 
 ## Choose A Runtime
 
-Start with `declarativeRules` when the plugin can be expressed as regex matching, replacement, warning, blocking, or appending messages.
+Start with `declarativeRules` when the plugin can be expressed as regex matching, replacement, warning, blocking, or appending messages. `declarativeRules` is the default community runtime for vNext.
 
 Use WASM only when a plugin needs code execution and can fit the isolated WASM ABI. Arbitrary JavaScript and TypeScript plugins are not supported.
 
@@ -99,14 +99,75 @@ Rule details: [Declarative Rules Runtime](./declarative-rules.md).
 ## Local Development Flow
 
 1. Edit `plugin.json`.
-2. Validate the manifest with `pnpm create-aio-plugin validate acme.redactor`.
-3. Replay a fixture with `pnpm create-aio-plugin replay acme.redactor`.
-4. Pack the plugin as `acme.redactor.aio-plugin` with `pnpm create-aio-plugin pack acme.redactor`.
+2. Validate the real plugin directory with `pnpm create-aio-plugin validate ./acme.redactor`.
+3. Replay a fixture with `pnpm create-aio-plugin replay ./acme.redactor ./fixtures/request.json gateway.request.afterBodyRead`.
+4. Pack the plugin as `acme.redactor.aio-plugin` with `pnpm create-aio-plugin pack ./acme.redactor`.
 5. Sign package bytes with `pnpm create-aio-plugin sign <bytes> [privateKey]`.
 6. Verify package bytes with `pnpm create-aio-plugin verify <bytes> <signature> <publicKey>`.
 7. Import the package from the Plugins page.
 
-WASM marketplace execution remains disabled by default until host policy explicitly enables it.
+WASM gateway execution is policy-gated and disabled by default in vNext. `plugin.wasm` artifacts are packaged as binary files by `create-aio-plugin pack`.
+
+## Golden Path
+
+1. Scaffold a declarative rule plugin.
+
+   ```bash
+   pnpm create-aio-plugin acme.redactor rule
+   ```
+
+2. Validate `plugin.json` and rule files.
+
+   ```bash
+   pnpm create-aio-plugin validate ./acme.redactor
+   ```
+
+3. Add Claude and Codex request shapes as replay fixtures.
+
+   Claude fixture:
+
+   ```json
+   {
+     "request": {
+       "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"SECRET_TOKEN\"}]}"
+     }
+   }
+   ```
+
+   Codex/OpenAI Responses fixture:
+
+   ```json
+   {
+     "request": {
+       "body": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"SECRET_TOKEN\"}]}]}"
+     }
+   }
+   ```
+
+4. Replay both fixtures locally.
+
+   ```bash
+   pnpm create-aio-plugin replay ./acme.redactor ./fixtures/claude-request.json gateway.request.afterBodyRead
+   pnpm create-aio-plugin replay ./acme.redactor ./fixtures/codex-request.json gateway.request.afterBodyRead
+   ```
+
+5. Pack the plugin.
+
+   ```bash
+   pnpm create-aio-plugin pack ./acme.redactor
+   ```
+
+6. Install locally from the Plugins page.
+
+   Use the Plugins page local package install action and select `acme.redactor.aio-plugin`.
+
+7. Grant requested permissions and enable the plugin.
+
+   Confirm the requested `request.body.read` and `request.body.write` permissions before enabling.
+
+8. Inspect audit logs.
+
+   After a matching request, the plugin detail panel should show hook completion or block/failure events without storing sensitive payload text.
 
 ## Next References
 

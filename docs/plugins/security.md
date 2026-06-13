@@ -2,6 +2,8 @@
 
 The plugin system is designed around least privilege and isolation.
 
+Default vNext hook timeout: 150 ms.
+
 Core rules:
 
 - no arbitrary JavaScript executes inside the Rust main process.

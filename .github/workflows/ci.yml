@@ -117,6 +117,9 @@ jobs:
       - name: Plugin docs contract
         run: pnpm check:plugin-system-docs
 
+      - name: Plugin API contract
+        run: pnpm check:plugin-api-contract
+
       - name: Generated IPC bindings contract
         run: pnpm check:generated-bindings
 

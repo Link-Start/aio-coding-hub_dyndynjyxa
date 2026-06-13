@@ -2,9 +2,15 @@
 
 ## Goal
 
-WASM runtime is the first supported community code-plugin runtime for aio coding hub. It exists to run plugin logic outside the Rust main-process trust boundary while preserving deterministic resource limits, permission trimming, auditability, and cross-platform behavior.
+WASM runtime is the policy-gated community code-plugin runtime for aio coding hub. It exists to run plugin logic outside the Rust main-process trust boundary while preserving deterministic resource limits, permission trimming, auditability, and cross-platform behavior. `declarativeRules` is the default community runtime; WASM is for plugins that truly need code execution once host policy enables it.
 
-This runtime is not enabled for arbitrary marketplace execution until the compatibility tests, signing policy, and host allowlist are all in place.
+WASM packages are installable only when host policy enables execution. This runtime is not enabled for arbitrary marketplace execution until the compatibility tests, signing policy, and host allowlist are all in place. `plugin.wasm` artifacts are packaged as binary files by `create-aio-plugin pack`.
+
+## vNext Host Policy
+
+In vNext, WASM manifests are part of the compatibility contract, but gateway execution is policy-gated. A plugin with `runtime.kind = "wasm"` must not be enabled unless host policy explicitly sets `wasm_enabled = true`; otherwise the gateway returns `PLUGIN_RUNTIME_DISABLED`.
+
+WASM enablement is rejected while host policy disables execution. The plugin can still be packaged and validated as an ABI artifact, but users cannot enable it in the gateway until the host policy explicitly allows WASM execution.
 
 ## WASM ABI v1
 
@@ -35,13 +41,16 @@ The guest response envelope is:
 
 ```json
 {
-  "action": "pass",
-  "contextPatch": null,
+  "action": "replace",
+  "requestBody": "{\"messages\":[]}",
+  "headers": {
+    "x-plugin-redacted": "1"
+  },
   "audit": []
 }
 ```
 
-`action` may be `pass`, `replace`, `block`, or `warn` only when the hook and granted permissions allow that action.
+`action` may be `pass`, `replace`, `block`, or `warn` only when the hook and granted permissions allow that action. Replacement fields use the same active gateway envelope as the host: `requestBody`, `responseBody`, `streamChunk`, `logMessage`, and `headers`. Legacy `contextPatch` output is rejected in vNext.
 
 ## Guest Entrypoint
 

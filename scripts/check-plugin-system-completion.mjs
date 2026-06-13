@@ -43,6 +43,11 @@ function requireScript(packageJson, name, expected) {
 const rootPackage = readJson("package.json");
 requireScript(
   rootPackage,
+  "check:plugin-api-contract",
+  "node scripts/check-plugin-api-contract.mjs"
+);
+requireScript(
+  rootPackage,
   "plugin-wasm-sdk:test",
   "cargo test --manifest-path packages/plugin-wasm-sdk/Cargo.toml && cargo test --manifest-path packages/plugin-wasm-sdk/examples/redactor/Cargo.toml"
 );
@@ -85,6 +90,7 @@ for (const phrase of [
 
 const ci = readText(".github/workflows/ci.yml");
 for (const phrase of [
+  "pnpm check:plugin-api-contract",
   "pnpm check:plugin-system-docs",
   "pnpm check:generated-bindings",
   "pnpm plugin-sdk:typecheck",
@@ -107,6 +113,26 @@ for (const doc of docs) {
   const text = readText(doc);
   if (!text.includes("plugin-wasm-sdk")) {
     failures.push(`${doc}: must reference plugin-wasm-sdk`);
+  }
+}
+
+for (const [doc, phrases] of Object.entries({
+  "docs/plugins/getting-started.md": [
+    "declarativeRules` is the default community runtime",
+    "WASM gateway execution is policy-gated",
+    "plugin.wasm` artifacts are packaged as binary files",
+  ],
+  "docs/plugins/wasm-runtime.md": [
+    "declarativeRules` is the default community runtime",
+    "WASM is for plugins that truly need code execution once host policy enables it",
+    "plugin.wasm` artifacts are packaged as binary files",
+  ],
+})) {
+  const text = readText(doc);
+  for (const phrase of phrases) {
+    if (!text.includes(phrase)) {
+      failures.push(`${doc}: missing "${phrase}"`);
+    }
   }
 }
 

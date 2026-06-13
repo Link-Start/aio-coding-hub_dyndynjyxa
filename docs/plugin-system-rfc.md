@@ -96,7 +96,7 @@ The first runtime executes no community code. Plugins declare rules in JSON:
 - Replace, warn, block, and append-message actions.
 - Configuration schema and permission declarations.
 
-This runtime is enough for official prompt optimizer, safety detector, and redactor plugins.
+This runtime is enough for community prompt helpers, response safety checks, and log redactors that can be expressed as bounded JSON path and regex rules.
 
 ### Medium Term: WASM
 

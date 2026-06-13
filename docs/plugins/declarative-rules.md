@@ -174,6 +174,12 @@ The host trims hook context before rule execution and rejects unauthorized mutat
 - Hook execution is bounded by the gateway plugin timeout.
 - Invalid JSON targets are skipped when the target cannot be parsed as JSON syntax.
 
+## Local Replay Compatibility
+
+`create-aio-plugin replay` implements the host-supported v1.1 declarative rule subset for local fixtures. It is intentionally deterministic and does not execute WASM, process plugins, network calls, or host-only native engines.
+
+Replay supports the same v1.1 rule actions for the community rule runtime: `replace`, `block`, `warn`, and `appendMessage`. For request body rewrites, it supports raw text targets and the documented JSONPath subset such as `$.messages[*].content`, `$.input[*].content[*].text`, and `$.input`.
+
 ## Good Uses
 
 - Prompt optimization by appending instructions.

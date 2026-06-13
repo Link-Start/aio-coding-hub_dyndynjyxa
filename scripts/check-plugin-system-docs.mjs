@@ -29,10 +29,12 @@ const requiredDocs = [
       "apiVersion",
       "hostCompatibility",
       "gateway.response.chunk",
+      "Active hooks in plugin API v1",
+      "Reserved hooks for future host integration",
+      "Reserved permissions for future host-mediated APIs",
       "request.header.readSensitive",
-      "official.prompt-optimizer",
-      "official.safety-detector",
-      "official.redactor",
+      "official.privacy-filter",
+      "acme.prompt-helper",
       "quarantined",
       "高危权限需要二次授权",
       "插件升级新增权限必须重新授权",
@@ -55,6 +57,9 @@ const requiredDocs = [
     path: "docs/plugins/wasm-runtime.md",
     phrases: [
       "WASM ABI v1",
+      "WASM packages are installable only when host policy enables execution",
+      "PLUGIN_RUNTIME_DISABLED",
+      "WASM enablement is rejected while host policy disables execution",
       "guest entrypoint",
       "memory/time/filesystem/network restrictions",
       "no WASI filesystem imports",
@@ -78,6 +83,12 @@ const requiredDocs = [
     path: "docs/plugins/getting-started.md",
     phrases: [
       "create-aio-plugin",
+      "pnpm create-aio-plugin",
+      "pnpm create-aio-plugin validate",
+      "pnpm create-aio-plugin replay",
+      "pnpm create-aio-plugin pack",
+      "Install locally from the Plugins page",
+      "Claude and Codex request shapes",
       "@aio-coding-hub/plugin-sdk",
       "plugin.json",
       "Minimal Declarative Rule Plugin",
@@ -108,11 +119,20 @@ const requiredDocs = [
   {
     path: "docs/plugins/official-examples.md",
     phrases: [
-      "official.prompt-optimizer",
-      "official.safety-detector",
-      "official.redactor",
       "official.privacy-filter",
       "packyme/privacy-filter",
+      "Retired Built-In Examples",
+    ],
+  },
+  {
+    path: "docs/plugins/architecture-audit.md",
+    phrases: [
+      "official.privacy-filter",
+      "declarativeRules",
+      "WASM",
+      "native",
+      "Trust Boundaries",
+      "Performance And Stability Guidance",
     ],
   },
   {
@@ -121,7 +141,12 @@ const requiredDocs = [
   },
   {
     path: "docs/plugins/hooks.md",
-    phrases: ["gateway.request.afterBodyRead", "gateway.response.chunk", "log.beforePersist"],
+    phrases: [
+      "gateway.request.afterBodyRead",
+      "gateway.response.chunk",
+      "log.beforePersist",
+      "Default vNext hook timeout: 150 ms",
+    ],
   },
   {
     path: "docs/plugins/permissions.md",
@@ -129,11 +154,23 @@ const requiredDocs = [
   },
   {
     path: "docs/plugins/config-schema.md",
-    phrases: ["string", "number", "boolean", "password"],
+    phrases: [
+      "string",
+      "number",
+      "boolean",
+      "password",
+      "enum is supported as a keyword",
+      "vNext does not provide host-managed secret storage",
+    ],
   },
   {
     path: "docs/plugins/security.md",
-    phrases: ["fail-closed", "quarantined", "no arbitrary JavaScript"],
+    phrases: [
+      "fail-closed",
+      "quarantined",
+      "no arbitrary JavaScript",
+      "Default vNext hook timeout: 150 ms",
+    ],
   },
   {
     path: "docs/plugins/streaming.md",

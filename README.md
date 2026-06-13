@@ -85,10 +85,12 @@
 
 ### 插件系统
 
-- 官方示例插件：Prompt Optimizer、Safety Detector、Sensitive Data Redactor、Privacy Filter
+- 官方内置插件：Privacy Filter
 - 声明式规则插件：请求、响应、流式 chunk、日志 hook
 - 插件权限、配置 schema、审计日志、启用 / 禁用 / 卸载
 - SDK 与脚手架：`@aio-coding-hub/plugin-sdk`、`create-aio-plugin`
+
+Plugin authors should start with [Plugin Development](docs/plugins/README.md). The stable community runtime is `declarativeRules`; WASM packaging is available for ABI experimentation but gateway execution is policy-gated.
 
 ### CLI 管理
 
