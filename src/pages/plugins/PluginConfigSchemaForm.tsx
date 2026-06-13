@@ -1,22 +1,19 @@
 // Usage: Render and edit the manifest configSchema subset supported by the plugin host.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { JsonValue } from "../../services/plugins";
 import { Button } from "../../ui/Button";
 import { Input } from "../../ui/Input";
 import { Switch } from "../../ui/Switch";
 import { Textarea } from "../../ui/Textarea";
 import {
-  coerceConfigField,
-  isRecord,
-  schemaEnum,
-  schemaProperties,
-  schemaRequired,
-  schemaType,
-  type PluginConfigObject,
-} from "./pluginConfigValidation";
+  buildPluginConfigRenderModel,
+  type PluginConfigFieldModel,
+} from "./pluginConfigRenderModel";
+import { coerceConfigField, isRecord, type PluginConfigObject } from "./pluginConfigValidation";
 
 export type PluginConfigSchemaFormProps = {
+  identity: string;
   schema: JsonValue | null | undefined;
   value: JsonValue;
   pending: boolean;
@@ -36,17 +33,25 @@ function initialObject(value: JsonValue): PluginConfigObject {
 }
 
 export function PluginConfigSchemaForm({
+  identity,
   schema,
   value,
   pending,
   onSubmit,
 }: PluginConfigSchemaFormProps) {
-  const properties = useMemo(() => schemaProperties(schema), [schema]);
-  const required = useMemo(() => schemaRequired(schema), [schema]);
   const [draft, setDraft] = useState<PluginConfigObject>(() => initialObject(value));
-  const propertyEntries = Object.entries(properties);
+  const valueRef = useRef(value);
+  const model = useMemo(
+    () => buildPluginConfigRenderModel({ schema, value: draft }),
+    [schema, draft]
+  );
 
-  if (schemaType(schema) !== "object" || propertyEntries.length === 0) {
+  valueRef.current = value;
+  useEffect(() => {
+    setDraft(initialObject(valueRef.current));
+  }, [identity]);
+
+  if (!model.editable) {
     return (
       <div className="space-y-3">
         <div className="text-sm text-muted-foreground">此插件没有可编辑配置。</div>
@@ -61,88 +66,184 @@ export function PluginConfigSchemaForm({
     setDraft((current) => ({ ...current, [key]: next }));
   }
 
+  function buildSubmitValue(): PluginConfigObject {
+    const next = { ...draft };
+    for (const section of model.sections) {
+      for (const field of section.fields) {
+        if (field.value !== undefined) {
+          next[field.key] = field.value;
+        }
+      }
+    }
+    return next;
+  }
+
+  function fieldAriaLabel(field: PluginConfigFieldModel): string {
+    return field.label === `${field.key} *` ? field.key : field.label;
+  }
+
+  function renderField(field: PluginConfigFieldModel, sectionTitle: string) {
+    const label = field.label;
+    const current = field.value;
+    const ariaLabel = fieldAriaLabel(field);
+
+    if (field.widget === "switch") {
+      return (
+        <label
+          key={field.key}
+          className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2"
+        >
+          <span>
+            <span className="block text-sm font-medium">{label}</span>
+            {field.description ? (
+              <span className="block text-xs text-muted-foreground">{field.description}</span>
+            ) : null}
+          </span>
+          <Switch
+            aria-label={ariaLabel}
+            checked={Boolean(current)}
+            onCheckedChange={(checked) => setField(field.key, checked)}
+          />
+        </label>
+      );
+    }
+
+    if (field.widget === "select") {
+      return (
+        <label key={field.key} className="grid gap-1.5 text-sm">
+          <span className="font-medium">{label}</span>
+          {field.description ? (
+            <span className="text-xs text-muted-foreground">{field.description}</span>
+          ) : null}
+          <select
+            aria-label={ariaLabel}
+            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+            value={fieldToText(current, field.type)}
+            onChange={(event) => setField(field.key, event.target.value)}
+          >
+            {field.options.map((option) => (
+              <option key={String(option.value)} value={String(option.value)}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          {field.warning ? <span className="text-xs text-warning">{field.warning}</span> : null}
+        </label>
+      );
+    }
+
+    if (field.widget === "checkboxGroup") {
+      const currentArray = Array.isArray(current) ? current : [];
+      const showLegend = label !== sectionTitle;
+      return (
+        <fieldset
+          key={field.key}
+          aria-label={showLegend ? undefined : label}
+          className="grid gap-2 rounded-md border border-border px-3 py-2"
+        >
+          {showLegend ? <legend className="px-1 text-sm font-medium">{label}</legend> : null}
+          {field.description ? (
+            <div className="text-xs text-muted-foreground">{field.description}</div>
+          ) : null}
+          {field.options.map((option) => {
+            const itemText = String(option.value);
+            const checked = currentArray.some((item) => String(item) === itemText);
+            return (
+              <label key={itemText} className="flex items-start gap-2 text-sm">
+                <input
+                  aria-label={option.label}
+                  className="mt-1"
+                  type="checkbox"
+                  checked={checked}
+                  onChange={(event) => {
+                    const next = event.target.checked
+                      ? [...currentArray, option.value]
+                      : currentArray.filter((item) => String(item) !== itemText);
+                    setField(field.key, next);
+                  }}
+                />
+                <span>
+                  <span className="block font-medium">{option.label}</span>
+                  {option.description ? (
+                    <span className="block text-xs text-muted-foreground">
+                      {option.description}
+                    </span>
+                  ) : null}
+                </span>
+              </label>
+            );
+          })}
+          {field.warning && currentArray.length < field.options.length ? (
+            <div className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+              {field.warning}
+            </div>
+          ) : null}
+        </fieldset>
+      );
+    }
+
+    if (field.widget === "json") {
+      return (
+        <label key={field.key} className="grid gap-1.5 text-sm">
+          <span className="font-medium">{label}</span>
+          {field.description ? (
+            <span className="text-xs text-muted-foreground">{field.description}</span>
+          ) : null}
+          <Textarea
+            aria-label={ariaLabel}
+            value={fieldToText(current, field.type)}
+            onChange={(event) =>
+              setField(field.key, coerceConfigField(event.target.value, field.type))
+            }
+          />
+        </label>
+      );
+    }
+
+    return (
+      <label key={field.key} className="grid gap-1.5 text-sm">
+        <span className="font-medium">{label}</span>
+        {field.description ? (
+          <span className="text-xs text-muted-foreground">{field.description}</span>
+        ) : null}
+        <Input
+          aria-label={ariaLabel}
+          placeholder={field.placeholder ?? undefined}
+          type={
+            field.widget === "password" ? "password" : field.widget === "number" ? "number" : "text"
+          }
+          value={fieldToText(current, field.type)}
+          onChange={(event) =>
+            setField(field.key, coerceConfigField(event.target.value, field.type))
+          }
+        />
+        {field.warning ? <span className="text-xs text-warning">{field.warning}</span> : null}
+      </label>
+    );
+  }
+
   return (
     <form
       className="space-y-4"
       onSubmit={(event) => {
         event.preventDefault();
-        onSubmit(draft);
+        onSubmit(buildSubmitValue());
       }}
     >
-      <div className="grid gap-3">
-        {propertyEntries.map(([key, fieldSchema]) => {
-          const type = schemaType(fieldSchema);
-          const enumValues = schemaEnum(fieldSchema);
-          const current = draft[key];
-          const label = required.has(key) ? `${key} *` : key;
-
-          if (type === "boolean") {
-            return (
-              <label
-                key={key}
-                className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2"
-              >
-                <span className="text-sm font-medium">{label}</span>
-                <Switch
-                  aria-label={key}
-                  checked={Boolean(current)}
-                  onCheckedChange={(checked) => setField(key, checked)}
-                />
-              </label>
-            );
-          }
-
-          if (enumValues.length > 0) {
-            return (
-              <label key={key} className="grid gap-1.5 text-sm">
-                <span className="font-medium">{label}</span>
-                <select
-                  aria-label={key}
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                  value={fieldToText(current, type)}
-                  onChange={(event) => setField(key, event.target.value)}
-                >
-                  {enumValues.map((item) => (
-                    <option key={String(item)} value={String(item)}>
-                      {String(item)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            );
-          }
-
-          if (type === "object" || type === "array") {
-            return (
-              <label key={key} className="grid gap-1.5 text-sm">
-                <span className="font-medium">{label}</span>
-                <Textarea
-                  aria-label={key}
-                  value={fieldToText(current, type)}
-                  onChange={(event) => setField(key, coerceConfigField(event.target.value, type))}
-                />
-              </label>
-            );
-          }
-
-          return (
-            <label key={key} className="grid gap-1.5 text-sm">
-              <span className="font-medium">{label}</span>
-              <Input
-                aria-label={key}
-                type={
-                  type === "password"
-                    ? "password"
-                    : type === "number" || type === "integer"
-                      ? "number"
-                      : "text"
-                }
-                value={fieldToText(current, type)}
-                onChange={(event) => setField(key, coerceConfigField(event.target.value, type))}
-              />
-            </label>
-          );
-        })}
+      <div className="grid gap-4">
+        {model.sections.map((section) => (
+          <section key={section.id} className="grid gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">{section.title}</h3>
+              {section.description ? (
+                <p className="text-xs text-muted-foreground">{section.description}</p>
+              ) : null}
+            </div>
+            <div className="grid gap-3">
+              {section.fields.map((field) => renderField(field, section.title))}
+            </div>
+          </section>
+        ))}
       </div>
 
       <div className="flex justify-end">
