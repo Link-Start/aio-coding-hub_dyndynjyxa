@@ -468,7 +468,7 @@ fn execute_official_privacy_filter_hook(
     let mut result = GatewayHookResult::continue_unchanged();
     let options = privacy_filter_options_from_config(config);
     match context.hook_name.as_str() {
-        "gateway.request.afterBodyRead" => {
+        "gateway.request.afterBodyRead" | "gateway.request.beforeSend" => {
             if config.get("redactBeforeUpstream") != Some(&Value::Bool(true)) {
                 return Ok(result);
             }
@@ -1292,6 +1292,30 @@ mod tests {
                 "{name} leaked phone number: {output}"
             );
         }
+    }
+
+    #[test]
+    fn official_privacy_filter_redacts_before_send_request_bodies() {
+        let executor = RuleRuntimeGatewayPluginExecutor::default();
+        let plugin = official_privacy_filter_detail(json!({
+            "redactBeforeUpstream": true,
+            "redactLogs": true
+        }));
+
+        let mut context = context_for_request_body_text(
+            r#"{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"phone 13344441520"}]}]}"#,
+        );
+        context.hook_name = "gateway.request.beforeSend".to_string();
+
+        let result = executor
+            .execute_official_privacy_filter_plugin(&plugin, context)
+            .expect("privacy filter beforeSend hook");
+
+        let output = result
+            .request_body
+            .expect("request body should be redacted");
+        assert!(output.contains("[电话]"));
+        assert!(!output.contains("13344441520"));
     }
 
     #[test]

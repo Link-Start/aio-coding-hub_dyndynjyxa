@@ -3,6 +3,7 @@
   "name": "Privacy Filter",
   "version": "1.0.0",
   "apiVersion": "1.0.0",
+  "configVersion": 2,
   "category": "privacy",
   "description": "Official native privacy filter aligned with packyme/privacy-filter for pre-upstream prompt and log redaction.",
   "homepage": "https://github.com/packyme/privacy-filter",
@@ -18,6 +19,11 @@
   "hooks": [
     {
       "name": "gateway.request.afterBodyRead",
+      "priority": 5,
+      "failurePolicy": "fail-closed"
+    },
+    {
+      "name": "gateway.request.beforeSend",
       "priority": 5,
       "failurePolicy": "fail-closed"
     },

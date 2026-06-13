@@ -402,6 +402,17 @@ ON CONFLICT(plugin_id) DO UPDATE SET
     get_plugin_with_conn(&conn, plugin_id)
 }
 
+pub(crate) fn plugin_config_version(db: &db::Db, plugin_id: &str) -> AppResult<Option<u32>> {
+    let conn = db.open_connection()?;
+    conn.query_row(
+        "SELECT config_version FROM plugin_configs WHERE plugin_id = ?1",
+        params![plugin_id],
+        |row| row.get::<_, u32>(0),
+    )
+    .optional()
+    .map_err(|e| db_err!("failed to query plugin config version: {e}"))
+}
+
 pub(crate) fn save_plugin_permissions(
     db: &db::Db,
     plugin_id: &str,

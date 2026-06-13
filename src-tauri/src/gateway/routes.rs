@@ -383,6 +383,48 @@ mod tests {
         (format!("http://{addr}"), rx, task)
     }
 
+    async fn spawn_codex_previous_response_retry_upstream() -> (
+        String,
+        tokio::sync::mpsc::Receiver<CapturedRawRequest>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind retry upstream stub");
+        let addr = listener.local_addr().expect("retry upstream addr");
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        let task = tokio::spawn(async move {
+            for index in 0..2 {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let request =
+                    split_raw_http_request(read_complete_http_request_bytes(&mut socket).await);
+                let _ = tx.send(request).await;
+                let (status_line, body) = if index == 0 {
+                    (
+                        "400 Bad Request",
+                        r#"{"error":{"message":"No response found for previous_response_id resp_old","param":"previous_response_id"}}"#,
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"id":"stub-ok","object":"response","output":[]}"#,
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        (format!("http://{addr}"), rx, task)
+    }
+
     fn gzip_bytes(input: &[u8]) -> Vec<u8> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(input).expect("gzip write");
@@ -863,6 +905,35 @@ mod tests {
         plugin
     }
 
+    fn official_privacy_filter_for_tests() -> PluginDetail {
+        let fixture = official::official_plugin("official.privacy-filter")
+            .expect("official privacy filter fixture");
+        let permissions = fixture.manifest.permissions.clone();
+        PluginDetail {
+            summary: PluginSummary {
+                id: 1,
+                plugin_id: fixture.manifest.id.clone(),
+                name: fixture.manifest.name.clone(),
+                current_version: Some(fixture.manifest.version.clone()),
+                status: PluginStatus::Enabled,
+                runtime: "native:privacyFilter".to_string(),
+                permission_risk: PluginPermissionRisk::High,
+                update_available: false,
+                last_error: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+            manifest: fixture.manifest,
+            install_source: PluginInstallSource::Official,
+            installed_dir: Some(fixture.root_dir.to_string_lossy().to_string()),
+            config: fixture.default_config,
+            granted_permissions: permissions,
+            pending_permissions: vec![],
+            audit_logs: vec![],
+            runtime_failures: vec![],
+        }
+    }
+
     fn gateway_error_plugin() -> PluginDetail {
         let mut plugin = request_rewrite_plugin();
         plugin.summary.plugin_id = "test.gateway-error".to_string();
@@ -897,6 +968,26 @@ mod tests {
             &[],
         )
         .expect("grant test plugin permissions");
+    }
+
+    fn persist_plugin_detail(db: &db::Db, plugin: &PluginDetail) {
+        repository::insert_plugin(
+            db,
+            repository::InsertPluginInput {
+                manifest: plugin.manifest.clone(),
+                install_source: plugin.install_source,
+                status: plugin.summary.status,
+                installed_dir: plugin.installed_dir.clone(),
+            },
+        )
+        .expect("insert plugin detail");
+        repository::save_plugin_permissions(
+            db,
+            &plugin.summary.plugin_id,
+            &plugin.granted_permissions,
+            &plugin.pending_permissions,
+        )
+        .expect("save plugin detail permissions");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1184,6 +1275,318 @@ mod tests {
         let decoded_body_text = String::from_utf8_lossy(&decoded_body);
         assert!(decoded_body_text.contains("[电话]"));
         assert!(!decoded_body_text.contains("13344441520"));
+
+        let request_log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(request_log.status, Some(200));
+        assert!(!request_log.attempts_json.contains("13344441520"));
+
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn official_privacy_filter_redacts_identity_codex_responses_before_upstream_and_logs() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        app_settings.enable_codex_session_id_completion = false;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("privacy-filter-identity-test.sqlite"))
+            .expect("init test db");
+        let fixture = official::official_plugin("official.privacy-filter")
+            .expect("official privacy filter fixture");
+        let permissions = fixture.manifest.permissions.clone();
+        let plugin = PluginDetail {
+            summary: PluginSummary {
+                id: 1,
+                plugin_id: fixture.manifest.id.clone(),
+                name: fixture.manifest.name.clone(),
+                current_version: Some(fixture.manifest.version.clone()),
+                status: PluginStatus::Enabled,
+                runtime: "native:privacyFilter".to_string(),
+                permission_risk: PluginPermissionRisk::High,
+                update_available: false,
+                last_error: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+            manifest: fixture.manifest,
+            install_source: PluginInstallSource::Official,
+            installed_dir: Some(fixture.root_dir.to_string_lossy().to_string()),
+            config: fixture.default_config,
+            granted_permissions: permissions.clone(),
+            pending_permissions: vec![],
+            audit_logs: vec![],
+            runtime_failures: vec![],
+        };
+        repository::insert_plugin(
+            &db,
+            repository::InsertPluginInput {
+                manifest: plugin.manifest.clone(),
+                install_source: PluginInstallSource::Official,
+                status: PluginStatus::Enabled,
+                installed_dir: plugin.installed_dir.clone(),
+            },
+        )
+        .expect("insert official privacy filter");
+        repository::save_plugin_permissions(&db, &plugin.summary.plugin_id, &permissions, &[])
+            .expect("grant official privacy filter permissions");
+
+        let (upstream_base_url, captured_rx, upstream_task) =
+            spawn_capturing_raw_upstream(r#"{"id":"stub-ok","object":"response","output":[]}"#)
+                .await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![plugin],
+            Arc::new(RuntimeGatewayPluginExecutor::default()),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db,
+            log_tx,
+            plugin_pipeline,
+        ));
+        let plain_body = serde_json::json!({
+            "model": "gpt-plugin",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "你知道 13344441520 是哪里的手机号嘛"
+                }]
+            }]
+        })
+        .to_string();
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/codex/_aio/provider/{provider_id}/v1/responses"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(plain_body))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let captured = tokio::time::timeout(Duration::from_secs(2), captured_rx)
+            .await
+            .expect("captured upstream request")
+            .expect("captured request");
+
+        let body_text = String::from_utf8_lossy(&captured.body);
+        assert!(body_text.contains("[电话]"));
+        assert!(!body_text.contains("13344441520"));
+
+        let request_log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(request_log.status, Some(200));
+        assert!(!request_log.attempts_json.contains("13344441520"));
+        assert!(!request_log
+            .provider_chain_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("13344441520"));
+        assert!(!request_log
+            .error_details_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("13344441520"));
+
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn official_privacy_filter_before_send_redacts_final_upstream_body() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        app_settings.enable_codex_session_id_completion = false;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("privacy-filter-before-send.sqlite"))
+            .expect("init test db");
+        let mut plugin = official_privacy_filter_for_tests();
+        plugin
+            .manifest
+            .hooks
+            .retain(|hook| hook.name != "gateway.request.afterBodyRead");
+        persist_plugin_detail(&db, &plugin);
+
+        let (upstream_base_url, captured_rx, upstream_task) =
+            spawn_capturing_raw_upstream(r#"{"id":"stub-ok","object":"response","output":[]}"#)
+                .await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![plugin],
+            Arc::new(RuntimeGatewayPluginExecutor::default()),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db,
+            log_tx,
+            plugin_pipeline,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/codex/_aio/provider/{provider_id}/v1/responses"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "model": "gpt-plugin",
+                    "input": [{
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "你知道 13344441520 是哪里的手机号嘛"
+                        }]
+                    }]
+                })
+                .to_string(),
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let captured = tokio::time::timeout(Duration::from_secs(2), captured_rx)
+            .await
+            .expect("captured upstream request")
+            .expect("captured request");
+
+        let body_text = String::from_utf8_lossy(&captured.body);
+        assert!(body_text.contains("[电话]"));
+        assert!(!body_text.contains("13344441520"));
+
+        let request_log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(request_log.status, Some(200));
+        assert!(!request_log.attempts_json.contains("13344441520"));
+
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_before_send_mutation_survives_codex_internal_retry() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        app_settings.enable_codex_session_id_completion = false;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("privacy-filter-retry.sqlite"))
+            .expect("init test db");
+        let mut plugin = before_send_header_plugin();
+        plugin.manifest.permissions = vec![
+            "request.body.read".to_string(),
+            "request.body.write".to_string(),
+        ];
+        plugin.granted_permissions = plugin.manifest.permissions.clone();
+        persist_plugin_detail(&db, &plugin);
+
+        let (upstream_base_url, mut captured_rx, upstream_task) =
+            spawn_codex_previous_response_retry_upstream().await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let executor =
+            InMemoryGatewayPluginExecutor::new().with_request_handler("test.before-send", {
+                let call_count = Arc::clone(&call_count);
+                move |ctx| {
+                    let call = call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut result = GatewayHookResult::continue_unchanged();
+                    if call == 0 {
+                        let body = ctx.request.body.expect("request body visible");
+                        result.request_body = Some(body.replace("13344441520", "[电话]"));
+                    }
+                    result
+                }
+            });
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![plugin],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db,
+            log_tx,
+            plugin_pipeline,
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/codex/_aio/provider/{provider_id}/v1/responses"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "model": "gpt-plugin",
+                    "previous_response_id": "resp_old",
+                    "input": [{
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "你知道 13344441520 是哪里的手机号嘛"
+                        }]
+                    }]
+                })
+                .to_string(),
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let first = tokio::time::timeout(Duration::from_secs(2), captured_rx.recv())
+            .await
+            .expect("first captured request")
+            .expect("first request");
+        let second = tokio::time::timeout(Duration::from_secs(2), captured_rx.recv())
+            .await
+            .expect("second captured request")
+            .expect("second request");
+        assert!(!String::from_utf8_lossy(&first.body).contains("13344441520"));
+        assert!(String::from_utf8_lossy(&first.body).contains("[电话]"));
+
+        let second_body = String::from_utf8_lossy(&second.body);
+        assert!(
+            second_body.contains("[电话]"),
+            "retry request should keep the beforeSend redaction: {second_body}"
+        );
+        assert!(
+            !second_body.contains("13344441520"),
+            "retry request leaked the original phone number: {second_body}"
+        );
+        assert!(!second_body.contains("previous_response_id"));
 
         let request_log = recv_terminal_request_log(&mut log_rx).await;
         assert_eq!(request_log.status, Some(200));

@@ -171,7 +171,7 @@ where
                 return AttemptSendOutcome::PluginBlocked(blocked.reason);
             }
             semantic_headers = output.headers;
-            body_state_for_attempt.replace_decoded(output.body);
+            sync_before_send_body_output(prepared, &mut body_state_for_attempt, output.body);
         }
         Err(mut err) => {
             crate::gateway::plugins::audit::persist_gateway_plugin_error_audit_events(
@@ -223,6 +223,22 @@ where
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn sync_before_send_body_output(
+    prepared: &mut PreparedProvider,
+    body_state_for_attempt: &mut crate::gateway::proxy::request_body::GatewayRequestBody,
+    output_body: Bytes,
+) {
+    let previous_body = body_state_for_attempt.decoded_clone();
+    body_state_for_attempt.replace_decoded(output_body.clone());
+    if output_body == previous_body {
+        return;
+    }
+
+    prepared.upstream_body_bytes = output_body;
+    prepared.strip_request_content_encoding = true;
+    prepared.request_body_mutated_before_attempt = true;
+}
 
 fn try_build_url(prepared: &PreparedProvider) -> Result<reqwest::Url, String> {
     build_target_url(

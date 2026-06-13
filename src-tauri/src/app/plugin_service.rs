@@ -6,26 +6,48 @@ use crate::infra::plugins::{package, repository, signing};
 use crate::shared::error::{AppError, AppResult};
 use std::path::{Path, PathBuf};
 
+const OFFICIAL_PRIVACY_FILTER_ID: &str = "official.privacy-filter";
+
 pub(crate) fn list_plugins(db: &crate::db::Db) -> AppResult<Vec<crate::plugins::PluginSummary>> {
     repository::list_plugins(db)
 }
 
 pub(crate) fn get_plugin_detail(db: &crate::db::Db, plugin_id: &str) -> AppResult<PluginDetail> {
-    repository::get_plugin(db, plugin_id)
+    detail_with_config_defaults_for_db(db, repository::get_plugin(db, plugin_id)?)
 }
 
 pub(crate) fn enabled_plugins_for_gateway(db: &crate::db::Db) -> AppResult<Vec<PluginDetail>> {
+    match enabled_plugins_for_gateway_once(db) {
+        Ok(plugins) => Ok(plugins),
+        Err(err) if is_missing_plugin_table_error(&err) => {
+            tracing::warn!(
+                error = %err,
+                "plugin schema missing while loading gateway plugins; repairing runtime schema"
+            );
+            crate::db::ensure_runtime_schema(db)?;
+            enabled_plugins_for_gateway_once(db)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn enabled_plugins_for_gateway_once(db: &crate::db::Db) -> AppResult<Vec<PluginDetail>> {
     let mut out = Vec::new();
     for summary in repository::list_plugins(db)? {
         if summary.status != PluginStatus::Enabled {
             continue;
         }
-        out.push(detail_with_config_defaults(repository::get_plugin(
+        out.push(detail_with_config_defaults_for_db(
             db,
-            &summary.plugin_id,
-        )?));
+            repository::get_plugin(db, &summary.plugin_id)?,
+        )?);
     }
     Ok(out)
+}
+
+fn is_missing_plugin_table_error(err: &AppError) -> bool {
+    let message = err.to_string();
+    message.contains("no such table: plugins") || message.contains("no such table: plugin_")
 }
 
 pub(crate) fn install_official_plugin(
@@ -618,7 +640,7 @@ pub(crate) fn enable_plugin(
     plugin_id: &str,
     host_version: &str,
 ) -> AppResult<PluginDetail> {
-    let detail = detail_with_config_defaults(repository::get_plugin(db, plugin_id)?);
+    let detail = detail_with_config_defaults_for_db(db, repository::get_plugin(db, plugin_id)?)?;
     if !matches!(
         detail.summary.status,
         PluginStatus::Disabled | PluginStatus::Installed
@@ -645,7 +667,7 @@ pub(crate) fn enable_plugin(
         serde_json::json!({}),
     )?;
     tracing::info!(plugin_id, "plugin enabled");
-    Ok(next)
+    detail_with_config_defaults_for_db(db, next)
 }
 
 pub(crate) fn disable_plugin(db: &crate::db::Db, plugin_id: &str) -> AppResult<PluginDetail> {
@@ -681,7 +703,7 @@ pub(crate) fn save_plugin_config(
     plugin_id: &str,
     config: serde_json::Value,
 ) -> AppResult<PluginDetail> {
-    let detail = repository::get_plugin(db, plugin_id)?;
+    let detail = detail_with_config_defaults_for_db(db, repository::get_plugin(db, plugin_id)?)?;
     let config = config_with_schema_defaults(detail.manifest.config_schema.as_ref(), config);
     validate_config_against_schema(detail.manifest.config_schema.as_ref(), &config)?;
     let config_version = detail.manifest.config_version.unwrap_or(1);
@@ -694,7 +716,7 @@ pub(crate) fn save_plugin_config(
         "Plugin config saved",
         serde_json::json!({ "configVersion": config_version }),
     )?;
-    Ok(next)
+    detail_with_config_defaults_for_db(db, next)
 }
 
 pub(crate) fn grant_plugin_permissions(
@@ -796,10 +818,78 @@ fn ensure_runtime_enabled(manifest: &PluginManifest) -> AppResult<()> {
     }
 }
 
-fn detail_with_config_defaults(mut detail: PluginDetail) -> PluginDetail {
+fn detail_with_config_defaults_for_db(
+    db: &crate::db::Db,
+    detail: PluginDetail,
+) -> AppResult<PluginDetail> {
+    let stored_config_version = repository::plugin_config_version(db, &detail.summary.plugin_id)?;
+    Ok(detail_with_config_defaults(detail, stored_config_version))
+}
+
+fn detail_with_config_defaults(
+    mut detail: PluginDetail,
+    stored_config_version: Option<u32>,
+) -> PluginDetail {
+    detail = merge_packaged_official_manifest(detail);
     detail.config =
         config_with_schema_defaults(detail.manifest.config_schema.as_ref(), detail.config);
+    migrate_legacy_official_privacy_filter_config(&mut detail, stored_config_version);
     detail
+}
+
+fn merge_packaged_official_manifest(mut detail: PluginDetail) -> PluginDetail {
+    if detail.install_source != PluginInstallSource::Official
+        || detail.summary.plugin_id != OFFICIAL_PRIVACY_FILTER_ID
+    {
+        return detail;
+    }
+
+    let Ok(fixture) = crate::app::plugins::official::official_plugin(&detail.summary.plugin_id)
+    else {
+        return detail;
+    };
+
+    detail.manifest = fixture.manifest;
+    detail
+}
+
+fn migrate_legacy_official_privacy_filter_config(
+    detail: &mut PluginDetail,
+    stored_config_version: Option<u32>,
+) {
+    if detail.install_source != PluginInstallSource::Official
+        || detail.summary.plugin_id != OFFICIAL_PRIVACY_FILTER_ID
+    {
+        return;
+    }
+    let current_version = detail.manifest.config_version.unwrap_or(1);
+    if stored_config_version.unwrap_or(0) >= current_version {
+        return;
+    }
+    let Some(default_sensitive_types) = detail
+        .manifest
+        .config_schema
+        .as_ref()
+        .and_then(|schema| schema.pointer("/properties/sensitiveTypes/default"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return;
+    };
+    let Some(config) = detail.config.as_object_mut() else {
+        return;
+    };
+    let Some(sensitive_types) = config
+        .get_mut("sensitiveTypes")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+
+    for item in default_sensitive_types {
+        if !sensitive_types.iter().any(|existing| existing == item) {
+            sensitive_types.push(item.clone());
+        }
+    }
 }
 
 fn config_with_schema_defaults(
@@ -1383,6 +1473,43 @@ mod tests {
     }
 
     #[test]
+    fn enabled_plugins_for_gateway_repairs_missing_plugin_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::init_for_tests(&dir.path().join("missing-plugin-tables.db")).unwrap();
+        {
+            let conn = db.open_connection().unwrap();
+            conn.execute_batch(
+                r#"
+DROP TABLE plugin_runtime_failures;
+DROP TABLE plugin_market_sources;
+DROP TABLE plugin_audit_logs;
+DROP TABLE plugin_permissions;
+DROP TABLE plugin_configs;
+DROP TABLE plugin_versions;
+DROP TABLE plugins;
+"#,
+            )
+            .unwrap();
+        }
+
+        let active = enabled_plugins_for_gateway(&db).unwrap();
+
+        assert!(active.is_empty());
+        let conn = db.open_connection().unwrap();
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'plugins' LIMIT 1",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(
+            exists,
+            "runtime schema repair should recreate plugin tables"
+        );
+    }
+
+    #[test]
     fn official_privacy_filter_install_uses_upstream_redaction_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::init_for_tests(&dir.path().join("official-privacy-filter.db")).unwrap();
@@ -1500,6 +1627,213 @@ mod tests {
         let body = String::from_utf8(output.body.to_vec()).unwrap();
         assert!(body.contains("[电话]"));
         assert!(!body.contains("13344441520"));
+    }
+
+    #[test]
+    fn enabled_official_privacy_filter_migrates_legacy_sensitive_type_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let db =
+            crate::db::init_for_tests(&dir.path().join("official-privacy-filter-legacy-config.db"))
+                .unwrap();
+        let installed_root = dir.path().join("installed");
+
+        install_official_plugin(
+            &db,
+            "official.privacy-filter",
+            env!("CARGO_PKG_VERSION"),
+            &installed_root,
+        )
+        .unwrap();
+        repository::save_plugin_config(
+            &db,
+            "official.privacy-filter",
+            1,
+            &serde_json::json!({
+                "redactBeforeUpstream": true,
+                "redactLogs": true,
+                "profile": "balanced",
+                "sensitiveTypes": ["email"]
+            }),
+            &[],
+        )
+        .unwrap();
+        enable_plugin(&db, "official.privacy-filter", env!("CARGO_PKG_VERSION")).unwrap();
+
+        let active = enabled_plugins_for_gateway(&db).unwrap();
+
+        assert_eq!(active.len(), 1);
+        assert!(active[0]
+            .config
+            .get("sensitiveTypes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| item == "cn_phone")));
+
+        let pipeline = GatewayPluginPipeline::for_tests(
+            active,
+            Arc::new(
+                crate::app::plugins::runtime_executor::RuntimeGatewayPluginExecutor::default(),
+            ),
+            GatewayPluginPipelineConfig::default(),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let output = rt
+            .block_on(
+                pipeline.run_request_hook(GatewayRequestHookInput {
+                    hook_name: GatewayPluginHookName::RequestBeforeSend,
+                    trace_id: "trace-privacy-filter-legacy-config".to_string(),
+                    cli_key: "codex".to_string(),
+                    method: axum::http::Method::POST,
+                    path: "/v1/responses".to_string(),
+                    query: None,
+                    headers: axum::http::HeaderMap::new(),
+                    body: axum::body::Bytes::from(
+                        serde_json::json!({
+                            "input": [{
+                                "type": "message",
+                                "role": "user",
+                                "content": [{
+                                    "type": "input_text",
+                                    "text": "你知道 13344441520 是哪里的手机号嘛"
+                                }]
+                            }]
+                        })
+                        .to_string(),
+                    ),
+                    requested_model: Some("gpt-test".to_string()),
+                }),
+            )
+            .unwrap();
+        let body = String::from_utf8(output.body.to_vec()).unwrap();
+        assert!(body.contains("[电话]"));
+        assert!(!body.contains("13344441520"));
+    }
+
+    #[test]
+    fn enabled_official_privacy_filter_respects_current_config_sensitive_type_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::init_for_tests(
+            &dir.path().join("official-privacy-filter-current-config.db"),
+        )
+        .unwrap();
+        let installed_root = dir.path().join("installed");
+
+        install_official_plugin(
+            &db,
+            "official.privacy-filter",
+            env!("CARGO_PKG_VERSION"),
+            &installed_root,
+        )
+        .unwrap();
+        repository::save_plugin_config(
+            &db,
+            "official.privacy-filter",
+            2,
+            &serde_json::json!({
+                "redactBeforeUpstream": true,
+                "redactLogs": true,
+                "profile": "balanced",
+                "sensitiveTypes": ["email"]
+            }),
+            &[],
+        )
+        .unwrap();
+        enable_plugin(&db, "official.privacy-filter", env!("CARGO_PKG_VERSION")).unwrap();
+
+        let active = enabled_plugins_for_gateway(&db).unwrap();
+
+        assert_eq!(active.len(), 1);
+        assert!(active[0]
+            .config
+            .get("sensitiveTypes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| !items.iter().any(|item| item == "cn_phone")));
+    }
+
+    #[test]
+    fn enabled_official_privacy_filter_merges_packaged_manifest_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::init_for_tests(&dir.path().join("official-privacy-filter-hooks.db"))
+            .unwrap();
+        let installed_root = dir.path().join("installed");
+
+        install_official_plugin(
+            &db,
+            "official.privacy-filter",
+            env!("CARGO_PKG_VERSION"),
+            &installed_root,
+        )
+        .unwrap();
+        let mut legacy = repository::get_plugin(&db, "official.privacy-filter")
+            .unwrap()
+            .manifest;
+        legacy
+            .hooks
+            .retain(|hook| hook.name != "gateway.request.beforeSend");
+        repository::update_plugin_manifest(
+            &db,
+            legacy,
+            Some(installed_root.to_string_lossy().to_string()),
+        )
+        .unwrap();
+        enable_plugin(&db, "official.privacy-filter", env!("CARGO_PKG_VERSION")).unwrap();
+
+        let active = enabled_plugins_for_gateway(&db).unwrap();
+
+        assert_eq!(active.len(), 1);
+        assert!(active[0]
+            .manifest
+            .hooks
+            .iter()
+            .any(|hook| hook.name == "gateway.request.beforeSend"));
+    }
+
+    #[test]
+    fn official_privacy_filter_detail_and_enable_return_packaged_manifest_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::init_for_tests(&dir.path().join("official-privacy-filter-detail.db"))
+            .unwrap();
+        let installed_root = dir.path().join("installed");
+
+        install_official_plugin(
+            &db,
+            "official.privacy-filter",
+            env!("CARGO_PKG_VERSION"),
+            &installed_root,
+        )
+        .unwrap();
+        let mut legacy = repository::get_plugin(&db, "official.privacy-filter")
+            .unwrap()
+            .manifest;
+        legacy
+            .hooks
+            .retain(|hook| hook.name != "gateway.request.beforeSend");
+        repository::update_plugin_manifest(
+            &db,
+            legacy,
+            Some(installed_root.to_string_lossy().to_string()),
+        )
+        .unwrap();
+
+        let enabled =
+            enable_plugin(&db, "official.privacy-filter", env!("CARGO_PKG_VERSION")).unwrap();
+        let detail = get_plugin_detail(&db, "official.privacy-filter").unwrap();
+
+        for item in [&enabled, &detail] {
+            assert!(item
+                .manifest
+                .hooks
+                .iter()
+                .any(|hook| hook.name == "gateway.request.beforeSend"));
+            assert_eq!(item.config["redactBeforeUpstream"], true);
+            assert!(item
+                .config
+                .get("sensitiveTypes")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| items.iter().any(|item| item == "cn_phone")));
+        }
     }
 
     fn local_package_manifest(plugin_id: &str, version: &str) -> serde_json::Value {
