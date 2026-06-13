@@ -236,7 +236,36 @@ mod tests {
         (format!("http://{addr}"), task)
     }
 
-    async fn read_complete_http_request(socket: &mut tokio::net::TcpStream) -> String {
+    #[derive(Debug)]
+    struct CapturedRawRequest {
+        head: String,
+        body: Vec<u8>,
+    }
+
+    impl CapturedRawRequest {
+        fn text(&self) -> String {
+            let mut out = self.head.clone();
+            out.push_str("\r\n\r\n");
+            out.push_str(&String::from_utf8_lossy(&self.body));
+            out
+        }
+
+        fn has_header_line(&self, needle: &str) -> bool {
+            self.head
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase())
+        }
+    }
+
+    fn find_http_head_split(bytes: &[u8]) -> Option<(usize, usize)> {
+        let marker = b"\r\n\r\n";
+        bytes
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .map(|idx| (idx, idx + marker.len()))
+    }
+
+    async fn read_complete_http_request_bytes(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
         let mut buf = Vec::new();
         let mut chunk = [0_u8; 1024];
         loop {
@@ -251,10 +280,10 @@ mod tests {
                 break;
             }
 
-            let request = String::from_utf8_lossy(&buf);
-            let Some((headers, body)) = request.split_once("\r\n\r\n") else {
+            let Some((head_start, body_start)) = find_http_head_split(&buf) else {
                 continue;
             };
+            let headers = String::from_utf8_lossy(&buf[..head_start]);
             let content_length = headers
                 .lines()
                 .find_map(|line| {
@@ -266,10 +295,28 @@ mod tests {
                     }
                 })
                 .unwrap_or(0);
-            if body.len() >= content_length {
+            if buf.len().saturating_sub(body_start) >= content_length {
                 break;
             }
         }
+        buf
+    }
+
+    fn split_raw_http_request(bytes: Vec<u8>) -> CapturedRawRequest {
+        let Some((head_start, body_start)) = find_http_head_split(&bytes) else {
+            return CapturedRawRequest {
+                head: String::from_utf8_lossy(&bytes).to_string(),
+                body: Vec::new(),
+            };
+        };
+        CapturedRawRequest {
+            head: String::from_utf8_lossy(&bytes[..head_start]).to_string(),
+            body: bytes[body_start..].to_vec(),
+        }
+    }
+
+    async fn read_complete_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        let buf = read_complete_http_request_bytes(socket).await;
         String::from_utf8_lossy(&buf).to_string()
     }
 
@@ -310,7 +357,7 @@ mod tests {
         body: &'static str,
     ) -> (
         String,
-        tokio::sync::oneshot::Receiver<String>,
+        tokio::sync::oneshot::Receiver<CapturedRawRequest>,
         tokio::task::JoinHandle<()>,
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -320,7 +367,8 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             if let Ok((mut socket, _)) = listener.accept().await {
-                let request = read_complete_http_request(&mut socket).await;
+                let request =
+                    split_raw_http_request(read_complete_http_request_bytes(&mut socket).await);
                 let _ = tx.send(request);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -339,6 +387,13 @@ mod tests {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(input).expect("gzip write");
         encoder.finish().expect("gzip finish")
+    }
+
+    fn gunzip_bytes(input: &[u8]) -> Vec<u8> {
+        let mut decoder = flate2::read::GzDecoder::new(input);
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut out).expect("gzip read");
+        out
     }
 
     async fn spawn_status_json_upstream(
@@ -1032,6 +1087,7 @@ mod tests {
         let mut app_settings = settings::AppSettings::default();
         app_settings.failover_max_attempts_per_provider = 1;
         app_settings.failover_max_providers_to_try = 1;
+        app_settings.enable_codex_session_id_completion = false;
         settings::write(&app_handle, &app_settings).expect("write settings");
         crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
             .expect("enable codex cli proxy");
@@ -1123,15 +1179,80 @@ mod tests {
             .expect("captured upstream request")
             .expect("captured request");
 
-        assert!(!captured
-            .to_ascii_lowercase()
-            .contains("content-encoding: gzip"));
-        assert!(captured.contains("[电话]"));
-        assert!(!captured.contains("13344441520"));
+        assert!(captured.has_header_line("content-encoding: gzip"));
+        let decoded_body = gunzip_bytes(&captured.body);
+        let decoded_body_text = String::from_utf8_lossy(&decoded_body);
+        assert!(decoded_body_text.contains("[电话]"));
+        assert!(!decoded_body_text.contains("13344441520"));
 
         let request_log = recv_terminal_request_log(&mut log_rx).await;
         assert_eq!(request_log.status, Some(200));
         assert!(!request_log.attempts_json.contains("13344441520"));
+
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_preserves_gzipped_codex_request_when_plugins_do_not_mutate_body() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        app_settings.enable_codex_session_id_completion = false;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("gateway-gzip-passthrough-test.sqlite"))
+            .expect("init test db");
+        let (upstream_base_url, captured_rx, upstream_task) =
+            spawn_capturing_raw_upstream(r#"{"id":"stub-ok","object":"response","output":[]}"#)
+                .await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state(app_handle, db, log_tx));
+        let plain_body = serde_json::json!({
+            "model": "gpt-plugin",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "你知道 13344441520 是哪里的手机号嘛"
+                }]
+            }]
+        })
+        .to_string();
+        let compressed_body = gzip_bytes(plain_body.as_bytes());
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/codex/_aio/provider/{provider_id}/v1/responses"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_ENCODING, "gzip")
+            .body(Body::from(compressed_body.clone()))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let captured = tokio::time::timeout(Duration::from_secs(2), captured_rx)
+            .await
+            .expect("captured upstream request")
+            .expect("captured request");
+
+        assert!(captured.has_header_line("content-encoding: gzip"));
+        assert_eq!(captured.body, compressed_body);
+        assert!(!captured.text().contains("13344441520"));
+        assert!(!captured.text().contains("[电话]"));
+
+        let request_log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(request_log.status, Some(200));
 
         upstream_task.abort();
     }
@@ -1281,9 +1402,11 @@ mod tests {
             .expect("captured raw request");
         assert!(
             captured
+                .text()
                 .to_ascii_lowercase()
                 .contains("x-plugin-before-send: applied"),
-            "captured upstream request did not include plugin header:\n{captured}"
+            "captured upstream request did not include plugin header:\n{}",
+            captured.text()
         );
 
         let log = recv_terminal_request_log(&mut log_rx).await;
