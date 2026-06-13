@@ -302,35 +302,6 @@ async fn try_oauth_reactive_refresh<R: tauri::Runtime>(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn retry_repair_changed_request_body_detects_body_or_encoding_changes() {
-        let original = Bytes::from_static(br#"{"previous_response_id":"resp_1"}"#);
-
-        assert!(!retry_repair_changed_request_body(
-            &original,
-            original.as_ref(),
-            false,
-            false,
-        ));
-        assert!(retry_repair_changed_request_body(
-            &Bytes::from_static(br#"{}"#),
-            original.as_ref(),
-            false,
-            false,
-        ));
-        assert!(retry_repair_changed_request_body(
-            &original,
-            original.as_ref(),
-            true,
-            false,
-        ));
-    }
-}
-
 fn emit_cx2cc_upstream_log<R: tauri::Runtime>(
     input: &RequestContext<R>,
     prepared: &PreparedProvider,
@@ -368,4 +339,33 @@ fn emit_cx2cc_upstream_log<R: tauri::Runtime>(
             prepared.anthropic_stream_requested
         ),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_repair_changed_request_body_detects_body_or_encoding_changes() {
+        let original = Bytes::from_static(br#"{"previous_response_id":"resp_1"}"#);
+
+        assert!(!retry_repair_changed_request_body(
+            &original,
+            original.as_ref(),
+            false,
+            false,
+        ));
+        assert!(retry_repair_changed_request_body(
+            &Bytes::from_static(br#"{}"#),
+            original.as_ref(),
+            false,
+            false,
+        ));
+        assert!(retry_repair_changed_request_body(
+            &original,
+            original.as_ref(),
+            true,
+            false,
+        ));
+    }
 }
