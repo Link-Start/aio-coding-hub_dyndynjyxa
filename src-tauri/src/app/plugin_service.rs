@@ -20,7 +20,10 @@ pub(crate) fn enabled_plugins_for_gateway(db: &crate::db::Db) -> AppResult<Vec<P
         if summary.status != PluginStatus::Enabled {
             continue;
         }
-        out.push(repository::get_plugin(db, &summary.plugin_id)?);
+        out.push(detail_with_config_defaults(repository::get_plugin(
+            db,
+            &summary.plugin_id,
+        )?));
     }
     Ok(out)
 }
@@ -615,7 +618,7 @@ pub(crate) fn enable_plugin(
     plugin_id: &str,
     host_version: &str,
 ) -> AppResult<PluginDetail> {
-    let detail = repository::get_plugin(db, plugin_id)?;
+    let detail = detail_with_config_defaults(repository::get_plugin(db, plugin_id)?);
     if !matches!(
         detail.summary.status,
         PluginStatus::Disabled | PluginStatus::Installed
@@ -679,6 +682,7 @@ pub(crate) fn save_plugin_config(
     config: serde_json::Value,
 ) -> AppResult<PluginDetail> {
     let detail = repository::get_plugin(db, plugin_id)?;
+    let config = config_with_schema_defaults(detail.manifest.config_schema.as_ref(), config);
     validate_config_against_schema(detail.manifest.config_schema.as_ref(), &config)?;
     let config_version = detail.manifest.config_version.unwrap_or(1);
     let next = repository::save_plugin_config(db, plugin_id, config_version, &config, &[])?;
@@ -789,6 +793,67 @@ fn ensure_runtime_enabled(manifest: &PluginManifest) -> AppResult<()> {
             "PLUGIN_UNSUPPORTED_RUNTIME",
             "native runtime is reserved for official plugins",
         )),
+    }
+}
+
+fn detail_with_config_defaults(mut detail: PluginDetail) -> PluginDetail {
+    detail.config =
+        config_with_schema_defaults(detail.manifest.config_schema.as_ref(), detail.config);
+    detail
+}
+
+fn config_with_schema_defaults(
+    schema: Option<&serde_json::Value>,
+    mut config: serde_json::Value,
+) -> serde_json::Value {
+    if let Some(schema) = schema {
+        apply_schema_defaults(&mut config, schema);
+    }
+    config
+}
+
+fn apply_schema_defaults(value: &mut serde_json::Value, schema: &serde_json::Value) {
+    match schema.get("type").and_then(serde_json::Value::as_str) {
+        Some("object") => {
+            if !value.is_object() {
+                if let Some(default) = schema.get("default") {
+                    *value = default.clone();
+                }
+            }
+            let Some(object) = value.as_object_mut() else {
+                return;
+            };
+            let Some(properties) = schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+            else {
+                return;
+            };
+            for (key, child_schema) in properties {
+                if !object.contains_key(key) {
+                    if let Some(default) = child_schema.get("default") {
+                        object.insert(key.clone(), default.clone());
+                    }
+                }
+                if let Some(child_value) = object.get_mut(key) {
+                    apply_schema_defaults(child_value, child_schema);
+                }
+            }
+        }
+        Some("array") => {
+            if !value.is_array() {
+                if let Some(default) = schema.get("default") {
+                    *value = default.clone();
+                }
+            }
+        }
+        Some(_) | None => {
+            if value.is_null() {
+                if let Some(default) = schema.get("default") {
+                    *value = default.clone();
+                }
+            }
+        }
     }
 }
 
@@ -988,8 +1053,11 @@ fn validate_enum(
 mod tests {
     use super::*;
     use crate::domain::plugins::{PluginInstallSource, PluginManifest, PluginStatus};
+    use crate::gateway::plugins::context::{GatewayPluginHookName, GatewayRequestHookInput};
+    use crate::gateway::plugins::pipeline::{GatewayPluginPipeline, GatewayPluginPipelineConfig};
     use std::io::Write;
     use std::path::Path;
+    use std::sync::Arc;
 
     fn manifest() -> PluginManifest {
         serde_json::from_value(serde_json::json!({
@@ -1354,6 +1422,84 @@ mod tests {
         assert!(installed
             .granted_permissions
             .contains(&"log.redact".to_string()));
+    }
+
+    #[test]
+    fn enabled_official_privacy_filter_fills_missing_runtime_config_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::init_for_tests(&dir.path().join("official-privacy-filter.db")).unwrap();
+        let installed_root = dir.path().join("installed");
+
+        install_official_plugin(
+            &db,
+            "official.privacy-filter",
+            env!("CARGO_PKG_VERSION"),
+            &installed_root,
+        )
+        .unwrap();
+        repository::save_plugin_config(
+            &db,
+            "official.privacy-filter",
+            1,
+            &serde_json::json!({}),
+            &[],
+        )
+        .unwrap();
+        enable_plugin(&db, "official.privacy-filter", env!("CARGO_PKG_VERSION")).unwrap();
+
+        let active = enabled_plugins_for_gateway(&db).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].summary.plugin_id, "official.privacy-filter");
+        assert_eq!(active[0].config["redactBeforeUpstream"], true);
+        assert_eq!(active[0].config["redactLogs"], true);
+        assert_eq!(active[0].config["profile"], "balanced");
+        assert!(active[0]
+            .config
+            .get("sensitiveTypes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| item == "cn_phone")));
+
+        let pipeline = GatewayPluginPipeline::for_tests(
+            active,
+            Arc::new(
+                crate::app::plugins::runtime_executor::RuntimeGatewayPluginExecutor::default(),
+            ),
+            GatewayPluginPipelineConfig::default(),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let output = rt
+            .block_on(
+                pipeline.run_request_hook(GatewayRequestHookInput {
+                    hook_name: GatewayPluginHookName::RequestAfterBodyRead,
+                    trace_id: "trace-privacy-filter-default-config".to_string(),
+                    cli_key: "codex".to_string(),
+                    method: axum::http::Method::POST,
+                    path: "/v1/responses".to_string(),
+                    query: None,
+                    headers: axum::http::HeaderMap::new(),
+                    body: axum::body::Bytes::from(
+                        serde_json::json!({
+                            "input": [{
+                                "type": "message",
+                                "role": "user",
+                                "content": [{
+                                    "type": "input_text",
+                                    "text": "你知道 13344441520 是哪里的手机号嘛"
+                                }]
+                            }]
+                        })
+                        .to_string(),
+                    ),
+                    requested_model: Some("gpt-test".to_string()),
+                }),
+            )
+            .unwrap();
+        let body = String::from_utf8(output.body.to_vec()).unwrap();
+        assert!(body.contains("[电话]"));
+        assert!(!body.contains("13344441520"));
     }
 
     fn local_package_manifest(plugin_id: &str, version: &str) -> serde_json::Value {
