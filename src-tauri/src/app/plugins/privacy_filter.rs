@@ -92,6 +92,7 @@ impl PrivacyFilter {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn redact(&self, text: &str) -> PrivacyFilterResult {
         self.redact_with_options(text, &PrivacyFilterOptions::default())
     }

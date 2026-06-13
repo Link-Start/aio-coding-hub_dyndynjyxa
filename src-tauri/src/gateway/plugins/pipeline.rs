@@ -222,7 +222,7 @@ impl GatewayPluginPipeline {
         for plugin in plugins.iter() {
             if self.should_skip_for_circuit(&plugin.summary.plugin_id) {
                 audit_events.push(audit_event(
-                    &plugin,
+                    plugin,
                     input.hook_name,
                     "plugin.hook.skipped",
                     "medium",
@@ -238,20 +238,20 @@ impl GatewayPluginPipeline {
                 ..input.clone()
             };
             let visible = current_input.visible_context(&plugin.granted_permissions);
-            let future = self.executor.execute_request_hook(&plugin, visible);
+            let future = self.executor.execute_request_hook(plugin, visible);
             let result = match tokio::time::timeout(self.config.hook_timeout, future).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(err)) => {
                     self.record_failure(&plugin.summary.plugin_id);
                     audit_events.push(audit_event(
-                        &plugin,
+                        plugin,
                         input.hook_name,
                         "plugin.hook.failed",
                         "high",
                         "Plugin hook failed",
                         serde_json::json!({ "error": err.to_string() }),
                     ));
-                    if failure_policy(&plugin, input.hook_name) == FailurePolicy::FailClosed {
+                    if failure_policy(plugin, input.hook_name) == FailurePolicy::FailClosed {
                         return Err(err.with_audit_events(audit_events));
                     }
                     continue;
@@ -265,14 +265,14 @@ impl GatewayPluginPipeline {
                         "plugin hook timed out"
                     );
                     audit_events.push(audit_event(
-                        &plugin,
+                        plugin,
                         input.hook_name,
                         "plugin.hook.failed",
                         "high",
                         "Plugin hook timed out",
                         serde_json::json!({ "failureKind": "timeout" }),
                     ));
-                    if failure_policy(&plugin, input.hook_name) == FailurePolicy::FailClosed {
+                    if failure_policy(plugin, input.hook_name) == FailurePolicy::FailClosed {
                         return Err(GatewayPluginError::new(
                             "PLUGIN_HOOK_TIMEOUT",
                             format!("plugin hook timed out: {}", plugin.summary.plugin_id),
@@ -290,14 +290,14 @@ impl GatewayPluginPipeline {
             ) {
                 self.record_failure(&plugin.summary.plugin_id);
                 audit_events.push(audit_event(
-                    &plugin,
+                    plugin,
                     input.hook_name,
                     "plugin.hook.failed",
                     "high",
                     "Plugin hook returned unauthorized mutations",
                     serde_json::json!({ "error": err.to_string() }),
                 ));
-                if failure_policy(&plugin, input.hook_name) == FailurePolicy::FailClosed {
+                if failure_policy(plugin, input.hook_name) == FailurePolicy::FailClosed {
                     return Err(err.with_audit_events(audit_events));
                 }
                 continue;
@@ -314,7 +314,7 @@ impl GatewayPluginPipeline {
                     .reason
                     .unwrap_or_else(|| "Plugin blocked gateway request".to_string());
                 audit_events.push(audit_event(
-                    &plugin,
+                    plugin,
                     input.hook_name,
                     "plugin.hook.blocked",
                     "high",
@@ -332,7 +332,7 @@ impl GatewayPluginPipeline {
                 });
             }
             audit_events.push(audit_event(
-                &plugin,
+                plugin,
                 input.hook_name,
                 "plugin.hook.completed",
                 "low",
@@ -361,7 +361,7 @@ impl GatewayPluginPipeline {
         for plugin in plugins.iter() {
             if self.should_skip_for_circuit(&plugin.summary.plugin_id) {
                 audit_events.push(audit_event(
-                    &plugin,
+                    plugin,
                     input.hook_name,
                     "plugin.hook.skipped",
                     "medium",
@@ -379,23 +379,23 @@ impl GatewayPluginPipeline {
             let visible = current_input.visible_context(&plugin.granted_permissions);
             let result = match tokio::time::timeout(
                 self.config.hook_timeout,
-                self.executor.execute_response_hook(&plugin, visible),
+                self.executor.execute_response_hook(plugin, visible),
             )
             .await
             {
                 Ok(Ok(result)) => result,
                 Ok(Err(err)) => {
                     self.record_failure(&plugin.summary.plugin_id);
-                    audit_events.push(failed_event(&plugin, input.hook_name, &err.to_string()));
-                    if failure_policy(&plugin, input.hook_name) == FailurePolicy::FailClosed {
+                    audit_events.push(failed_event(plugin, input.hook_name, &err.to_string()));
+                    if failure_policy(plugin, input.hook_name) == FailurePolicy::FailClosed {
                         return Err(err.with_audit_events(audit_events));
                     }
                     continue;
                 }
                 Err(_) => {
                     self.record_failure(&plugin.summary.plugin_id);
-                    audit_events.push(timeout_event(&plugin, input.hook_name));
-                    if failure_policy(&plugin, input.hook_name) == FailurePolicy::FailClosed {
+                    audit_events.push(timeout_event(plugin, input.hook_name));
+                    if failure_policy(plugin, input.hook_name) == FailurePolicy::FailClosed {
                         return Err(timeout_error(&plugin.summary.plugin_id)
                             .with_audit_events(audit_events));
                     }
@@ -409,8 +409,8 @@ impl GatewayPluginPipeline {
                 &result,
             ) {
                 self.record_failure(&plugin.summary.plugin_id);
-                audit_events.push(failed_event(&plugin, input.hook_name, &err.to_string()));
-                if failure_policy(&plugin, input.hook_name) == FailurePolicy::FailClosed {
+                audit_events.push(failed_event(plugin, input.hook_name, &err.to_string()));
+                if failure_policy(plugin, input.hook_name) == FailurePolicy::FailClosed {
                     return Err(err.with_audit_events(audit_events));
                 }
                 continue;
@@ -427,7 +427,7 @@ impl GatewayPluginPipeline {
                     .reason
                     .unwrap_or_else(|| "Plugin blocked gateway response".to_string());
                 audit_events.push(audit_event(
-                    &plugin,
+                    plugin,
                     input.hook_name,
                     "plugin.hook.blocked",
                     "high",
@@ -444,7 +444,7 @@ impl GatewayPluginPipeline {
                     audit_events,
                 });
             }
-            audit_events.push(completed_event(&plugin, input.hook_name));
+            audit_events.push(completed_event(plugin, input.hook_name));
         }
 
         Ok(GatewayResponseHookOutput {
@@ -467,7 +467,7 @@ impl GatewayPluginPipeline {
         for plugin in plugins.iter() {
             if self.should_skip_for_circuit(&plugin.summary.plugin_id) {
                 audit_events.push(audit_event(
-                    &plugin,
+                    plugin,
                     hook_name,
                     "plugin.hook.skipped",
                     "medium",
@@ -484,23 +484,23 @@ impl GatewayPluginPipeline {
             let visible = current_input.visible_context(&plugin.granted_permissions);
             let result = match tokio::time::timeout(
                 self.config.hook_timeout,
-                self.executor.execute_stream_hook(&plugin, visible),
+                self.executor.execute_stream_hook(plugin, visible),
             )
             .await
             {
                 Ok(Ok(result)) => result,
                 Ok(Err(err)) => {
                     self.record_failure(&plugin.summary.plugin_id);
-                    audit_events.push(failed_event(&plugin, hook_name, &err.to_string()));
-                    if failure_policy(&plugin, hook_name) == FailurePolicy::FailClosed {
+                    audit_events.push(failed_event(plugin, hook_name, &err.to_string()));
+                    if failure_policy(plugin, hook_name) == FailurePolicy::FailClosed {
                         return Err(err.with_audit_events(audit_events));
                     }
                     continue;
                 }
                 Err(_) => {
                     self.record_failure(&plugin.summary.plugin_id);
-                    audit_events.push(timeout_event(&plugin, hook_name));
-                    if failure_policy(&plugin, hook_name) == FailurePolicy::FailClosed {
+                    audit_events.push(timeout_event(plugin, hook_name));
+                    if failure_policy(plugin, hook_name) == FailurePolicy::FailClosed {
                         return Err(timeout_error(&plugin.summary.plugin_id)
                             .with_audit_events(audit_events));
                     }
@@ -512,8 +512,8 @@ impl GatewayPluginPipeline {
                 enforce_hook_result_permissions(hook_name, &plugin.granted_permissions, &result)
             {
                 self.record_failure(&plugin.summary.plugin_id);
-                audit_events.push(failed_event(&plugin, hook_name, &err.to_string()));
-                if failure_policy(&plugin, hook_name) == FailurePolicy::FailClosed {
+                audit_events.push(failed_event(plugin, hook_name, &err.to_string()));
+                if failure_policy(plugin, hook_name) == FailurePolicy::FailClosed {
                     return Err(err.with_audit_events(audit_events));
                 }
                 continue;
@@ -528,7 +528,7 @@ impl GatewayPluginPipeline {
                     .reason
                     .unwrap_or_else(|| "Plugin blocked gateway stream".to_string());
                 audit_events.push(audit_event(
-                    &plugin,
+                    plugin,
                     hook_name,
                     "plugin.hook.blocked",
                     "high",
@@ -565,7 +565,7 @@ impl GatewayPluginPipeline {
         for plugin in plugins.iter() {
             if self.should_skip_for_circuit(&plugin.summary.plugin_id) {
                 audit_events.push(audit_event(
-                    &plugin,
+                    plugin,
                     hook_name,
                     "plugin.hook.skipped",
                     "medium",
@@ -582,23 +582,23 @@ impl GatewayPluginPipeline {
             let visible = current_input.visible_context(&plugin.granted_permissions);
             let result = match tokio::time::timeout(
                 self.config.hook_timeout,
-                self.executor.execute_log_hook(&plugin, visible),
+                self.executor.execute_log_hook(plugin, visible),
             )
             .await
             {
                 Ok(Ok(result)) => result,
                 Ok(Err(err)) => {
                     self.record_failure(&plugin.summary.plugin_id);
-                    audit_events.push(failed_event(&plugin, hook_name, &err.to_string()));
-                    if failure_policy(&plugin, hook_name) == FailurePolicy::FailClosed {
+                    audit_events.push(failed_event(plugin, hook_name, &err.to_string()));
+                    if failure_policy(plugin, hook_name) == FailurePolicy::FailClosed {
                         return Err(err.with_audit_events(audit_events));
                     }
                     continue;
                 }
                 Err(_) => {
                     self.record_failure(&plugin.summary.plugin_id);
-                    audit_events.push(timeout_event(&plugin, hook_name));
-                    if failure_policy(&plugin, hook_name) == FailurePolicy::FailClosed {
+                    audit_events.push(timeout_event(plugin, hook_name));
+                    if failure_policy(plugin, hook_name) == FailurePolicy::FailClosed {
                         return Err(timeout_error(&plugin.summary.plugin_id)
                             .with_audit_events(audit_events));
                     }
@@ -610,8 +610,8 @@ impl GatewayPluginPipeline {
                 enforce_hook_result_permissions(hook_name, &plugin.granted_permissions, &result)
             {
                 self.record_failure(&plugin.summary.plugin_id);
-                audit_events.push(failed_event(&plugin, hook_name, &err.to_string()));
-                if failure_policy(&plugin, hook_name) == FailurePolicy::FailClosed {
+                audit_events.push(failed_event(plugin, hook_name, &err.to_string()));
+                if failure_policy(plugin, hook_name) == FailurePolicy::FailClosed {
                     return Err(err.with_audit_events(audit_events));
                 }
                 continue;
@@ -621,7 +621,7 @@ impl GatewayPluginPipeline {
             if let Some(next_message) = result.log_message {
                 message = next_message;
             }
-            audit_events.push(completed_event(&plugin, hook_name));
+            audit_events.push(completed_event(plugin, hook_name));
         }
 
         Ok(GatewayLogHookOutput {

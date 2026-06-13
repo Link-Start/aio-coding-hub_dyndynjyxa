@@ -34,6 +34,7 @@ impl GatewayPluginError {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn audit_events(&self) -> &[GatewayPluginAuditEvent] {
         &self.audit_events
     }
