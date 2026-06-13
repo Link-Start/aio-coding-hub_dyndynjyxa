@@ -12,6 +12,7 @@ use crate::gateway::proxy::handler::early_error::{
     build_early_error_log_ctx, early_error_contract, respond_early_error_with_enqueue,
     EarlyErrorKind,
 };
+use crate::gateway::proxy::http_util::maybe_gunzip_request_body_bytes_with_limit;
 use crate::gateway::proxy::{errors::error_response, GatewayErrorCode};
 use crate::gateway::util::{body_for_introspection, max_request_body_bytes};
 use axum::body::to_bytes;
@@ -55,6 +56,11 @@ impl BodyReaderMiddleware {
                 return MiddlewareAction::ShortCircuit(resp);
             }
         }
+        ctx.body_bytes = maybe_gunzip_request_body_bytes_with_limit(
+            ctx.body_bytes,
+            &mut ctx.headers,
+            request_body_limit,
+        );
 
         let introspection_body = body_for_introspection(&ctx.headers, &ctx.body_bytes);
         ctx.introspection_json =

@@ -52,9 +52,6 @@ impl PrivacyFilterOptions {
         let Some(types) = types else {
             return Self::default();
         };
-        if types.is_empty() {
-            return Self::default();
-        }
 
         let allowed_labels = types
             .iter()

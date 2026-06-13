@@ -154,6 +154,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn official_privacy_filter_schema_explains_strategy_groups_and_gitleaks_coverage() {
+        let fixture = official_plugin("official.privacy-filter").expect("official plugin fixture");
+        let schema = fixture
+            .manifest
+            .config_schema
+            .as_ref()
+            .expect("config schema");
+        let sensitive_description = schema
+            .pointer("/properties/sensitiveTypes/description")
+            .and_then(Value::as_str)
+            .expect("sensitiveTypes description");
+        assert!(sensitive_description.contains("200+ Gitleaks"));
+
+        let section_description = schema
+            .pointer("/x-aio-ui/sections/1/description")
+            .and_then(Value::as_str)
+            .expect("content section description");
+        assert!(section_description.contains("策略大类"));
+    }
+
+    #[test]
+    fn official_privacy_filter_loads_full_packaged_gitleaks_rule_set() {
+        let fixture = official_plugin("official.privacy-filter").expect("official plugin fixture");
+        let raw = std::fs::read_to_string(fixture.root_dir.join("rules/gitleaks.toml"))
+            .expect("read packaged gitleaks rules");
+        let filter = crate::app::plugins::privacy_filter::PrivacyFilter::from_gitleaks_toml(&raw)
+            .expect("compile packaged gitleaks rules");
+        let stats = filter.stats();
+        assert!(
+            stats.rules >= 200,
+            "packaged privacy-filter must expose the full gitleaks rule set, got {} compiled rules",
+            stats.rules
+        );
+    }
+
     #[tokio::test]
     async fn official_privacy_filter_plugin_redacts_pii_and_secrets_before_upstream_and_logs() {
         let plugin = enabled_official_plugin("official.privacy-filter");

@@ -122,6 +122,7 @@ where
 #[allow(clippy::await_holding_lock, clippy::field_reassign_with_default)]
 mod tests {
     use super::build_router;
+    use crate::app::plugins::{official, runtime_executor::RuntimeGatewayPluginExecutor};
     use crate::domain::plugins::{
         PluginDetail, PluginHook, PluginHostCompatibility, PluginInstallSource, PluginManifest,
         PluginPermissionRisk, PluginRuntime, PluginStatus, PluginSummary,
@@ -138,9 +139,12 @@ mod tests {
     use axum::body::HttpBody;
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Method, Request, StatusCode};
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
     use serde_json::Value;
     use std::collections::HashMap;
     use std::ffi::OsString;
+    use std::io::Write;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -329,6 +333,12 @@ mod tests {
         });
 
         (format!("http://{addr}"), rx, task)
+    }
+
+    fn gzip_bytes(input: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(input).expect("gzip write");
+        encoder.finish().expect("gzip finish")
     }
 
     async fn spawn_status_json_upstream(
@@ -1008,6 +1018,121 @@ mod tests {
             audit.trace_id.as_deref() == Some(request_log.trace_id.as_str())
                 && audit.event_type == "plugin.hook.completed"
         }));
+        upstream_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn official_privacy_filter_redacts_gzipped_codex_responses_before_upstream() {
+        let _env_lock = crate::test_support::test_env_lock();
+        let home = tempfile::tempdir().expect("home dir");
+        let _env = isolate_app_env(home.path());
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let mut app_settings = settings::AppSettings::default();
+        app_settings.failover_max_attempts_per_provider = 1;
+        app_settings.failover_max_providers_to_try = 1;
+        settings::write(&app_handle, &app_settings).expect("write settings");
+        crate::cli_proxy::set_enabled(&app_handle, "codex", true, "http://127.0.0.1:37123")
+            .expect("enable codex cli proxy");
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("privacy-filter-gzip-test.sqlite"))
+            .expect("init test db");
+        let fixture = official::official_plugin("official.privacy-filter")
+            .expect("official privacy filter fixture");
+        let permissions = fixture.manifest.permissions.clone();
+        let plugin = PluginDetail {
+            summary: PluginSummary {
+                id: 1,
+                plugin_id: fixture.manifest.id.clone(),
+                name: fixture.manifest.name.clone(),
+                current_version: Some(fixture.manifest.version.clone()),
+                status: PluginStatus::Enabled,
+                runtime: "native:privacyFilter".to_string(),
+                permission_risk: PluginPermissionRisk::High,
+                update_available: false,
+                last_error: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+            manifest: fixture.manifest,
+            install_source: PluginInstallSource::Official,
+            installed_dir: Some(fixture.root_dir.to_string_lossy().to_string()),
+            config: fixture.default_config,
+            granted_permissions: permissions.clone(),
+            pending_permissions: vec![],
+            audit_logs: vec![],
+            runtime_failures: vec![],
+        };
+        repository::insert_plugin(
+            &db,
+            repository::InsertPluginInput {
+                manifest: plugin.manifest.clone(),
+                install_source: PluginInstallSource::Official,
+                status: PluginStatus::Enabled,
+                installed_dir: plugin.installed_dir.clone(),
+            },
+        )
+        .expect("insert official privacy filter");
+        repository::save_plugin_permissions(&db, &plugin.summary.plugin_id, &permissions, &[])
+            .expect("grant official privacy filter permissions");
+
+        let (upstream_base_url, captured_rx, upstream_task) =
+            spawn_capturing_raw_upstream(r#"{"id":"stub-ok","object":"response","output":[]}"#)
+                .await;
+        let provider_id = insert_codex_provider(&db, upstream_base_url);
+        let plugin_pipeline = GatewayPluginPipeline::for_tests_shared(
+            vec![plugin],
+            Arc::new(RuntimeGatewayPluginExecutor::default()),
+            GatewayPluginPipelineConfig::default(),
+        );
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let router = build_router(gateway_state_with_plugin_pipeline(
+            app_handle,
+            db,
+            log_tx,
+            plugin_pipeline,
+        ));
+        let plain_body = serde_json::json!({
+            "model": "gpt-plugin",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "你知道 13344441520 是哪里的手机号嘛"
+                }]
+            }]
+        })
+        .to_string();
+        let compressed_body = gzip_bytes(plain_body.as_bytes());
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/codex/_aio/provider/{provider_id}/v1/responses"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_ENCODING, "gzip")
+            .body(Body::from(compressed_body))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let captured = tokio::time::timeout(Duration::from_secs(2), captured_rx)
+            .await
+            .expect("captured upstream request")
+            .expect("captured request");
+
+        assert!(!captured
+            .to_ascii_lowercase()
+            .contains("content-encoding: gzip"));
+        assert!(captured.contains("[电话]"));
+        assert!(!captured.contains("13344441520"));
+
+        let request_log = recv_terminal_request_log(&mut log_rx).await;
+        assert_eq!(request_log.status, Some(200));
+        assert!(!request_log.attempts_json.contains("13344441520"));
+
         upstream_task.abort();
     }
 

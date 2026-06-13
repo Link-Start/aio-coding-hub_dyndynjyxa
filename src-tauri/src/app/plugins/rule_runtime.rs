@@ -1321,6 +1321,30 @@ mod tests {
     }
 
     #[test]
+    fn official_privacy_filter_allows_disabling_all_sensitive_types() {
+        let executor = RuleRuntimeGatewayPluginExecutor::default();
+        let plugin = official_privacy_filter_detail(json!({
+            "redactBeforeUpstream": true,
+            "redactLogs": true,
+            "sensitiveTypes": []
+        }));
+
+        let result = executor
+            .execute_official_privacy_filter_plugin(
+                &plugin,
+                context_for_request_body_text(
+                    r#"{"messages":[{"role":"user","content":"email test@example.com phone 13344441520"}]}"#,
+                ),
+            )
+            .expect("privacy filter request hook");
+
+        assert!(
+            result.request_body.is_none(),
+            "empty sensitiveTypes should disable every configured strategy"
+        );
+    }
+
+    #[test]
     fn rule_plugin_runtime_replaces_regex_hits_at_json_path() {
         let runtime = RuleRuntime::from_value(json!({
             "rules": [{

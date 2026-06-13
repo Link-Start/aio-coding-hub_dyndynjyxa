@@ -90,6 +90,49 @@ pub(super) fn maybe_gunzip_response_body_bytes_with_limit(
     Bytes::from(out)
 }
 
+pub(super) fn maybe_gunzip_request_body_bytes_with_limit(
+    body: Bytes,
+    headers: &mut HeaderMap,
+    max_output_bytes: usize,
+) -> Bytes {
+    if !has_gzip_content_encoding(headers) {
+        return body;
+    }
+
+    if body.is_empty() {
+        headers.remove(header::CONTENT_ENCODING);
+        headers.remove(header::CONTENT_LENGTH);
+        return body;
+    }
+
+    let mut decoder = flate2::read::GzDecoder::new(body.as_ref());
+    let mut out: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match decoder.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if out.len().saturating_add(n) > max_output_bytes {
+                    tracing::warn!(
+                        max_output_bytes,
+                        "request gzip body exceeded decode limit; keeping encoded body"
+                    );
+                    return body;
+                }
+                out.extend_from_slice(&buf[..n]);
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to decode request gzip body; keeping encoded body");
+                return body;
+            }
+        }
+    }
+
+    headers.remove(header::CONTENT_ENCODING);
+    headers.remove(header::CONTENT_LENGTH);
+    Bytes::from(out)
+}
+
 pub(super) fn build_response(
     status: StatusCode,
     headers: &HeaderMap,
@@ -121,7 +164,9 @@ pub(super) fn build_response(
 
 #[cfg(test)]
 mod tests {
-    use super::maybe_gunzip_response_body_bytes_with_limit;
+    use super::{
+        maybe_gunzip_request_body_bytes_with_limit, maybe_gunzip_response_body_bytes_with_limit,
+    };
     use axum::body::Bytes;
     use axum::http::{header, HeaderMap, HeaderValue};
     use flate2::write::GzEncoder;
@@ -166,6 +211,34 @@ mod tests {
 
         let output =
             maybe_gunzip_response_body_bytes_with_limit(compressed.clone(), &mut headers, 1024);
+
+        assert_eq!(output, compressed);
+        assert_eq!(headers.get(header::CONTENT_ENCODING).unwrap(), "gzip");
+        assert!(headers.get(header::CONTENT_LENGTH).is_some());
+    }
+
+    #[test]
+    fn maybe_gunzip_request_decodes_within_limit_and_removes_encoding_headers() {
+        let plain = Bytes::from_static(br#"{"input":"hello"}"#);
+        let compressed = gzip_bytes(plain.as_ref());
+        let mut headers = gzip_headers(compressed.len());
+
+        let decoded =
+            maybe_gunzip_request_body_bytes_with_limit(compressed, &mut headers, plain.len());
+
+        assert_eq!(decoded, plain);
+        assert!(headers.get(header::CONTENT_ENCODING).is_none());
+        assert!(headers.get(header::CONTENT_LENGTH).is_none());
+    }
+
+    #[test]
+    fn maybe_gunzip_request_preserves_compressed_body_when_output_limit_exceeded() {
+        let plain = Bytes::from(vec![b'a'; 128 * 1024]);
+        let compressed = gzip_bytes(plain.as_ref());
+        let mut headers = gzip_headers(compressed.len());
+
+        let output =
+            maybe_gunzip_request_body_bytes_with_limit(compressed.clone(), &mut headers, 1024);
 
         assert_eq!(output, compressed);
         assert_eq!(headers.get(header::CONTENT_ENCODING).unwrap(), "gzip");
