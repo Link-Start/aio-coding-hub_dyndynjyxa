@@ -5,7 +5,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use std::io::Read;
+use std::io::{Read, Write};
 
 use super::GatewayErrorCode;
 
@@ -131,6 +131,49 @@ pub(super) fn maybe_gunzip_request_body_bytes_with_limit(
     headers.remove(header::CONTENT_ENCODING);
     headers.remove(header::CONTENT_LENGTH);
     Bytes::from(out)
+}
+
+pub(super) fn gunzip_bytes_with_limit(
+    input: &[u8],
+    max_output_bytes: usize,
+) -> Result<Bytes, String> {
+    let mut decoder = flate2::read::GzDecoder::new(input);
+    let mut out: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = decoder
+            .read(&mut buf)
+            .map_err(|err| format!("failed to decode gzip body: {err}"))?;
+        if n == 0 {
+            break;
+        }
+        if out.len().saturating_add(n) > max_output_bytes {
+            return Err(format!(
+                "gzip decoded body exceeded limit: limit={max_output_bytes} bytes"
+            ));
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    Ok(Bytes::from(out))
+}
+
+pub(super) fn gzip_bytes_with_limit(
+    input: &[u8],
+    max_output_bytes: usize,
+) -> Result<Bytes, String> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(input)
+        .map_err(|err| format!("failed to encode gzip body: {err}"))?;
+    let out = encoder
+        .finish()
+        .map_err(|err| format!("failed to finish gzip body: {err}"))?;
+    if out.len() > max_output_bytes {
+        return Err(format!(
+            "gzip encoded body exceeded limit: limit={max_output_bytes} bytes"
+        ));
+    }
+    Ok(Bytes::from(out))
 }
 
 pub(super) fn build_response(
