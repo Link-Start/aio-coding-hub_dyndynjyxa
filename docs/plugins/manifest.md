@@ -8,7 +8,7 @@ Required fields:
 - `name`: display name.
 - `version`: SemVer plugin version.
 - `apiVersion`: SemVer plugin API version.
-- `runtime`: `declarativeRules` or `wasm` for community plugins. `native` is reserved for built-in official plugins.
+- `runtime`: `declarativeRules` for active community plugins. `wasm` is policy-gated. `native` is reserved for built-in official plugins.
 - `hooks`: hook declarations.
 - `permissions`: requested permission names.
 - `hostCompatibility`: app and plugin API compatibility constraints.
@@ -34,3 +34,7 @@ Official-only native runtime example:
 Only built-in official plugins installed from the official source may use `native`.
 
 `hostCompatibility` must include `app` and `pluginApi`; `platforms` may restrict OS support.
+
+`configSchema` may include standard JSON Schema presentation fields and AIO `x-aio-ui` metadata. See [Config Schema](./config-schema.md).
+
+Active hooks in plugin API v1 are listed in [Hooks](./hooks.md). Reserved hooks and reserved permissions are documented for future compatibility but are rejected until the host implements them.

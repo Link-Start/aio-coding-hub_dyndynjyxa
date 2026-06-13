@@ -45,6 +45,14 @@ It also exports helpers:
 - `permissionRisk(permission)`
 - `validateManifest(manifest)`
 
+`create-aio-plugin` uses the SDK for manifest validation and adds local development commands over real plugin directories:
+
+```bash
+pnpm create-aio-plugin validate ./acme.redactor
+pnpm create-aio-plugin replay ./acme.redactor ./fixtures/request.json gateway.request.afterBodyRead
+pnpm create-aio-plugin pack ./acme.redactor
+```
+
 The Rust/WASM SDK exports:
 
 - `PluginManifest`
@@ -75,6 +83,19 @@ const manifest: PluginManifest = {
     app: ">=0.56.0 <1.0.0",
     pluginApi: "^1.0.0",
     platforms: ["macos", "windows", "linux"]
+  },
+  configSchema: {
+    type: "object",
+    required: ["enabled"],
+    properties: {
+      enabled: {
+        type: "boolean",
+        title: "启用处理",
+        description: "关闭后插件不会修改请求内容。",
+        default: true,
+        "x-aio-ui": { widget: "switch", order: 10 }
+      }
+    }
   }
 };
 
@@ -89,6 +110,18 @@ if (!result.ok) {
 The SDK is a contract package. It does not execute plugin code and does not grant host capabilities.
 
 The Rust/WASM SDK follows the same rule. It only serializes ABI-compatible JSON, defines hook result helpers, and provides the `aio_plugin_entrypoint!` macro for exporting `aio_plugin_handle`.
+
+`PluginHookResult` uses the same active mutation envelope as the gateway host:
+
+```ts
+const result = {
+  action: "replace",
+  requestBody: "{\"messages\":[]}",
+  headers: { "x-plugin-redacted": "1" }
+} satisfies PluginHookResult;
+```
+
+Use `requestBody`, `responseBody`, `streamChunk`, `logMessage`, and `headers` for replacements. `contextPatch` is not an active vNext gateway mutation field.
 
 Host enforcement still happens in the Rust application:
 
