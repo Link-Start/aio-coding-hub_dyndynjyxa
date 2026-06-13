@@ -30,6 +30,7 @@ pub(super) use request_fingerprint::RequestFingerprintMiddleware;
 pub(super) use runtime_settings_reader::RuntimeSettingsMiddleware;
 pub(super) use warmup_interceptor::WarmupInterceptorMiddleware;
 
+use crate::gateway::proxy::request_body::GatewayRequestBody;
 use crate::gateway::proxy::request_context::RequestContextParts;
 use crate::gateway::runtime::GatewayAppState;
 use crate::gateway::util::RequestedModelLocation;
@@ -69,6 +70,7 @@ pub(super) struct ProxyContext<R: tauri::Runtime = tauri::Wry> {
     pub(super) request_body: Option<Body>,
     pub(super) headers: HeaderMap,
     pub(super) body_bytes: Bytes,
+    pub(super) request_body_state: Option<GatewayRequestBody>,
     pub(super) introspection_json: Option<serde_json::Value>,
     pub(super) observe_request: bool,
     pub(super) strip_request_content_encoding_seed: bool,
@@ -125,6 +127,9 @@ impl<R: tauri::Runtime> ProxyContext<R> {
             session_bound_provider_id: self.session_bound_provider_id,
             headers: self.headers,
             body_bytes: self.body_bytes,
+            request_body_state: self
+                .request_body_state
+                .expect("request_body_state must be set by BodyReaderMiddleware"),
             introspection_json: self.introspection_json,
             strip_request_content_encoding_seed: self.strip_request_content_encoding_seed,
             special_settings: self.special_settings,

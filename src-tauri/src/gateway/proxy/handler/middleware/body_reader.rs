@@ -12,9 +12,9 @@ use crate::gateway::proxy::handler::early_error::{
     build_early_error_log_ctx, early_error_contract, respond_early_error_with_enqueue,
     EarlyErrorKind,
 };
-use crate::gateway::proxy::http_util::maybe_gunzip_request_body_bytes_with_limit;
+use crate::gateway::proxy::request_body::GatewayRequestBody;
 use crate::gateway::proxy::{errors::error_response, GatewayErrorCode};
-use crate::gateway::util::{body_for_introspection, max_request_body_bytes};
+use crate::gateway::util::max_request_body_bytes;
 use axum::body::to_bytes;
 use axum::http::StatusCode;
 
@@ -56,15 +56,11 @@ impl BodyReaderMiddleware {
                 return MiddlewareAction::ShortCircuit(resp);
             }
         }
-        ctx.body_bytes = maybe_gunzip_request_body_bytes_with_limit(
-            ctx.body_bytes,
-            &mut ctx.headers,
-            request_body_limit,
-        );
-
-        let introspection_body = body_for_introspection(&ctx.headers, &ctx.body_bytes);
+        let mut request_body_state =
+            GatewayRequestBody::from_wire(ctx.body_bytes.clone(), &ctx.headers, request_body_limit);
+        ctx.body_bytes = request_body_state.decoded_clone();
         ctx.introspection_json =
-            serde_json::from_slice::<serde_json::Value>(introspection_body.as_ref()).ok();
+            serde_json::from_slice::<serde_json::Value>(request_body_state.decoded().as_ref()).ok();
 
         let hook_input = GatewayRequestHookInput {
             hook_name: GatewayPluginHookName::RequestAfterBodyRead,
@@ -73,8 +69,8 @@ impl BodyReaderMiddleware {
             method: ctx.req_method.clone(),
             path: ctx.forwarded_path.clone(),
             query: ctx.query.clone(),
-            headers: ctx.headers.clone(),
-            body: ctx.body_bytes.clone(),
+            headers: request_body_state.semantic_headers(&ctx.headers),
+            body: request_body_state.decoded_clone(),
             requested_model: ctx.requested_model.clone(),
         };
         match ctx.state.plugin_pipeline.run_request_hook(hook_input).await {
@@ -103,10 +99,12 @@ impl BodyReaderMiddleware {
                     return MiddlewareAction::ShortCircuit(resp);
                 }
                 ctx.headers = output.headers;
-                ctx.body_bytes = output.body;
-                let introspection_body = body_for_introspection(&ctx.headers, &ctx.body_bytes);
-                ctx.introspection_json =
-                    serde_json::from_slice::<serde_json::Value>(introspection_body.as_ref()).ok();
+                request_body_state.replace_decoded(output.body);
+                ctx.body_bytes = request_body_state.decoded_clone();
+                ctx.introspection_json = serde_json::from_slice::<serde_json::Value>(
+                    request_body_state.decoded().as_ref(),
+                )
+                .ok();
             }
             Err(mut err) => {
                 crate::gateway::plugins::audit::persist_gateway_plugin_error_audit_events(
@@ -129,6 +127,7 @@ impl BodyReaderMiddleware {
             }
         }
 
+        ctx.request_body_state = Some(request_body_state);
         MiddlewareAction::Continue(Box::new(ctx))
     }
 }
