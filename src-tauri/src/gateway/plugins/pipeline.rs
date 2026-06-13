@@ -920,7 +920,10 @@ fn apply_header_patch(
 
 fn is_reserved_gateway_header(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
-    lower == "x-trace-id" || lower.starts_with("x-aio-")
+    matches!(
+        lower.as_str(),
+        "content-encoding" | "content-length" | "transfer-encoding" | "x-trace-id"
+    ) || lower.starts_with("x-aio-")
 }
 
 #[cfg(test)]
@@ -1570,6 +1573,15 @@ mod tests {
                     .headers
                     .insert("x-aio-gateway-forwarded".to_string(), "spoofed".to_string());
                 result
+                    .headers
+                    .insert("content-encoding".to_string(), "gzip".to_string());
+                result
+                    .headers
+                    .insert("content-length".to_string(), "999".to_string());
+                result
+                    .headers
+                    .insert("transfer-encoding".to_string(), "chunked".to_string());
+                result
             });
         let pipeline = GatewayPluginPipeline::for_tests(
             vec![plugin(
@@ -1587,6 +1599,43 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().starts_with("PLUGIN_RESERVED_HEADER:"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_pipeline_rejects_host_owned_framing_headers() {
+        for header_name in ["content-encoding", "content-length", "transfer-encoding"] {
+            let header_name = header_name.to_string();
+            let patched_header_name = header_name.clone();
+            let executor = InMemoryGatewayPluginExecutor::new().with_request_handler(
+                "plugin.headers",
+                move |_ctx| {
+                    let mut result = GatewayHookResult::continue_unchanged();
+                    result
+                        .headers
+                        .insert(patched_header_name.clone(), "plugin-value".to_string());
+                    result
+                },
+            );
+            let pipeline = GatewayPluginPipeline::for_tests(
+                vec![plugin(
+                    "plugin.headers",
+                    10,
+                    vec!["request.header.read", "request.header.write"],
+                )],
+                Arc::new(executor),
+                GatewayPluginPipelineConfig::default(),
+            );
+
+            let err = pipeline
+                .run_request_hook(request_input())
+                .await
+                .expect_err("host-owned framing header should be rejected");
+
+            assert!(
+                err.to_string().starts_with("PLUGIN_RESERVED_HEADER:"),
+                "unexpected error for {header_name}: {err}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
