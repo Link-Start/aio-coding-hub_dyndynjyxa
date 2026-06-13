@@ -1,6 +1,6 @@
 use aio_plugin_wasm_sdk::{
     handle_hook_bytes, pack_ptr_len, unpack_ptr_len, HookAction, HookRequest, HookResult,
-    PluginHostCompatibility, PluginHook, PluginManifest, PluginRuntime,
+    PluginHook, PluginHostCompatibility, PluginManifest, PluginRuntime,
 };
 use serde_json::json;
 
@@ -24,7 +24,11 @@ fn sdk_contract_serializes_manifest_and_hook_result_with_host_field_names() {
         host_compatibility: PluginHostCompatibility {
             app: ">=0.56.0 <1.0.0".to_string(),
             plugin_api: "^1.0.0".to_string(),
-            platforms: Some(vec!["macos".to_string(), "windows".to_string(), "linux".to_string()]),
+            platforms: Some(vec![
+                "macos".to_string(),
+                "windows".to_string(),
+                "linux".to_string(),
+            ]),
         },
         entry: Some("plugin.wasm".to_string()),
         config_schema: None,
@@ -37,10 +41,21 @@ fn sdk_contract_serializes_manifest_and_hook_result_with_host_field_names() {
     assert_eq!(json["runtime"]["abiVersion"], "1.0.0");
     assert_eq!(json["hostCompatibility"]["pluginApi"], "^1.0.0");
 
-    let result = HookResult::replace(json!({ "request": { "body": { "input": "[REDACTED]" } } }));
+    let result = HookResult::replace_request_body("{\"input\":\"[REDACTED]\"}");
     let result_json = serde_json::to_value(&result).expect("result serializes");
     assert_eq!(result_json["action"], "replace");
-    assert_eq!(result_json["contextPatch"]["request"]["body"]["input"], "[REDACTED]");
+    assert_eq!(result_json["requestBody"], "{\"input\":\"[REDACTED]\"}");
+    assert!(result_json.get("contextPatch").is_none());
+}
+
+#[test]
+fn hook_result_serializes_host_mutation_fields() {
+    let result = HookResult::replace_request_body("{\"messages\":[]}");
+    let json = serde_json::to_value(result).expect("serialize hook result");
+
+    assert_eq!(json["action"], "replace");
+    assert_eq!(json["requestBody"], "{\"messages\":[]}");
+    assert!(json.get("contextPatch").is_none());
 }
 
 #[test]

@@ -1,5 +1,6 @@
 import {
   type GatewayHookName,
+  type PluginHookResult,
   type PluginManifest,
   type PluginPermission,
   type PluginRuntime,
@@ -37,4 +38,41 @@ if (permissionRisk(permission) !== "high") {
 const result = validateManifest(manifest);
 if (!result.ok) {
   throw new Error(result.error.message);
+}
+
+const reservedHookManifest: PluginManifest = {
+  ...manifest,
+  hooks: [{ name: "gateway.request.received" }],
+  permissions: ["request.meta.read"],
+};
+const reservedHookResult = validateManifest(reservedHookManifest);
+if (reservedHookResult.ok || reservedHookResult.error.code !== "PLUGIN_RESERVED_HOOK") {
+  throw new Error("reserved hook should be rejected by SDK validation");
+}
+
+const reservedPermissionManifest: PluginManifest = {
+  ...manifest,
+  permissions: ["request.body.read", "network.fetch"],
+};
+const reservedPermissionResult = validateManifest(reservedPermissionManifest);
+if (
+  reservedPermissionResult.ok ||
+  reservedPermissionResult.error.code !== "PLUGIN_RESERVED_PERMISSION"
+) {
+  throw new Error("reserved permission should be rejected by SDK validation");
+}
+
+const replaceRequestResult: PluginHookResult = {
+  action: "replace",
+  requestBody: "{\"messages\":[]}",
+};
+
+const replaceResponseHeadersResult: PluginHookResult = {
+  action: "replace",
+  headers: { "x-plugin-redacted": "1" },
+  responseBody: "{\"ok\":true}",
+};
+
+if (replaceRequestResult.action !== "replace" || !replaceResponseHeadersResult.headers) {
+  throw new Error("host mutation hook results should be representable");
 }

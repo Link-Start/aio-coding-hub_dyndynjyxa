@@ -6,8 +6,8 @@ import {
   sign,
   verify,
 } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import type { GatewayHookName, PluginManifest, ValidationResult } from "@aio-coding-hub/plugin-sdk";
 import { validateManifest } from "@aio-coding-hub/plugin-sdk";
 import { createPluginScaffold, type ScaffoldFiles, type ScaffoldTemplate } from "./scaffold";
@@ -16,6 +16,8 @@ export type PackedPlugin = {
   bytes: Uint8Array;
   checksum: string;
 };
+
+export type PluginFileBytes = Record<string, Uint8Array>;
 
 export type SigningKeyPair = {
   privateKey: string;
@@ -27,29 +29,57 @@ export type CliIo = {
   error: (line: string) => void;
 };
 
-const USAGE = "Usage: create-aio-plugin <publisher.plugin-name> [rule|wasm]";
+const USAGE = [
+  "Usage:",
+  "  create-aio-plugin <publisher.plugin-name> [rule|wasm]",
+  "  create-aio-plugin validate <plugin-dir>",
+  "  create-aio-plugin replay <plugin-dir> <fixture.json> <hook>",
+  "  create-aio-plugin pack <plugin-dir>",
+].join("\n");
 
 export function runCreateAioPluginCli(args: string[], cwd: string, io: CliIo = console): number {
-  const [commandOrId, idOrTemplate, maybeTemplate, maybePublicKey] = args;
+  const [commandOrId, firstArg, secondArg, thirdArg] = args;
 
   if (!commandOrId) {
     io.error(USAGE);
     return 1;
   }
 
-  if (commandOrId === "validate" || commandOrId === "replay" || commandOrId === "pack") {
-    const sample = createPluginScaffold({
-      id: idOrTemplate ?? "acme.sample",
-      name: titleFromId(idOrTemplate ?? "acme.sample"),
-      template: "rule",
-    });
-    if (commandOrId === "validate") {
-      io.log(JSON.stringify(validatePluginFiles(sample)));
-    } else if (commandOrId === "replay") {
-      io.log(JSON.stringify(replayHook(sample, "gateway.request.afterBodyRead", {})));
-    } else {
-      const packed = packPlugin(sample);
-      const outputPath = join(cwd, `${idOrTemplate ?? "acme.sample"}.aio-plugin`);
+  if (commandOrId === "validate") {
+    try {
+      io.log(JSON.stringify(validatePluginDirectory(resolve(cwd, firstArg ?? "."))));
+      return 0;
+    } catch (error) {
+      io.error(`failed to validate plugin directory: ${errorMessage(error)}`);
+      return 1;
+    }
+  }
+
+  if (commandOrId === "replay") {
+    if (!firstArg || !secondArg || !thirdArg) {
+      io.error("Usage: create-aio-plugin replay <plugin-dir> <fixture.json> <hook>");
+      return 1;
+    }
+    try {
+      const files = readPluginDirectory(resolve(cwd, firstArg));
+      const fixture = JSON.parse(readFileSync(resolve(cwd, secondArg), "utf8")) as unknown;
+      io.log(JSON.stringify(replayHook(files, thirdArg as GatewayHookName, fixture)));
+      return 0;
+    } catch (error) {
+      io.error(`failed to replay plugin hook: ${errorMessage(error)}`);
+      return 1;
+    }
+  }
+
+  if (commandOrId === "pack") {
+    try {
+      const root = resolve(cwd, firstArg ?? ".");
+      const files = readPluginDirectoryBytes(root);
+      const manifest = JSON.parse(
+        textFromBytes(files["plugin.json"]) ?? "{}"
+      ) as Partial<PluginManifest>;
+      const packed = packPluginBytes(files);
+      const outputPath = join(cwd, `${manifest.id ?? firstArg ?? "plugin"}.aio-plugin`);
       writeFileSync(outputPath, packed.bytes);
       io.log(
         JSON.stringify({
@@ -58,31 +88,34 @@ export function runCreateAioPluginCli(args: string[], cwd: string, io: CliIo = c
           sizeBytes: packed.bytes.length,
         })
       );
+      return 0;
+    } catch (error) {
+      io.error(`failed to pack plugin directory: ${errorMessage(error)}`);
+      return 1;
     }
-    return 0;
   }
 
   if (commandOrId === "sign") {
-    const bytes = new TextEncoder().encode(idOrTemplate ?? "");
-    const keyPair = maybeTemplate
-      ? { privateKey: maybeTemplate, publicKey: createPublicKeyFromPrivateKey(maybeTemplate) }
+    const bytes = new TextEncoder().encode(firstArg ?? "");
+    const keyPair = secondArg
+      ? { privateKey: secondArg, publicKey: createPublicKeyFromPrivateKey(secondArg) }
       : generateSigningKeyPair();
     io.log(JSON.stringify(signPackage(bytes, keyPair.privateKey, keyPair.publicKey)));
     return 0;
   }
 
   if (commandOrId === "verify") {
-    if (!maybeTemplate || !maybePublicKey) {
+    if (!secondArg || !thirdArg) {
       io.error("Usage: create-aio-plugin verify <bytes> <signature> <publicKey>");
       return 1;
     }
-    const bytes = new TextEncoder().encode(idOrTemplate ?? "");
-    io.log(JSON.stringify(verifyPackage(bytes, maybeTemplate, maybePublicKey)));
+    const bytes = new TextEncoder().encode(firstArg ?? "");
+    io.log(JSON.stringify(verifyPackage(bytes, secondArg, thirdArg)));
     return 0;
   }
 
   const idArg = commandOrId;
-  const template = (idOrTemplate ?? "rule") as ScaffoldTemplate;
+  const template = (firstArg ?? "rule") as ScaffoldTemplate;
   const files = createPluginScaffold({
     id: idArg,
     name: titleFromId(idArg),
@@ -118,28 +151,99 @@ export function validatePluginFiles(files: ScaffoldFiles): ValidationResult {
   }
 }
 
+export function readPluginDirectory(root: string): ScaffoldFiles {
+  const files: ScaffoldFiles = {};
+  walkPluginDirectory(root, root, files);
+  return files;
+}
+
+export function readPluginDirectoryBytes(root: string): PluginFileBytes {
+  const files: PluginFileBytes = {};
+  walkPluginDirectoryBytes(root, root, files);
+  return files;
+}
+
+export function validatePluginDirectory(root: string): ValidationResult {
+  return validatePluginFiles(readPluginDirectory(root));
+}
+
+export function packPluginDirectory(root: string): PackedPlugin {
+  return packPluginBytes(readPluginDirectoryBytes(root));
+}
+
+function walkPluginDirectory(root: string, dir: string, files: ScaffoldFiles): void {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === ".git") continue;
+    const fullPath = join(dir, entry.name);
+    const relativePath = relative(root, fullPath).replace(/\\/g, "/");
+    if (entry.isDirectory()) {
+      walkPluginDirectory(root, fullPath, files);
+    } else if (entry.isFile()) {
+      files[relativePath] = readFileSync(fullPath, "utf8");
+    }
+  }
+}
+
+function walkPluginDirectoryBytes(root: string, dir: string, files: PluginFileBytes): void {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === ".git") continue;
+    const fullPath = join(dir, entry.name);
+    const relativePath = relative(root, fullPath).replace(/\\/g, "/");
+    if (entry.isDirectory()) {
+      walkPluginDirectoryBytes(root, fullPath, files);
+    } else if (entry.isFile()) {
+      files[relativePath] = new Uint8Array(readFileSync(fullPath));
+    }
+  }
+}
+
 export function replayHook(files: ScaffoldFiles, hook: GatewayHookName, context: unknown): unknown {
   const validation = validatePluginFiles(files);
   if (!validation.ok) {
     throw new Error(`${validation.error.code}: ${validation.error.message}`);
   }
-  return {
-    action: "pass",
-    hook,
-    contextPreview: typeof context === "string" ? context.slice(0, 64) : undefined,
-  };
+  const manifest = JSON.parse(files["plugin.json"] ?? "{}") as PluginManifest;
+  if (manifest.runtime.kind !== "declarativeRules") {
+    return { action: "pass" };
+  }
+  for (const rulePath of manifest.runtime.rules) {
+    const document = JSON.parse(files[rulePath] ?? '{"rules":[]}') as { rules?: unknown[] };
+    for (const rule of document.rules ?? []) {
+      const result = replayDeclarativeRule(rule, hook, context);
+      if (result.action !== "pass") return result;
+    }
+  }
+  return { action: "pass" };
 }
 
 export function packPlugin(files: ScaffoldFiles): PackedPlugin {
+  const bytes = createStoredZipBytes(textFilesToBytes(files));
+  return {
+    bytes,
+    checksum: sha256(bytes),
+  };
+}
+
+export function packPluginBytes(files: PluginFileBytes): PackedPlugin {
   const bytes = createStoredZipBytes(
     Object.entries(files)
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([path, content]) => [path, new TextEncoder().encode(content)] as const)
+      .map(([path, content]) => [path, content] as const)
   );
   return {
     bytes,
     checksum: sha256(bytes),
   };
+}
+
+function textFilesToBytes(files: ScaffoldFiles): readonly (readonly [string, Uint8Array])[] {
+  return Object.entries(files)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([path, content]) => [path, new TextEncoder().encode(content)] as const);
+}
+
+function textFromBytes(bytes: Uint8Array | undefined): string | undefined {
+  return bytes == null ? undefined : new TextDecoder().decode(bytes);
 }
 
 export function generateSigningKeyPair(): SigningKeyPair {
@@ -202,6 +306,261 @@ function titleFromId(id: string): string {
     .split("-")
     .map((part: string) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
     .join(" ");
+}
+
+function replayDeclarativeRule(
+  rawRule: unknown,
+  hook: GatewayHookName,
+  context: unknown
+): ReplayRuleResult {
+  const rule = asRecord(rawRule);
+  if (rule?.hook !== hook) return { action: "pass" };
+  const target = asRecord(rule.target);
+  const matcher = asRecord(rule.matcher) ?? asRecord(rule.match);
+  const action = asRecord(rule.action);
+  if (!target || !matcher || !action) return { action: "pass" };
+  const regex = compileReplayRegex(matcher);
+  if (!regex) return { action: "pass" };
+
+  const targetField = typeof target.field === "string" ? target.field : "request.body";
+  const text = textFromFixture(context, targetField);
+  if (!text) return { action: "pass" };
+
+  const path =
+    typeof target.jsonPath === "string"
+      ? target.jsonPath
+      : target.kind === "jsonPath" && typeof target.path === "string"
+        ? target.path
+        : undefined;
+  if (
+    !path ||
+    (target.field && target.field !== "request.body" && target.field !== "response.body")
+  ) {
+    return replayTextAction(text, regex, action, targetField);
+  }
+  return replayJsonPathAction(text, path, regex, action, targetField);
+}
+
+type ReplayRuleResult =
+  | { action: "pass" }
+  | { action: "replace"; requestBody: string }
+  | { action: "replace"; responseBody: string }
+  | { action: "replace"; streamChunk: string }
+  | { action: "replace"; logMessage: string }
+  | { action: "block"; reason: string }
+  | { action: "warn"; message: string };
+
+type JsonPathSegment = { kind: "key"; key: string } | { kind: "wildcardArray" };
+
+function compileReplayRegex(matcher: Record<string, unknown>): RegExp | null {
+  if (typeof matcher.regex !== "string") return null;
+  try {
+    return new RegExp(matcher.regex, matcher.caseSensitive === false ? "gi" : "g");
+  } catch {
+    return null;
+  }
+}
+
+function textFromFixture(context: unknown, field: string): string | undefined {
+  if (typeof context === "string") return context;
+  const contextRecord = asRecord(context);
+  if (field === "request.body") {
+    if (typeof contextRecord?.body === "string") return contextRecord.body;
+    const request = asRecord(contextRecord?.request);
+    return typeof request?.body === "string" ? request.body : undefined;
+  }
+  if (field === "response.body") {
+    const response = asRecord(contextRecord?.response);
+    return typeof response?.body === "string" ? response.body : undefined;
+  }
+  if (field === "stream.chunk") {
+    const stream = asRecord(contextRecord?.stream);
+    return typeof stream?.chunk === "string" ? stream.chunk : undefined;
+  }
+  if (field === "log.message") {
+    const log = asRecord(contextRecord?.log);
+    return typeof log?.message === "string" ? log.message : undefined;
+  }
+  return undefined;
+}
+
+function replayTextAction(
+  body: string,
+  regex: RegExp,
+  action: Record<string, unknown>,
+  field: string
+): ReplayRuleResult {
+  if (!regex.test(body)) return { action: "pass" };
+  regex.lastIndex = 0;
+  if (action.kind === "replace" && typeof action.replacement === "string") {
+    return replaceResult(field, body.replace(regex, action.replacement));
+  }
+  if (action.kind === "block" && typeof action.reason === "string") {
+    return { action: "block", reason: action.reason };
+  }
+  if (action.kind === "warn" && typeof action.message === "string") {
+    return { action: "warn", message: action.message };
+  }
+  if (
+    action.kind === "appendMessage" &&
+    typeof action.role === "string" &&
+    typeof action.content === "string"
+  ) {
+    return appendMessageToBody(body, action.role, action.content);
+  }
+  return { action: "pass" };
+}
+
+function replayJsonPathAction(
+  body: string,
+  path: string,
+  regex: RegExp,
+  action: Record<string, unknown>,
+  field: string
+): ReplayRuleResult {
+  const segments = parseReplayJsonPath(path);
+  if (!segments) return { action: "pass" };
+  let root: unknown;
+  try {
+    root = JSON.parse(body) as unknown;
+  } catch {
+    return { action: "pass" };
+  }
+
+  let matched = false;
+  let changed = false;
+  applyToJsonStrings(root, segments, (candidate) => {
+    if (!regex.test(candidate.value)) return;
+    regex.lastIndex = 0;
+    matched = true;
+    if (action.kind === "replace" && typeof action.replacement === "string") {
+      const next = candidate.value.replace(regex, action.replacement);
+      if (next !== candidate.value) {
+        candidate.set(next);
+        changed = true;
+      }
+    }
+  });
+
+  if (!matched) return { action: "pass" };
+  if (action.kind === "replace") {
+    return changed ? replaceResult(field, JSON.stringify(root)) : { action: "pass" };
+  }
+  if (action.kind === "block" && typeof action.reason === "string") {
+    return { action: "block", reason: action.reason };
+  }
+  if (action.kind === "warn" && typeof action.message === "string") {
+    return { action: "warn", message: action.message };
+  }
+  if (
+    action.kind === "appendMessage" &&
+    typeof action.role === "string" &&
+    typeof action.content === "string"
+  ) {
+    return appendMessageToBody(body, action.role, action.content);
+  }
+  return { action: "pass" };
+}
+
+function replaceResult(field: string, value: string): ReplayRuleResult {
+  switch (field) {
+    case "response.body":
+      return { action: "replace", responseBody: value };
+    case "stream.chunk":
+      return { action: "replace", streamChunk: value };
+    case "log.message":
+      return { action: "replace", logMessage: value };
+    case "request.body":
+    default:
+      return { action: "replace", requestBody: value };
+  }
+}
+
+function appendMessageToBody(body: string, role: string, content: string): ReplayRuleResult {
+  if (role !== "system" && role !== "developer") return { action: "pass" };
+  if (!content.trim()) return { action: "pass" };
+  let root: unknown;
+  try {
+    root = JSON.parse(body) as unknown;
+  } catch {
+    return { action: "pass" };
+  }
+  const record = asRecord(root);
+  const messages = Array.isArray(record?.messages) ? record.messages : null;
+  if (!messages) return { action: "pass" };
+  messages.push({ role, content });
+  return { action: "replace", requestBody: JSON.stringify(root) };
+}
+
+function parseReplayJsonPath(path: string): JsonPathSegment[] | null {
+  if (!path.startsWith("$")) return null;
+  const segments: JsonPathSegment[] = [];
+  let index = 1;
+  while (index < path.length) {
+    if (path[index] === ".") {
+      index += 1;
+      const start = index;
+      while (index < path.length && path[index] !== "." && path[index] !== "[") {
+        index += 1;
+      }
+      if (start === index) return null;
+      const key = path.slice(start, index);
+      if (key.includes('"') || key.includes("'")) return null;
+      segments.push({ kind: "key", key });
+      continue;
+    }
+    if (path.slice(index, index + 3) === "[*]") {
+      segments.push({ kind: "wildcardArray" });
+      index += 3;
+      continue;
+    }
+    return null;
+  }
+  return segments;
+}
+
+function applyToJsonStrings(
+  value: unknown,
+  path: JsonPathSegment[],
+  visit: (candidate: { value: string; set: (next: string) => void }) => void
+): void {
+  if (path.length === 0) return;
+  const [segment, ...rest] = path;
+  if (!segment) return;
+
+  if (segment.kind === "key") {
+    const record = asRecord(value);
+    if (!record || !(segment.key in record)) return;
+    if (rest.length === 0) {
+      const current = record[segment.key];
+      if (typeof current === "string") {
+        visit({
+          value: current,
+          set: (next) => {
+            record[segment.key] = next;
+          },
+        });
+      }
+      return;
+    }
+    applyToJsonStrings(record[segment.key], rest, visit);
+    return;
+  }
+
+  if (!Array.isArray(value)) return;
+  for (const item of value) {
+    applyToJsonStrings(item, rest, visit);
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function sha256(bytes: Uint8Array): string {

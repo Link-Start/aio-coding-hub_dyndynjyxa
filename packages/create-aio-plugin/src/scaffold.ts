@@ -37,8 +37,8 @@ function ruleTemplate(id: string, name: string): ScaffoldFiles {
           {
             id: "redact-placeholder",
             hook: "gateway.request.afterBodyRead",
-            target: { kind: "jsonPath", path: "$.messages[*].content" },
-            matcher: { regex: "SECRET_[A-Za-z0-9_]+", caseSensitive: true },
+            target: { field: "request.body", jsonPath: "$.messages[*].content" },
+            match: { regex: "SECRET_[A-Za-z0-9_]+", caseSensitive: true },
             action: { kind: "replace", replacement: "[REDACTED]" },
           },
         ],
@@ -67,7 +67,7 @@ function wasmTemplate(id: string, name: string): ScaffoldFiles {
   return {
     "plugin.json": `${JSON.stringify(manifest, null, 2)}\n`,
     "src/lib.rs": `#[no_mangle]\npub extern "C" fn aio_plugin_handle(_ptr: i32, _len: i32) -> i64 {\n    0\n}\n`,
-    "README.md": `# ${name}\n\nPlugin ID: \`${id}\`.\n\nWASM marketplace execution is disabled by default until host policy explicitly enables it.\n`,
+    "README.md": `# ${name}\n\nPlugin ID: \`${id}\`.\n\nThis template packages a WASM artifact and validates the ABI, but gateway execution remains policy-gated. The host rejects enablement with PLUGIN_RUNTIME_DISABLED until WASM execution is enabled by host policy.\n`,
   };
 }
 

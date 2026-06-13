@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,11 +29,17 @@ pub struct PluginManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum PluginRuntime {
-    DeclarativeRules { rules: Vec<String> },
+    DeclarativeRules {
+        rules: Vec<String>,
+    },
     Wasm {
         #[serde(rename = "abiVersion")]
         abi_version: String,
-        #[serde(rename = "memoryLimitBytes", default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "memoryLimitBytes",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         memory_limit_bytes: Option<u64>,
     },
 }
@@ -79,7 +86,15 @@ pub struct HookResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_patch: Option<Value>,
+    pub request_body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_chunk: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audit: Vec<Value>,
 }
@@ -99,7 +114,11 @@ impl HookResult {
             action: HookAction::Pass,
             message: None,
             reason: None,
-            context_patch: None,
+            request_body: None,
+            response_body: None,
+            stream_chunk: None,
+            log_message: None,
+            headers: None,
             audit: Vec::new(),
         }
     }
@@ -109,7 +128,11 @@ impl HookResult {
             action: HookAction::Warn,
             message: Some(message.into()),
             reason: None,
-            context_patch: None,
+            request_body: None,
+            response_body: None,
+            stream_chunk: None,
+            log_message: None,
+            headers: None,
             audit: Vec::new(),
         }
     }
@@ -119,19 +142,62 @@ impl HookResult {
             action: HookAction::Block,
             message: None,
             reason: Some(reason.into()),
-            context_patch: None,
+            request_body: None,
+            response_body: None,
+            stream_chunk: None,
+            log_message: None,
+            headers: None,
             audit: Vec::new(),
         }
     }
 
-    pub fn replace(context_patch: Value) -> Self {
+    fn replace() -> Self {
         Self {
             action: HookAction::Replace,
             message: None,
             reason: None,
-            context_patch: Some(context_patch),
+            request_body: None,
+            response_body: None,
+            stream_chunk: None,
+            log_message: None,
+            headers: None,
             audit: Vec::new(),
         }
+    }
+
+    pub fn replace_request_body(body: impl Into<String>) -> Self {
+        Self {
+            request_body: Some(body.into()),
+            ..Self::replace()
+        }
+    }
+
+    pub fn replace_response_body(body: impl Into<String>) -> Self {
+        Self {
+            response_body: Some(body.into()),
+            ..Self::replace()
+        }
+    }
+
+    pub fn replace_stream_chunk(chunk: impl Into<String>) -> Self {
+        Self {
+            stream_chunk: Some(chunk.into()),
+            ..Self::replace()
+        }
+    }
+
+    pub fn replace_log_message(message: impl Into<String>) -> Self {
+        Self {
+            log_message: Some(message.into()),
+            ..Self::replace()
+        }
+    }
+
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers
+            .get_or_insert_with(BTreeMap::new)
+            .insert(name.into(), value.into());
+        self
     }
 }
 
@@ -144,7 +210,8 @@ pub fn unpack_ptr_len(value: u64) -> (u32, u32) {
 }
 
 pub fn serialize_hook_result(result: &HookResult) -> Vec<u8> {
-    serde_json::to_vec(result).unwrap_or_else(|_| br#"{"action":"block","reason":"serialize error"}"#.to_vec())
+    serde_json::to_vec(result)
+        .unwrap_or_else(|_| br#"{"action":"block","reason":"serialize error"}"#.to_vec())
 }
 
 pub fn handle_hook_bytes<F>(input: &[u8], handler: F) -> Vec<u8>
@@ -169,9 +236,8 @@ macro_rules! aio_plugin_entrypoint {
     ($handler:path) => {
         #[no_mangle]
         pub extern "C" fn aio_plugin_handle(ptr: i32, len: i32) -> i64 {
-            let input = unsafe {
-                core::slice::from_raw_parts(ptr as *const u8, len.max(0) as usize)
-            };
+            let input =
+                unsafe { core::slice::from_raw_parts(ptr as *const u8, len.max(0) as usize) };
             let output = $crate::handle_hook_bytes(input, $handler);
             $crate::leak_output_bytes(output) as i64
         }

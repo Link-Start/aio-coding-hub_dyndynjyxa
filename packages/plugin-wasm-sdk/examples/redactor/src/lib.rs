@@ -1,5 +1,4 @@
 use aio_plugin_wasm_sdk::{aio_plugin_entrypoint, HookRequest, HookResult};
-use serde_json::json;
 
 fn handle(request: HookRequest) -> HookResult {
     let Some(input) = request
@@ -14,13 +13,11 @@ fn handle(request: HookRequest) -> HookResult {
         return HookResult::pass();
     }
 
-    HookResult::replace(json!({
-        "request": {
-            "body": {
-                "input": input.replace("SECRET_", "[REDACTED]_")
-            }
-        }
-    }))
+    HookResult::replace_request_body(format!(
+        "{{\"input\":{}}}",
+        serde_json::to_string(&input.replace("SECRET_", "[REDACTED]_"))
+            .unwrap_or_else(|_| "\"[REDACTED]\"".to_string())
+    ))
 }
 
 aio_plugin_entrypoint!(handle);
@@ -28,6 +25,7 @@ aio_plugin_entrypoint!(handle);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn redactor_example_replaces_secret_marker() {
@@ -40,9 +38,9 @@ mod tests {
             context: json!({ "request": { "body": { "input": "hello SECRET_TOKEN" } } }),
         });
 
-        assert_eq!(
-            result.context_patch.unwrap()["request"]["body"]["input"],
-            "hello [REDACTED]_TOKEN"
-        );
+        let body: serde_json::Value =
+            serde_json::from_str(result.request_body.as_deref().expect("request body"))
+                .expect("request body json");
+        assert_eq!(body["input"], "hello [REDACTED]_TOKEN");
     }
 }

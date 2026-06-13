@@ -1,15 +1,19 @@
 export type PluginPermissionRisk = "low" | "medium" | "high" | "critical";
 
-export type GatewayHookName =
-  | "gateway.request.received"
+export type ActiveGatewayHookName =
   | "gateway.request.afterBodyRead"
-  | "gateway.request.beforeProviderResolution"
   | "gateway.request.beforeSend"
-  | "gateway.response.headers"
   | "gateway.response.chunk"
   | "gateway.response.after"
   | "gateway.error"
   | "log.beforePersist";
+
+export type ReservedGatewayHookName =
+  | "gateway.request.received"
+  | "gateway.request.beforeProviderResolution"
+  | "gateway.response.headers";
+
+export type GatewayHookName = ActiveGatewayHookName | ReservedGatewayHookName;
 
 export type PluginPermission =
   | "request.meta.read"
@@ -77,18 +81,65 @@ export type PluginManifest = {
   category?: string;
 };
 
+export type GatewayNormalizedMessage = {
+  role: string;
+  text: string;
+  source: string;
+};
+
+export type GatewayVisibleRequestContext = {
+  cliKey?: string;
+  method?: string;
+  path?: string;
+  query?: string;
+  headers?: Record<string, JsonValue>;
+  body?: string;
+  normalizedMessages?: GatewayNormalizedMessage[];
+  requestedModel?: string;
+};
+
+export type GatewayVisibleResponseContext = {
+  status?: number;
+  headers?: Record<string, JsonValue>;
+  body?: string;
+};
+
+export type GatewayVisibleStreamContext = {
+  sequence?: number;
+  chunk?: string;
+};
+
+export type GatewayVisibleLogContext = {
+  message?: string;
+};
+
+export type GatewayVisibleHookContext = {
+  request?: GatewayVisibleRequestContext;
+  response?: GatewayVisibleResponseContext;
+  stream?: GatewayVisibleStreamContext;
+  log?: GatewayVisibleLogContext;
+};
+
 export type PluginHookContext = {
   hook: GatewayHookName;
   traceId?: string;
   config: JsonValue;
-  context: JsonValue;
+  context: GatewayVisibleHookContext;
 };
 
 export type PluginHookResult =
   | { action: "pass"; audit?: JsonValue[] }
   | { action: "warn"; message: string; audit?: JsonValue[] }
   | { action: "block"; reason: string; audit?: JsonValue[] }
-  | { action: "replace"; contextPatch: JsonValue; audit?: JsonValue[] };
+  | {
+      action: "replace";
+      requestBody?: string;
+      responseBody?: string;
+      streamChunk?: string;
+      logMessage?: string;
+      headers?: Record<string, string>;
+      audit?: JsonValue[];
+    };
 
 export type ValidationResult =
   | { ok: true }
@@ -101,8 +152,8 @@ const PERMISSION_RISKS: Record<PluginPermission, PluginPermissionRisk> = {
   "request.header.write": "high",
   "request.body.read": "high",
   "request.body.write": "high",
-  "response.header.read": "medium",
-  "response.header.write": "high",
+  "response.header.read": "low",
+  "response.header.write": "medium",
   "response.body.read": "high",
   "response.body.write": "high",
   "stream.inspect": "high",
@@ -110,8 +161,8 @@ const PERMISSION_RISKS: Record<PluginPermission, PluginPermissionRisk> = {
   "log.redact": "medium",
   "plugin.storage": "medium",
   "network.fetch": "high",
-  "file.read": "critical",
-  "file.write": "critical",
+  "file.read": "high",
+  "file.write": "high",
   "secret.read": "critical",
 };
 
@@ -127,9 +178,23 @@ const KNOWN_HOOKS = new Set<GatewayHookName>([
   "log.beforePersist",
 ]);
 
+const RESERVED_HOOKS = new Set<GatewayHookName>([
+  "gateway.request.received",
+  "gateway.request.beforeProviderResolution",
+  "gateway.response.headers",
+]);
+
 const KNOWN_PERMISSIONS = new Set<PluginPermission>(
   Object.keys(PERMISSION_RISKS) as PluginPermission[]
 );
+
+const RESERVED_PERMISSIONS = new Set<PluginPermission>([
+  "plugin.storage",
+  "network.fetch",
+  "file.read",
+  "file.write",
+  "secret.read",
+]);
 
 export function permissionRisk(permission: PluginPermission): PluginPermissionRisk {
   return PERMISSION_RISKS[permission];
@@ -148,19 +213,48 @@ export function validateManifest(manifest: PluginManifest): ValidationResult {
   if (manifest.runtime.kind === "wasm" && !isSemver(manifest.runtime.abiVersion)) {
     return invalid("PLUGIN_INVALID_RUNTIME", "wasm runtime requires SemVer abiVersion");
   }
+  if (manifest.runtime.kind === "wasm" && semverMajor(manifest.runtime.abiVersion) !== 1) {
+    return invalid("PLUGIN_UNSUPPORTED_WASM_ABI", "wasm abiVersion must be compatible with v1");
+  }
+  if (!isSimpleCompatibilityRange(manifest.hostCompatibility.app)) {
+    return invalid(
+      "PLUGIN_INVALID_HOST_COMPATIBILITY",
+      "hostCompatibility.app must be a non-empty simple SemVer range"
+    );
+  }
+  if (!supportsPluginApiV1(manifest.hostCompatibility.pluginApi)) {
+    return invalid(
+      "PLUGIN_UNSUPPORTED_PLUGIN_API",
+      "hostCompatibility.pluginApi must support plugin API v1"
+    );
+  }
   if (manifest.hooks.length === 0) {
     return invalid("PLUGIN_MISSING_HOOKS", "plugin must declare at least one hook");
   }
   for (const hook of manifest.hooks) {
+    if (RESERVED_HOOKS.has(hook.name)) {
+      return invalid(
+        "PLUGIN_RESERVED_HOOK",
+        `hook is reserved for a future host integration and is not active in plugin API v1: ${hook.name}`
+      );
+    }
     if (!KNOWN_HOOKS.has(hook.name)) {
       return invalid("PLUGIN_UNKNOWN_HOOK", `unknown hook: ${hook.name}`);
     }
   }
   for (const permission of manifest.permissions) {
+    if (RESERVED_PERMISSIONS.has(permission)) {
+      return invalid(
+        "PLUGIN_RESERVED_PERMISSION",
+        `permission is reserved for a future host-mediated API and is not active in plugin API v1: ${permission}`
+      );
+    }
     if (!KNOWN_PERMISSIONS.has(permission)) {
       return invalid("PLUGIN_UNKNOWN_PERMISSION", `unknown permission: ${permission}`);
     }
   }
+  const permissionSetError = validatePermissionSet(manifest.permissions);
+  if (permissionSetError) return permissionSetError;
   return { ok: true };
 }
 
@@ -170,4 +264,42 @@ function invalid(code: string, message: string): ValidationResult {
 
 function isSemver(value: string): boolean {
   return /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(value);
+}
+
+function semverMajor(value: string): number | null {
+  const major = /^(\d+)\./.exec(value)?.[1];
+  return major == null ? null : Number.parseInt(major, 10);
+}
+
+function isSimpleCompatibilityRange(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return /^(?:[<>=^~]*\s*\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?|\d+\.x\.x)(?:\s+(?:[<>=^~]*\s*\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?|\d+\.x\.x))*$/.test(
+    trimmed
+  );
+}
+
+function supportsPluginApiV1(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed === "^1.0.0" || trimmed === "1.x.x" || trimmed === ">=1.0.0 <2.0.0";
+}
+
+function validatePermissionSet(permissions: PluginPermission[]): ValidationResult | null {
+  const set = new Set(permissions);
+  if (set.has("request.body.write") && !set.has("request.body.read")) {
+    return invalid(
+      "PLUGIN_INVALID_PERMISSION_SET",
+      "request.body.write requires request.body.read"
+    );
+  }
+  if (set.has("response.body.write") && !set.has("response.body.read")) {
+    return invalid(
+      "PLUGIN_INVALID_PERMISSION_SET",
+      "response.body.write requires response.body.read"
+    );
+  }
+  if (set.has("stream.modify") && !set.has("stream.inspect")) {
+    return invalid("PLUGIN_INVALID_PERMISSION_SET", "stream.modify requires stream.inspect");
+  }
+  return null;
 }
