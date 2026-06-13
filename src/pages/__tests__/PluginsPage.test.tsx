@@ -11,6 +11,7 @@ import { createTestQueryClient } from "../../test/utils/reactQuery";
 import {
   usePluginDisableMutation,
   usePluginEnableMutation,
+  usePluginGrantPermissionsMutation,
   usePluginInstallFromFileMutation,
   usePluginInstallOfficialMutation,
   usePluginQuery,
@@ -47,6 +48,7 @@ vi.mock("../../query/plugins", async () => {
     usePluginUpdateFromFileMutation: vi.fn(),
     usePluginRollbackMutation: vi.fn(),
     usePluginEnableMutation: vi.fn(),
+    usePluginGrantPermissionsMutation: vi.fn(),
     usePluginDisableMutation: vi.fn(),
     usePluginUninstallMutation: vi.fn(),
   };
@@ -55,8 +57,8 @@ vi.mock("../../query/plugins", async () => {
 function summary(overrides: Partial<PluginSummary> = {}): PluginSummary {
   return {
     id: 1,
-    plugin_id: "official.prompt-optimizer",
-    name: "Prompt Optimizer",
+    plugin_id: "community.prompt-helper",
+    name: "Community Prompt Helper",
     current_version: "1.0.0",
     status: "disabled",
     runtime: "declarativeRules",
@@ -94,7 +96,7 @@ function detail(overrides: Partial<PluginDetail> = {}): PluginDetail {
         },
       },
     },
-    install_source: "official",
+    install_source: "local",
     installed_dir: null,
     config: { mode: "append_instruction" },
     granted_permissions: ["request.body.read"],
@@ -141,6 +143,7 @@ describe("pages/PluginsPage", () => {
     vi.mocked(usePluginUpdateFromFileMutation).mockReturnValue(mutation() as any);
     vi.mocked(usePluginRollbackMutation).mockReturnValue(mutation() as any);
     vi.mocked(usePluginEnableMutation).mockReturnValue(mutation() as any);
+    vi.mocked(usePluginGrantPermissionsMutation).mockReturnValue(mutation() as any);
     vi.mocked(usePluginDisableMutation).mockReturnValue(mutation() as any);
     vi.mocked(usePluginUninstallMutation).mockReturnValue(mutation() as any);
     vi.mocked(usePluginQuery).mockReturnValue({
@@ -161,16 +164,91 @@ describe("pages/PluginsPage", () => {
 
     renderWithProviders(<PluginsPage />);
 
-    expect(screen.getAllByText("Prompt Optimizer").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("official.prompt-optimizer").length).toBeGreaterThan(0);
-    expect(screen.getByText("declarativeRules")).toBeInTheDocument();
-    expect(screen.getByText("high")).toBeInTheDocument();
+    expect(screen.getAllByText("Community Prompt Helper").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("community.prompt-helper").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("规则插件").length).toBeGreaterThan(0);
+    expect(screen.getByText("高风险")).toBeInTheDocument();
     expect(screen.getByText("可更新")).toBeInTheDocument();
     expect(screen.getByText("Last failure")).toBeInTheDocument();
     expect(screen.getByText("gateway.request.afterBodyRead")).toBeInTheDocument();
     expect(screen.getByText("request.body.write")).toBeInTheDocument();
-    expect(screen.getByText("未授权")).toBeInTheDocument();
+    expect(screen.getByText("待允许")).toBeInTheDocument();
     expect(screen.getByText("Plugin installed")).toBeInTheDocument();
+  });
+
+  it("presents plugin value, data access, settings, and developer metadata in that order", () => {
+    vi.mocked(usePluginsListQuery).mockReturnValue({
+      data: [summary()],
+      isLoading: false,
+      isFetching: false,
+      error: null,
+    } as any);
+
+    renderWithProviders(<PluginsPage />);
+
+    expect(screen.getByText("这个插件会做什么")).toBeInTheDocument();
+    expect(screen.getByText("数据访问")).toBeInTheDocument();
+    expect(screen.getByText("设置")).toBeInTheDocument();
+    expect(screen.getByText("开发者信息")).toBeInTheDocument();
+    expect(screen.getByText("读取你发送给模型的内容")).toBeInTheDocument();
+  });
+
+  it("uses the generic schema form for official plugin configuration", () => {
+    vi.mocked(usePluginsListQuery).mockReturnValue({
+      data: [
+        summary({
+          plugin_id: "official.privacy-filter",
+          name: "Privacy Filter",
+          runtime: "native:privacyFilter",
+        }),
+      ],
+      isLoading: false,
+      isFetching: false,
+      error: null,
+    } as any);
+    vi.mocked(usePluginQuery).mockReturnValue({
+      data: detail({
+        summary: summary({
+          plugin_id: "official.privacy-filter",
+          name: "Privacy Filter",
+          runtime: "native:privacyFilter",
+        }),
+        manifest: {
+          ...detail().manifest,
+          id: "official.privacy-filter",
+          name: "Privacy Filter",
+          runtime: { kind: "native", engine: "privacyFilter" },
+          permissions: ["request.body.read", "request.body.write", "log.redact"],
+          configSchema: {
+            type: "object",
+            properties: {
+              sensitiveTypes: {
+                type: "array",
+                title: "要保护的内容",
+                items: {
+                  type: "string",
+                  enum: ["email", "cn_phone"],
+                  "x-aio-ui": {
+                    enumLabels: { email: "邮箱地址", cn_phone: "中国手机号" },
+                  },
+                },
+                "x-aio-ui": { widget: "checkboxGroup" },
+              },
+            },
+          },
+        },
+        config: { sensitiveTypes: ["email", "cn_phone"] },
+        granted_permissions: ["request.body.read", "request.body.write", "log.redact"],
+      }),
+      isLoading: false,
+      isFetching: false,
+      error: null,
+    } as any);
+
+    renderWithProviders(<PluginsPage />);
+
+    expect(screen.getByLabelText("邮箱地址")).toBeChecked();
+    expect(screen.queryByLabelText("sensitiveTypes")).not.toBeInTheDocument();
   });
 
   it("shows empty and error states", () => {
@@ -216,17 +294,70 @@ describe("pages/PluginsPage", () => {
     vi.mocked(openDesktopSinglePath).mockResolvedValue("/tmp/plugin.json");
 
     renderWithProviders(<PluginsPage />);
-    fireEvent.click(screen.getByRole("button", { name: "本地导入" }));
+    fireEvent.click(screen.getByRole("button", { name: "导入 .aio-plugin" }));
     expect(screen.getByRole("button", { name: /Privacy Filter/ })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Safety Detector/ }));
+    expect(screen.queryByRole("button", { name: /Safety Detector/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Prompt Optimizer/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Sensitive Data Redactor/ })
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Privacy Filter/ }));
     fireEvent.click(screen.getByRole("button", { name: "启用" }));
 
     await waitFor(() => {
       expect(importMutation.mutateAsync).toHaveBeenCalledWith("/tmp/plugin.json");
-      expect(installOfficialMutation.mutateAsync).toHaveBeenCalledWith("official.safety-detector");
-      expect(enableMutation.mutateAsync).toHaveBeenCalledWith("official.prompt-optimizer");
+      expect(installOfficialMutation.mutateAsync).toHaveBeenCalledWith("official.privacy-filter");
+      expect(enableMutation.mutateAsync).toHaveBeenCalledWith("community.prompt-helper");
       expect(toast.success).toHaveBeenCalled();
     });
+  });
+
+  it("approves pending plugin permissions from the detail panel", async () => {
+    const grantMutation = mutation();
+    vi.mocked(usePluginGrantPermissionsMutation).mockReturnValue(grantMutation as any);
+    vi.mocked(usePluginsListQuery).mockReturnValue({
+      data: [summary()],
+      isLoading: false,
+      isFetching: false,
+      error: null,
+    } as any);
+
+    renderWithProviders(<PluginsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "授权待审批权限" }));
+
+    await waitFor(() => {
+      expect(grantMutation.mutateAsync).toHaveBeenCalledWith({
+        pluginId: "community.prompt-helper",
+        permissions: ["request.body.write"],
+      });
+      expect(toast.success).toHaveBeenCalledWith("授权权限成功");
+    });
+  });
+
+  it("keeps the pending permission action visible when enable fails", async () => {
+    const enableMutation = mutation({
+      mutateAsync: vi
+        .fn()
+        .mockRejectedValue(new Error("PLUGIN_PERMISSION_REQUIRED: request.body.write")),
+    });
+    vi.mocked(usePluginEnableMutation).mockReturnValue(enableMutation as any);
+    vi.mocked(usePluginsListQuery).mockReturnValue({
+      data: [summary()],
+      isLoading: false,
+      isFetching: false,
+      error: null,
+    } as any);
+
+    renderWithProviders(<PluginsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "启用" }));
+
+    await waitFor(() => {
+      expect(enableMutation.mutateAsync).toHaveBeenCalledWith("community.prompt-helper");
+      expect(toast.error).toHaveBeenCalledWith(
+        "启用插件失败（code PLUGIN_PERMISSION_REQUIRED）：request.body.write"
+      );
+    });
+    expect(screen.getByRole("button", { name: "授权待审批权限" })).toBeInTheDocument();
   });
 
   it("shows package risk labels and wires update/rollback actions", async () => {

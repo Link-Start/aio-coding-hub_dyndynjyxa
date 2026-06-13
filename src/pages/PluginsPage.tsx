@@ -27,6 +27,7 @@ import { Spinner } from "../ui/Spinner";
 import {
   usePluginDisableMutation,
   usePluginEnableMutation,
+  usePluginGrantPermissionsMutation,
   usePluginInstallFromFileMutation,
   usePluginInstallOfficialMutation,
   usePluginQuery,
@@ -37,24 +38,14 @@ import {
   usePluginsListQuery,
 } from "../query/plugins";
 import { PluginConfigSchemaForm } from "./plugins/PluginConfigSchemaForm";
+import {
+  describePluginPermission,
+  describePluginRuntime,
+  pluginRiskLabel,
+  pluginStatusLabel,
+} from "./plugins/pluginProductCopy";
 
-const OFFICIAL_PLUGINS = [
-  { id: "official.prompt-optimizer", name: "Prompt Optimizer" },
-  { id: "official.safety-detector", name: "Safety Detector" },
-  { id: "official.redactor", name: "Sensitive Data Redactor" },
-  { id: "official.privacy-filter", name: "Privacy Filter" },
-];
-
-const STATUS_LABELS: Record<PluginStatus, string> = {
-  available: "可安装",
-  installed: "已安装",
-  enabled: "已启用",
-  disabled: "已禁用",
-  update_available: "可更新",
-  incompatible: "不兼容",
-  quarantined: "已隔离",
-  uninstalled: "已卸载",
-};
+const OFFICIAL_PLUGINS = [{ id: "official.privacy-filter", name: "Privacy Filter" }];
 
 const INSTALL_SOURCE_LABELS: Record<string, string> = {
   local: "本地",
@@ -71,10 +62,6 @@ const RISK_CLASS: Record<PluginPermissionRisk, string> = {
   critical: "border-destructive bg-destructive text-destructive-foreground",
 };
 
-function statusLabel(status: PluginStatus) {
-  return STATUS_LABELS[status] ?? status;
-}
-
 function canEnableStatus(status: PluginStatus) {
   return status === "disabled" || status === "installed";
 }
@@ -84,7 +71,7 @@ function riskPill(risk: PluginPermissionRisk) {
     <span
       className={`inline-flex rounded-md border px-2 py-0.5 text-xs font-semibold ${RISK_CLASS[risk]}`}
     >
-      {risk}
+      {pluginRiskLabel(risk)}
     </span>
   );
 }
@@ -149,6 +136,7 @@ function PluginListRow({
 }) {
   const enabled = plugin.status === "enabled";
   const canEnable = canEnableStatus(plugin.status);
+  const runtime = describePluginRuntime(plugin.runtime);
   return (
     <article
       className={`rounded-lg border p-3 ${
@@ -162,7 +150,7 @@ function PluginListRow({
         </button>
         <div className="flex items-center gap-2">
           <span className="rounded-md border border-border px-2 py-0.5 text-xs">
-            {statusLabel(plugin.status)}
+            {pluginStatusLabel(plugin.status)}
           </span>
           {riskPill(plugin.permission_risk)}
         </div>
@@ -174,8 +162,8 @@ function PluginListRow({
           <div className="text-foreground">{plugin.current_version ?? "-"}</div>
         </div>
         <div>
-          <div className="text-[11px] uppercase">runtime</div>
-          <div className="text-foreground">{plugin.runtime}</div>
+          <div className="text-[11px] uppercase">运行方式</div>
+          <div className="text-foreground">{runtime.label}</div>
         </div>
         <div>
           <div className="text-[11px] uppercase">更新</div>
@@ -217,18 +205,23 @@ function PermissionList({ detail }: { detail: PluginDetail }) {
     <div className="grid gap-2">
       {detail.manifest.permissions.map((permission) => {
         const ok = granted.has(permission);
+        const copy = describePluginPermission(permission);
         return (
           <div
             key={permission}
-            className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-sm"
+            className="flex flex-wrap items-start justify-between gap-2 rounded-md border border-border px-3 py-2 text-sm"
           >
-            <span className="font-mono text-xs">{permission}</span>
+            <div>
+              <div className="font-medium text-foreground">{copy.label}</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">{copy.detail}</div>
+              <div className="mt-1 font-mono text-[11px] text-muted-foreground">{permission}</div>
+            </div>
             <span
               className={`rounded-md px-2 py-0.5 text-xs font-semibold ${
                 ok ? "bg-success/10 text-success" : "bg-warning/10 text-warning"
               }`}
             >
-              {ok ? "已授权" : "未授权"}
+              {ok ? "已允许" : "待允许"}
             </span>
           </div>
         );
@@ -243,6 +236,7 @@ function PluginDetailPanel({
   onSaveConfig,
   onUpdate,
   onRollback,
+  onGrantPendingPermissions,
   savingConfig,
   busy,
 }: {
@@ -251,6 +245,7 @@ function PluginDetailPanel({
   onSaveConfig: (config: JsonValue) => void;
   onUpdate: () => void;
   onRollback: (version: string) => void;
+  onGrantPendingPermissions: (pluginId: string, permissions: readonly string[]) => void;
   savingConfig: boolean;
   busy: boolean;
 }) {
@@ -272,6 +267,7 @@ function PluginDetailPanel({
       : detail.manifest.runtime.kind === "native"
         ? `native: ${detail.manifest.runtime.engine}`
         : `wasm: ${detail.manifest.runtime.abiVersion}`;
+  const runtimeCopy = describePluginRuntime(detail.summary.runtime);
   const unsigned = isUnsigned(detail);
   const rollbackVersion = previousVersion(detail);
 
@@ -296,6 +292,19 @@ function PluginDetailPanel({
           ) : null}
         </div>
         <div className="flex flex-wrap gap-2">
+          {detail.pending_permissions.length > 0 ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={busy}
+              onClick={() =>
+                onGrantPendingPermissions(detail.summary.plugin_id, detail.pending_permissions)
+              }
+            >
+              <ShieldAlert className="h-3.5 w-3.5" />
+              授权待审批权限
+            </Button>
+          ) : null}
           {detail.summary.update_available ? (
             <Button size="sm" variant="secondary" disabled={busy} onClick={onUpdate}>
               <Upload className="h-3.5 w-3.5" />
@@ -316,36 +325,16 @@ function PluginDetailPanel({
         </div>
       </div>
 
-      <Section title="Manifest">
-        <div className="grid gap-2 text-sm sm:grid-cols-2">
-          {detailRows(detail).map(([label, value]) => (
-            <div key={label} className="rounded-md border border-border px-3 py-2">
-              <div className="text-xs text-muted-foreground">{label}</div>
-              <div className="break-words text-foreground">{value}</div>
-            </div>
-          ))}
-          <div className="rounded-md border border-border px-3 py-2 sm:col-span-2">
-            <div className="text-xs text-muted-foreground">runtime</div>
-            <div className="break-words font-mono text-xs text-foreground">{runtime}</div>
+      <Section title="这个插件会做什么">
+        <div className="rounded-md border border-border px-3 py-2 text-sm">
+          <div className="font-medium text-foreground">
+            {detail.manifest.description ?? detail.summary.name}
           </div>
+          <div className="mt-1 text-xs text-muted-foreground">{runtimeCopy.detail}</div>
         </div>
       </Section>
 
-      <Section title="Hooks">
-        <div className="grid gap-2">
-          {detail.manifest.hooks.map((hook) => (
-            <div key={hook.name} className="rounded-md border border-border px-3 py-2 text-sm">
-              <div className="font-mono text-xs">{hook.name}</div>
-              <div className="mt-1 text-xs text-muted-foreground">
-                priority {hook.priority ?? 0}
-                {hook.failurePolicy ? ` · ${hook.failurePolicy}` : ""}
-              </div>
-            </div>
-          ))}
-        </div>
-      </Section>
-
-      <Section title="Permissions">
+      <Section title="数据访问">
         {detail.summary.permission_risk === "high" ||
         detail.summary.permission_risk === "critical" ? (
           <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -356,8 +345,9 @@ function PluginDetailPanel({
         <PermissionList detail={detail} />
       </Section>
 
-      <Section title="Config">
+      <Section title="设置">
         <PluginConfigSchemaForm
+          identity={`${detail.summary.plugin_id}:${detail.manifest.configVersion ?? 1}:${detail.summary.updated_at}`}
           schema={detail.manifest.configSchema}
           value={detail.config}
           pending={savingConfig}
@@ -365,10 +355,36 @@ function PluginDetailPanel({
         />
       </Section>
 
-      <Section title="Audit">
-        {detail.audit_logs.length === 0 ? (
-          <div className="text-sm text-muted-foreground">暂无审计日志。</div>
-        ) : (
+      <Section title="开发者信息">
+        <div className="grid gap-2 text-sm sm:grid-cols-2">
+          {detailRows(detail).map(([label, value]) => (
+            <div key={label} className="rounded-md border border-border px-3 py-2">
+              <div className="text-xs text-muted-foreground">{label}</div>
+              <div className="break-words text-foreground">{value}</div>
+            </div>
+          ))}
+          <div className="rounded-md border border-border px-3 py-2 sm:col-span-2">
+            <div className="text-xs text-muted-foreground">运行方式</div>
+            <div className="break-words text-foreground">{runtimeCopy.label}</div>
+            <div className="mt-1 break-words font-mono text-xs text-muted-foreground">
+              {runtime}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-3 grid gap-2">
+          {detail.manifest.hooks.map((hook) => (
+            <div key={hook.name} className="rounded-md border border-border px-3 py-2 text-sm">
+              <div className="font-mono text-xs">{hook.name}</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                priority {hook.priority ?? 0}
+                {hook.failurePolicy ? ` · ${hook.failurePolicy}` : ""}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {detail.audit_logs.length > 0 ? (
           <div className="grid gap-2">
             {detail.audit_logs.slice(0, 5).map((log) => (
               <div key={log.id} className="rounded-md border border-border px-3 py-2 text-sm">
@@ -380,7 +396,7 @@ function PluginDetailPanel({
               </div>
             ))}
           </div>
-        )}
+        ) : null}
       </Section>
     </div>
   );
@@ -395,6 +411,7 @@ export function PluginsPage() {
   const updateMutation = usePluginUpdateFromFileMutation();
   const rollbackMutation = usePluginRollbackMutation();
   const enableMutation = usePluginEnableMutation();
+  const grantPermissionsMutation = usePluginGrantPermissionsMutation();
   const disableMutation = usePluginDisableMutation();
   const uninstallMutation = usePluginUninstallMutation();
   const saveConfigMutation = usePluginSaveConfigMutation();
@@ -416,6 +433,7 @@ export function PluginsPage() {
     updateMutation.isPending ||
     rollbackMutation.isPending ||
     enableMutation.isPending ||
+    grantPermissionsMutation.isPending ||
     disableMutation.isPending ||
     uninstallMutation.isPending;
 
@@ -458,11 +476,11 @@ export function PluginsPage() {
     <div className="flex h-full flex-col gap-5 overflow-hidden">
       <PageHeader
         title="插件"
-        subtitle="管理本地和官方插件的启用状态、权限、配置和审计记录。"
+        subtitle="为 AIO Coding Hub 增加本地能力。插件可以在请求发送前、响应返回后或日志保存前处理内容。"
         actions={
           <Button onClick={handleImport} disabled={busy}>
             <Download className="h-4 w-4" />
-            本地导入
+            导入 .aio-plugin
           </Button>
         }
       />
@@ -474,7 +492,7 @@ export function PluginsPage() {
       ) : null}
 
       <div className="flex flex-wrap items-center gap-2 border-b border-border pb-3">
-        <span className="text-xs font-semibold text-muted-foreground">官方插件</span>
+        <span className="text-xs font-semibold text-muted-foreground">推荐插件</span>
         {OFFICIAL_PLUGINS.map((plugin) => {
           const installed = plugins.some((item) => item.plugin_id === plugin.id);
           return (
@@ -498,7 +516,7 @@ export function PluginsPage() {
         <div className="rounded-lg border border-dashed border-border px-4 py-10 text-center">
           <div className="text-sm font-semibold text-foreground">还没有安装插件</div>
           <div className="mt-1 text-sm text-muted-foreground">
-            导入 plugin.json 后会显示在这里。
+            可以安装官方 Privacy Filter，或导入 .aio-plugin 插件包。
           </div>
         </div>
       ) : (
@@ -554,6 +572,11 @@ export function PluginsPage() {
                 if (!selectedPluginId) return;
                 runAction("保存配置", () =>
                   saveConfigMutation.mutateAsync({ pluginId: selectedPluginId, config })
+                );
+              }}
+              onGrantPendingPermissions={(pluginId, permissions) => {
+                runAction("授权权限", () =>
+                  grantPermissionsMutation.mutateAsync({ pluginId, permissions })
                 );
               }}
             />
