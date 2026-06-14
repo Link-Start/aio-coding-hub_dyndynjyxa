@@ -45,10 +45,9 @@ const requiredDocs = [
     phrases: [
       "插件开发手册",
       "插件开发总指南",
-      "快速开始",
-      "插件 SDK",
-      "声明式规则",
-      "官方示例",
+      "按目标查找",
+      "插件 API 参考",
+      "Privacy Filter 示例",
       "Manifest",
       "Hooks",
       "Permissions",
@@ -72,7 +71,7 @@ const requiredDocs = [
     ],
   },
   {
-    path: "docs/plugins/wasm-runtime.md",
+    path: "docs/plugins/runtime/wasm.md",
     phrases: [
       "WASM ABI v1",
       "WASM packages are installable only when host policy enables execution",
@@ -86,7 +85,7 @@ const requiredDocs = [
     ],
   },
   {
-    path: "docs/plugins/process-runtime-poc.md",
+    path: "docs/plugins/runtime/process-poc.md",
     phrases: [
       "JSON-RPC over stdio",
       "disabled by default",
@@ -98,7 +97,7 @@ const requiredDocs = [
     ],
   },
   {
-    path: "docs/plugins/getting-started.md",
+    path: "docs/plugins/developer-guide.md",
     phrases: [
       "create-aio-plugin",
       "pnpm create-aio-plugin",
@@ -114,7 +113,7 @@ const requiredDocs = [
     ],
   },
   {
-    path: "docs/plugins/sdk.md",
+    path: "docs/plugins/reference/sdk.md",
     phrases: [
       "@aio-coding-hub/plugin-sdk",
       "PluginManifest",
@@ -124,7 +123,7 @@ const requiredDocs = [
     ],
   },
   {
-    path: "docs/plugins/declarative-rules.md",
+    path: "docs/plugins/reference/declarative-rules.md",
     phrases: [
       "declarativeRules",
       "规则文件结构",
@@ -135,7 +134,7 @@ const requiredDocs = [
     ],
   },
   {
-    path: "docs/plugins/official-examples.md",
+    path: "docs/plugins/examples/privacy-filter.md",
     phrases: [
       "official.privacy-filter",
       "packyme/privacy-filter",
@@ -143,7 +142,7 @@ const requiredDocs = [
     ],
   },
   {
-    path: "docs/plugins/architecture-audit.md",
+    path: "docs/plugins/architecture/audit.md",
     phrases: [
       "official.privacy-filter",
       "declarativeRules",
@@ -154,11 +153,11 @@ const requiredDocs = [
     ],
   },
   {
-    path: "docs/plugins/manifest.md",
+    path: "docs/plugins/reference/manifest.md",
     phrases: ["apiVersion", "hostCompatibility", "declarativeRules", "wasm"],
   },
   {
-    path: "docs/plugins/hooks.md",
+    path: "docs/plugins/reference/hooks.md",
     phrases: [
       "gateway.request.afterBodyRead",
       "gateway.response.chunk",
@@ -167,11 +166,11 @@ const requiredDocs = [
     ],
   },
   {
-    path: "docs/plugins/permissions.md",
+    path: "docs/plugins/reference/permissions.md",
     phrases: ["request.body.read", "secret.read", "critical", "重新授权"],
   },
   {
-    path: "docs/plugins/config-schema.md",
+    path: "docs/plugins/reference/config-schema.md",
     phrases: [
       "string",
       "number",
@@ -182,7 +181,7 @@ const requiredDocs = [
     ],
   },
   {
-    path: "docs/plugins/security.md",
+    path: "docs/plugins/architecture/security.md",
     phrases: [
       "fail-closed",
       "quarantined",
@@ -191,15 +190,15 @@ const requiredDocs = [
     ],
   },
   {
-    path: "docs/plugins/streaming.md",
+    path: "docs/plugins/runtime/streaming.md",
     phrases: ["sliding window", "gateway.response.chunk", "stream.modify"],
   },
   {
-    path: "docs/plugins/publishing.md",
+    path: "docs/plugins/reference/publishing.md",
     phrases: [".aio-plugin", "sha256", "Ed25519", "rollback"],
   },
   {
-    path: "docs/plugins/compatibility.md",
+    path: "docs/plugins/reference/compatibility.md",
     phrases: ["SemVer", "pluginApi", "platforms", "WASM ABI"],
   },
 ];

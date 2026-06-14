@@ -1029,15 +1029,20 @@
 #### M6-T06：开发者文档
 
 - 文档目录建议：
-  - `docs/plugins/getting-started.md`
-  - `docs/plugins/manifest.md`
-  - `docs/plugins/hooks.md`
-  - `docs/plugins/permissions.md`
-  - `docs/plugins/config-schema.md`
-  - `docs/plugins/security.md`
-  - `docs/plugins/streaming.md`
-  - `docs/plugins/publishing.md`
-  - `docs/plugins/compatibility.md`
+  - `docs/plugins/README.md`
+  - `docs/plugins/developer-guide.md`
+  - `docs/plugins/examples/privacy-filter.md`
+  - `docs/plugins/reference/README.md`
+  - `docs/plugins/reference/manifest.md`
+  - `docs/plugins/reference/hooks.md`
+  - `docs/plugins/reference/permissions.md`
+  - `docs/plugins/reference/config-schema.md`
+  - `docs/plugins/reference/declarative-rules.md`
+  - `docs/plugins/reference/publishing.md`
+  - `docs/plugins/reference/compatibility.md`
+  - `docs/plugins/runtime/README.md`
+  - `docs/plugins/runtime/streaming.md`
+  - `docs/plugins/architecture/security.md`
 - 验收标准：
   - 第三方开发者能按文档完成一个插件从开发到发布。
 

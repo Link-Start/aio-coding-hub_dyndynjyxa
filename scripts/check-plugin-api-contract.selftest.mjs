@@ -5,6 +5,8 @@ import { join } from "node:path";
 
 const root = join(tmpdir(), `aio-plugin-contract-${Date.now()}`);
 mkdirSync(join(root, "docs/plugins"), { recursive: true });
+mkdirSync(join(root, "docs/plugins/reference"), { recursive: true });
+mkdirSync(join(root, "docs/plugins/runtime"), { recursive: true });
 mkdirSync(join(root, "packages/plugin-sdk/src"), { recursive: true });
 mkdirSync(join(root, "packages/create-aio-plugin/src"), { recursive: true });
 mkdirSync(join(root, "src-tauri/src/domain"), { recursive: true });
@@ -43,10 +45,10 @@ writeFileSync(
   "gateway.request.afterBodyRead request.body.read declarativeRules"
 );
 writeFileSync(join(root, "docs/plugin-manifest-v1.md"), "gateway.request.afterBodyRead request.body.read");
-writeFileSync(join(root, "docs/plugins/hooks.md"), "gateway.request.afterBodyRead");
-writeFileSync(join(root, "docs/plugins/permissions.md"), "request.body.read");
-writeFileSync(join(root, "docs/plugins/manifest.md"), "declarativeRules wasm native privacyFilter");
-writeFileSync(join(root, "docs/plugins/wasm-runtime.md"), "wasm PLUGIN_RUNTIME_DISABLED");
+writeFileSync(join(root, "docs/plugins/reference/hooks.md"), "gateway.request.afterBodyRead");
+writeFileSync(join(root, "docs/plugins/reference/permissions.md"), "request.body.read");
+writeFileSync(join(root, "docs/plugins/reference/manifest.md"), "declarativeRules wasm native privacyFilter");
+writeFileSync(join(root, "docs/plugins/runtime/wasm.md"), "wasm PLUGIN_RUNTIME_DISABLED");
 
 const result = spawnSync("node", ["scripts/check-plugin-api-contract.mjs"], {
   cwd: process.cwd(),

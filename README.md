@@ -90,7 +90,7 @@
 - 插件权限、配置 schema、审计日志、启用 / 禁用 / 卸载
 - SDK 与脚手架：`@aio-coding-hub/plugin-sdk`、`create-aio-plugin`
 
-Plugin authors should start with [Plugin Development](docs/plugins/README.md). The stable community runtime is `declarativeRules`; WASM packaging is available for ABI experimentation but gateway execution is policy-gated.
+插件作者应从 [插件开发手册](docs/plugins/README.md) 开始。稳定社区运行时是 `declarativeRules`；WASM 可以用于 ABI 实验和打包验证，但 gateway execution 仍受宿主策略控制。
 
 ### CLI 管理
 
@@ -232,10 +232,11 @@ curl http://127.0.0.1:37123/health
 插件系统面向社区扩展，短期优先支持安全的声明式规则插件。开发入口：
 
 - [插件开发总览](docs/plugins/README.md)
-- [快速开始](docs/plugins/getting-started.md)
-- [Plugin SDK](docs/plugins/sdk.md)
-- [声明式规则 Runtime](docs/plugins/declarative-rules.md)
-- [官方示例插件](docs/plugins/official-examples.md)
+- [插件开发总指南](docs/plugins/developer-guide.md)
+- [Plugin SDK](docs/plugins/reference/sdk.md)
+- [声明式规则 Runtime](docs/plugins/reference/declarative-rules.md)
+- [官方示例插件](docs/plugins/examples/privacy-filter.md)
+- [插件 API 参考](docs/plugins/reference/README.md)
 - [Manifest v1 规范](docs/plugin-manifest-v1.md)
 
 ---

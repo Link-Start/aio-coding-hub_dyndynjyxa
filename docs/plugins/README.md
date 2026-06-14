@@ -1,34 +1,37 @@
 # AIO Coding Hub 插件开发手册
 
-本目录是 AIO Coding Hub 插件系统的中文开发手册。插件可以扩展本地网关、请求和响应 hook、日志脱敏，以及由界面管理的配置表单。
+本目录是 AIO Coding Hub 插件系统的中文入口。这里不再平铺所有专题文档；新开发者先读主线指南，需要细节时再进入参考目录。
 
-社区插件优先使用 `declarativeRules`。只有当规则运行时无法表达插件逻辑，并且宿主策略明确启用隔离运行时时，才考虑 WASM 或未来的进程运行时。`native` 只保留给宿主内置官方插件。
+插件可以扩展本地网关、请求和响应 hook、日志脱敏，以及由界面管理的配置表单。社区插件优先使用 `declarativeRules`；`native` 只保留给宿主内置官方插件。
 
-## 入门路径
+## 先读什么
 
-- [插件开发总指南](./developer-guide.md)：从插件目录、`plugin.json`、配置表单、fixture replay 到发布的完整路径。
-- [快速开始](./getting-started.md)：创建第一个本地插件，完成校验、回放、打包和导入。
-- [插件 SDK](./sdk.md)：插件作者和工具链使用的 TypeScript/Rust 契约与校验辅助函数。
-- [声明式规则](./declarative-rules.md)：无需执行任意代码即可完成请求改写、日志脱敏、安全检查和提示词追加。
-- [官方示例](./official-examples.md)：内置 `official.privacy-filter` 展示的能力边界。
+- [插件开发总指南](./developer-guide.md)：唯一主线入口，从创建插件到本地回放、配置表单、打包和发布。
+- [Privacy Filter 示例](./examples/privacy-filter.md)：查看官方示例插件如何组织 manifest、配置和隐私过滤边界。
+- [插件 API 参考](./reference/README.md)：查 `plugin.json`、hooks、permissions、config schema、SDK 和发布规则。
 
-## 核心契约
+## 按目标查找
 
-- [Manifest](./manifest.md)：`plugin.json` 必填字段、运行时声明和命名规则。
-- [Manifest v1 完整规范](../plugin-manifest-v1.md)：规范性 manifest 文档和完整示例。
-- [Hooks](./hooks.md)：网关和日志 hook 名称、触发阶段、超时和使用场景。
-- [Permissions](./permissions.md)：权限名称、风险等级和授权行为。
-- [Config Schema](./config-schema.md)：用于界面渲染和后端校验的配置 schema 子集。
-- [兼容性](./compatibility.md)：应用版本、插件 API、平台和 WASM ABI 的版本规则。
+| 我想做什么 | 阅读 |
+| --- | --- |
+| 开发第一个插件 | [插件开发总指南](./developer-guide.md) |
+| 给插件加配置项 | [Config Schema](./reference/config-schema.md) |
+| 处理 Claude/Codex 请求结构 | [插件开发总指南：Hooks 与请求形态](./developer-guide.md#hooks-与请求形态) |
+| 查 hook 触发时机 | [Hooks](./reference/hooks.md) |
+| 查权限和风险等级 | [Permissions](./reference/permissions.md) |
+| 写声明式规则 | [Declarative Rules](./reference/declarative-rules.md) |
+| 打包发布 `.aio-plugin` | [Publishing](./reference/publishing.md) |
+| 理解 WASM 限制 | [WASM 运行时](./runtime/wasm.md) |
+| 理解架构和边界 | [插件架构说明](./architecture/README.md) |
 
-## 运行时与分发
+## 目录结构
 
-- [安全与隔离](./security.md)：最小权限、运行时隔离、签名和失败策略。
-- [流式响应插件](./streaming.md)：有边界的 stream chunk 处理。
-- [WASM 运行时](./wasm-runtime.md)：WASM ABI v1 和资源限制。
-- [进程运行时 PoC](./process-runtime-poc.md)：默认关闭的进程隔离设计。
-- [发布插件](./publishing.md)：`.aio-plugin` 打包、校验和、签名、更新与回滚。
-- [架构审计](./architecture-audit.md)：信任边界、运行时选择、性能和稳定性建议。
+- `developer-guide.md`：开发者主线手册。
+- `examples/`：官方示例和推荐社区插件形态。
+- `reference/`：稳定 API 契约和工具链说明。
+- `runtime/`：WASM、进程运行时、流式响应等执行模型。
+- `architecture/`：维护者视角的安全、隔离、性能和稳定性说明。
+- `plugin-api-v1-contract.json`：机器可读的插件 API v1 契约。
 
 ## 推荐开发顺序
 

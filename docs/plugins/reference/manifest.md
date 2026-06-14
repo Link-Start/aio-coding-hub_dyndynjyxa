@@ -1,6 +1,6 @@
 # 插件 Manifest
 
-插件 manifest 文件名是 `plugin.json`，遵循 [Manifest v1 完整规范](../plugin-manifest-v1.md)。
+插件 manifest 文件名是 `plugin.json`，遵循 [Manifest v1 完整规范](../../plugin-manifest-v1.md)。
 
 必填字段：
 
@@ -35,6 +35,6 @@
 
 `hostCompatibility` 必须包含 `app` 和 `pluginApi`；`platforms` 可以限制支持的操作系统。
 
-`configSchema` 可以包含标准 JSON Schema 展示字段和 AIO `x-aio-ui` 元数据。详见 [配置 Schema](./config-schema.md)。
+`configSchema` 可以包含标准 JSON Schema 展示字段和 AIO `x-aio-ui` 元数据。详见 [Config Schema](./config-schema.md)。
 
 plugin API v1 的 active hooks 见 [Hooks](./hooks.md)。Reserved hooks 和 reserved permissions 只是为未来兼容命名保留；在宿主真正实现前，manifest 校验会拒绝它们。

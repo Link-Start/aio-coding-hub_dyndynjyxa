@@ -162,34 +162,38 @@ if (contract) {
     "reserved permission"
   );
 
-  const hooksDoc = readText("docs/plugins/hooks.md");
-  requireIncludes("docs/plugins/hooks.md", hooksDoc, contract.activeHooks, "active hook");
-  requireIncludes("docs/plugins/hooks.md", hooksDoc, contract.reservedHooks, "reserved hook");
+  const hooksDocPath = "docs/plugins/reference/hooks.md";
+  const hooksDoc = readText(hooksDocPath);
+  requireIncludes(hooksDocPath, hooksDoc, contract.activeHooks, "active hook");
+  requireIncludes(hooksDocPath, hooksDoc, contract.reservedHooks, "reserved hook");
 
-  const permissionsDoc = readText("docs/plugins/permissions.md");
+  const permissionsDocPath = "docs/plugins/reference/permissions.md";
+  const permissionsDoc = readText(permissionsDocPath);
   requireIncludes(
-    "docs/plugins/permissions.md",
+    permissionsDocPath,
     permissionsDoc,
     contract.activePermissions,
     "active permission"
   );
   requireIncludes(
-    "docs/plugins/permissions.md",
+    permissionsDocPath,
     permissionsDoc,
     contract.reservedPermissions,
     "reserved permission"
   );
 
-  const manifestGuide = readText("docs/plugins/manifest.md");
+  const manifestGuidePath = "docs/plugins/reference/manifest.md";
+  const manifestGuide = readText(manifestGuidePath);
   requireIncludes(
-    "docs/plugins/manifest.md",
+    manifestGuidePath,
     manifestGuide,
     [...runtimeTokens(contract), ...officialRuntimeTokens(contract)],
     "runtime"
   );
 
-  const wasmGuide = readText("docs/plugins/wasm-runtime.md");
-  requireIncludes("docs/plugins/wasm-runtime.md", wasmGuide, ["wasm", "PLUGIN_RUNTIME_DISABLED"], "WASM policy token");
+  const wasmGuidePath = "docs/plugins/runtime/wasm.md";
+  const wasmGuide = readText(wasmGuidePath);
+  requireIncludes(wasmGuidePath, wasmGuide, ["wasm", "PLUGIN_RUNTIME_DISABLED"], "WASM policy token");
 
   requireRegex(
     "packages/plugin-sdk/src/index.ts",

@@ -105,9 +105,9 @@ for (const phrase of [
 }
 
 const docs = [
-  "docs/plugins/sdk.md",
-  "docs/plugins/getting-started.md",
-  "docs/plugins/wasm-runtime.md",
+  "docs/plugins/reference/sdk.md",
+  "docs/plugins/developer-guide.md",
+  "docs/plugins/runtime/wasm.md",
 ];
 for (const doc of docs) {
   const text = readText(doc);
@@ -117,15 +117,15 @@ for (const doc of docs) {
 }
 
 for (const [doc, phrases] of Object.entries({
-  "docs/plugins/getting-started.md": [
-    "declarativeRules` is the default community runtime",
-    "WASM gateway execution is policy-gated",
-    "plugin.wasm` artifacts are packaged as binary files",
+  "docs/plugins/developer-guide.md": [
+    "`declarativeRules` 是默认社区运行时",
+    "WASM 执行受宿主策略控制",
+    "`plugin.wasm`",
   ],
-  "docs/plugins/wasm-runtime.md": [
-    "declarativeRules` is the default community runtime",
-    "WASM is for plugins that truly need code execution once host policy enables it",
-    "plugin.wasm` artifacts are packaged as binary files",
+  "docs/plugins/runtime/wasm.md": [
+    "`declarativeRules` 是默认社区运行时",
+    "WASM 只用于宿主策略启用后",
+    "`plugin.wasm` artifacts 会由 `create-aio-plugin pack` 作为 binary files 打包",
   ],
 })) {
   const text = readText(doc);

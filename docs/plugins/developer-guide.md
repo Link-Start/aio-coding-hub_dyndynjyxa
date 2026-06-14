@@ -1,6 +1,6 @@
 # 插件开发总指南
 
-这份指南把 AIO Coding Hub 插件从开发到发布的主线串起来。需要查字段定义时看 [Manifest v1 完整规范](../plugin-manifest-v1.md)，需要查某个运行时细节时再跳到对应专题页。
+这份指南把 AIO Coding Hub 插件从开发到发布的主线串起来。需要查字段定义时看 [Manifest v1 完整规范](../plugin-manifest-v1.md)，需要查某个运行时细节时再跳到 [API 参考](./reference/README.md) 或 [运行时说明](./runtime/README.md)。
 
 ## 适合做成插件的能力
 
@@ -25,6 +25,63 @@
 8. 在 Plugins 页面本地导入，授权权限，启用插件，检查审计日志。
 9. 发布前计算 `sha256`，可信索引分发时补 Ed25519 签名。
 
+## 10 分钟快速开始
+
+先 scaffold 一个声明式规则插件：
+
+```bash
+pnpm --filter create-aio-plugin test
+pnpm create-aio-plugin acme.redactor rule
+```
+
+生成目录后，先校验 `plugin.json` 和规则文件：
+
+```bash
+pnpm create-aio-plugin validate ./acme.redactor
+```
+
+添加 Claude 和 Codex request shapes 作为 replay fixtures。Claude fixture 示例：
+
+```json
+{
+  "request": {
+    "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"SECRET_TOKEN\"}]}"
+  }
+}
+```
+
+Codex/OpenAI Responses fixture 示例：
+
+```json
+{
+  "request": {
+    "body": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"SECRET_TOKEN\"}]}]}"
+  }
+}
+```
+
+在本地回放两个 fixtures：
+
+```bash
+pnpm create-aio-plugin replay ./acme.redactor ./fixtures/claude-request.json gateway.request.afterBodyRead
+pnpm create-aio-plugin replay ./acme.redactor ./fixtures/codex-request.json gateway.request.afterBodyRead
+```
+
+打包插件并从 Plugins 页面本地安装：
+
+```bash
+pnpm create-aio-plugin pack ./acme.redactor
+```
+
+在 Plugins 页面选择本地包 `acme.redactor.aio-plugin`，确认 `request.body.read` 和 `request.body.write` permissions 后启用插件。命中请求后，插件详情面板应展示 hook completion 或 block/failure events，且不应存储 sensitive payload text。
+
+SDK 检查命令：
+
+```bash
+pnpm --filter @aio-coding-hub/plugin-sdk typecheck
+pnpm plugin-wasm-sdk:test
+```
+
 ## 插件目录结构
 
 声明式规则插件的最小结构：
@@ -40,6 +97,10 @@ acme.redactor/
 ```
 
 WASM 插件会额外包含 `plugin.wasm` 或 Rust 工程目录。`rules`、fixture 和源码目录可以按项目需要组织，但 `plugin.json` 必须位于包根目录，或 `.aio-plugin` 解压后的唯一顶层目录内。
+
+## 最小声明式规则插件
+
+一个声明式规则插件至少需要 `plugin.json` 和规则文件。规则插件通常适合请求体替换、日志脱敏、告警和阻断，不需要执行任意 JavaScript/TypeScript。
 
 ## `plugin.json` 核心字段
 
@@ -207,7 +268,7 @@ pnpm create-aio-plugin pack ./acme.redactor
 
 ## 官方 Privacy Filter 示例
 
-`official.privacy-filter` 是当前唯一内置官方插件。它对齐 [packyme/privacy-filter](https://github.com/packyme/privacy-filter) 的核心脱敏能力，用于请求发往上游前和日志持久化前的不可逆脱敏。
+`official.privacy-filter` 是当前唯一内置官方插件。它对齐 [packyme/privacy-filter](https://github.com/packyme/privacy-filter) 的核心脱敏能力，用于请求发往上游前和日志持久化前的不可逆脱敏。完整说明见 [Privacy Filter 示例](./examples/privacy-filter.md)。
 
 这个示例说明了三件事：
 
