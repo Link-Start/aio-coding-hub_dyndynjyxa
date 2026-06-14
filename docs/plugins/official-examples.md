@@ -25,6 +25,7 @@ It also demonstrates schema-driven configuration UI. The host renders its switch
 Hooks:
 
 - `gateway.request.afterBodyRead`
+- `gateway.request.beforeSend`
 - `log.beforePersist`
 
 Permissions:
@@ -43,6 +44,8 @@ Behavior:
 Provider request shapes:
 
 `official.privacy-filter` redacts matching string values anywhere inside JSON request bodies. It also supports raw text bodies. For Codex/OpenAI Responses payloads, `input[].content[].text` and `input_text` content are covered because the engine walks every JSON string value before upstream send. Claude-style `messages[].content[].text` and OpenAI-compatible chat `messages[].content` strings are covered by the same recursive JSON-string walk.
+
+Gateway boundary note: Privacy Filter receives the original client-to-gateway body because the gateway must inspect the prompt before it can redact it. The protection guarantee is that the gateway-to-upstream provider request body and persisted request logs are redacted when the plugin is enabled and the matching strategy is selected. If you inspect the local client request before the gateway hook runs, you may still see the original input.
 
 Important limitation:
 

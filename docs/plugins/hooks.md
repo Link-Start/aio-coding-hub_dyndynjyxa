@@ -83,7 +83,9 @@ The normalized context for both shapes includes entries like:
 - Mutation fields: `headers`, `requestBody`.
 - Provider-neutral field: `request.normalizedMessages`.
 
-Use this hook when a plugin must see the final upstream request shape. It has the same request context fields as `gateway.request.afterBodyRead`, but runs later in the gateway path.
+Runs after provider selection, auth/header preparation, request body sanitizers, and protocol rectifiers for the current attempt, immediately before the gateway sends bytes to the upstream provider. Use this hook when the plugin must guarantee final upstream request-body or request-header mutation.
+
+This hook sees semantic decoded request body content. If a plugin mutates the body, the gateway updates the final upstream body and removes or recalculates wire-level length/encoding semantics as needed. Unchanged requests keep the original passthrough body where possible.
 
 ## gateway.response.chunk
 
