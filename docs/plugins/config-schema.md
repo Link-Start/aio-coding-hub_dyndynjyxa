@@ -1,8 +1,8 @@
-# Plugin Config Schema
+# 插件配置 Schema
 
-Plugins may declare a `configSchema` JSON Schema subset in `plugin.json`.
+插件可以在 `plugin.json` 中声明 `configSchema`。它使用 JSON Schema 的一个受支持子集，由宿主负责渲染配置表单并在保存前后校验。
 
-Supported scalar types:
+支持的标量类型：
 
 - `string`
 - `number`
@@ -10,51 +10,51 @@ Supported scalar types:
 - `boolean`
 - `password`
 
-Supported structured types:
+支持的结构类型：
 
 - `array`
 - `object`
 
-The `enum` keyword is supported on scalar fields. In checker terms, enum is supported as a keyword on scalar fields, for example:
+`enum` keyword 支持用于标量字段。换成检查器里的说法，就是 enum is supported as a keyword on scalar fields，例如：
 
 ```json
 { "type": "string", "enum": ["strict", "balanced"] }
 ```
 
-The GUI renders scalar enum fields as a select control. The GUI renders `password` fields as password inputs.
+界面会把标量 enum 字段渲染为 select control，把 `password` 字段渲染为 password input。
 
-vNext does not provide host-managed secret storage for community plugin config. Saved config values remain regular plugin config values and may be returned in backend detail payloads. The backend validates config before persisting it; the frontend validation is only a convenience layer.
+vNext does not provide host-managed secret storage for community plugin config。已保存的配置值仍然是普通插件配置值，可能出现在后端详情 payload 中。后端会在持久化前校验配置；前端校验只是便利层，不能作为唯一信任来源。
 
-## UI Metadata
+## UI 元数据
 
-The host renders `configSchema` as a low-code settings panel. Prefer standard JSON Schema presentation fields first:
+宿主会把 `configSchema` 渲染为低代码设置面板。优先使用标准 JSON Schema 展示字段：
 
-- `title`: user-facing field name.
-- `description`: helper text below the title.
-- `default`: value used when saved config omits the field.
-- `enum`: allowed values.
-- `required`: required object properties.
+- `title`：展示给用户看的字段名。
+- `description`：标题下方的辅助说明。
+- `default`：保存配置缺省该字段时使用的值。
+- `enum`：允许值列表。
+- `required`：object 中必填的属性。
 
-AIO Coding Hub also supports the vendor extension `x-aio-ui` for presentation hints. These hints do not change backend validation.
+AIO Coding Hub 还支持 vendor extension `x-aio-ui` 来表达界面展示提示。这些提示不改变后端校验语义。
 
-Supported root `x-aio-ui` fields:
+根级 `x-aio-ui` 支持字段：
 
-- `sections`: ordered groups of fields.
+- `sections`：按顺序排列的字段分组。
 
-Supported field `x-aio-ui` fields:
+字段级 `x-aio-ui` 支持字段：
 
-- `section`: section id.
-- `order`: numeric order inside a section.
-- `widget`: `text`, `textarea`, `password`, `number`, `switch`, `select`, `checkboxGroup`, or `json`.
-- `placeholder`: input placeholder for text-like fields.
-- `warning`: always-visible warning copy.
-- `warningWhenPartial`: warning copy shown when a checkbox group is partially selected.
-- `enumLabels`: map enum values to user-facing labels.
-- `enumDescriptions`: map enum values to helper text.
+- `section`：所属 section id。
+- `order`：在 section 内的数字排序。
+- `widget`：`text`、`textarea`、`password`、`number`、`switch`、`select`、`checkboxGroup` 或 `json`。
+- `placeholder`：文本类输入框的占位文案。
+- `warning`：常驻展示的警告文案。
+- `warningWhenPartial`：checkbox group 被部分选择时展示的警告文案。
+- `enumLabels`：把 enum 值映射为用户可读标签。
+- `enumDescriptions`：把 enum 值映射为辅助说明。
 
-The host may ignore an incompatible widget hint. For example, `checkboxGroup` only applies to `array` fields whose `items.enum` is present.
+当 widget hint 与字段类型不匹配时，宿主可以忽略该提示。例如 `checkboxGroup` 只适用于存在 `items.enum` 的 `array` 字段。
 
-## Example
+## 示例
 
 ```json
 {

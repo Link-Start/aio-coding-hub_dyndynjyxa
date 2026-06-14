@@ -1,14 +1,14 @@
-# Official Example Plugin
+# 官方示例插件
 
-The official catalog intentionally stays small. `official.privacy-filter` is the only bundled official plugin.
+官方 catalog 会刻意保持很小。`official.privacy-filter` 是当前唯一 bundled official plugin。
 
-This keeps the trusted host surface narrow while the open extension surface remains available through `declarativeRules`, WASM, and the disabled-by-default process runtime proof of concept.
+这样可以让 trusted host surface 保持收敛，同时继续通过 `declarativeRules`、WASM 和默认关闭的进程运行时 PoC 提供开放扩展能力。
 
-## Current Official ID
+## 当前官方 ID
 
 - `official.privacy-filter`
 
-It is available from the Plugins page through the official plugin install button.
+用户可以在 Plugins 页面通过官方插件安装入口安装它。
 
 ## Privacy Filter
 
@@ -16,77 +16,77 @@ ID: `official.privacy-filter`
 
 Runtime: `native:privacyFilter`
 
-Aligned with the core redaction behavior of [packyme/privacy-filter](https://github.com/packyme/privacy-filter).
+它对齐 [packyme/privacy-filter](https://github.com/packyme/privacy-filter) 的核心 redaction behavior。
 
-Demonstrates pre-upstream privacy filtering for prompts and request logs.
+它展示了 prompts 和 request logs 的 pre-upstream privacy filtering。
 
-It also demonstrates schema-driven configuration UI. The host renders its switches, select fields, and sensitive-type checkbox group from `configSchema` plus `x-aio-ui` metadata. It does not require a host-side plugin-specific page component.
+它也展示了 schema-driven configuration UI。宿主会根据 `configSchema` 和 `x-aio-ui` metadata 渲染开关、选择器和 sensitive-type checkbox group，不需要为它写 host-side plugin-specific page component。
 
-Hooks:
+Hooks：
 
 - `gateway.request.afterBodyRead`
 - `gateway.request.beforeSend`
 - `log.beforePersist`
 
-Permissions:
+Permissions：
 
 - `request.body.read`
 - `request.body.write`
 - `log.redact`
 
-Behavior:
+行为：
 
-- Redacts emails, Chinese mobile phone numbers, Chinese ID card patterns, Luhn-valid bank cards, and IPv4 addresses.
-- Loads the upstream gitleaks-style rule set from `rules/gitleaks.toml`.
-- Redacts known vendor secrets, contextual passwords/API keys, and high-entropy secret candidates.
-- Uses span merging and false-positive mitigation for SSH command targets, paths, URLs, hashes, UUIDs, template variables, common placeholders, and business ID assignments.
+- 脱敏 emails、Chinese mobile phone numbers、Chinese ID card patterns、Luhn-valid bank cards 和 IPv4 addresses。
+- 从 `rules/gitleaks.toml` 加载 upstream gitleaks-style rule set。
+- 脱敏 known vendor secrets、contextual passwords/API keys 和 high-entropy secret candidates。
+- 使用 span merging 和 false-positive mitigation 处理 SSH command targets、paths、URLs、hashes、UUIDs、template variables、common placeholders 和 business ID assignments。
 
-Provider request shapes:
+Provider request shapes：
 
-`official.privacy-filter` redacts matching string values anywhere inside JSON request bodies. It also supports raw text bodies. For Codex/OpenAI Responses payloads, `input[].content[].text` and `input_text` content are covered because the engine walks every JSON string value before upstream send. Claude-style `messages[].content[].text` and OpenAI-compatible chat `messages[].content` strings are covered by the same recursive JSON-string walk.
+`official.privacy-filter` 会脱敏 JSON request bodies 中任意位置命中的 string values，也支持 raw text bodies。对 Codex/OpenAI Responses payloads，`input[].content[].text` 和 `input_text` content 会被覆盖，因为 engine 会在 upstream send 前遍历所有 JSON string value。Claude-style `messages[].content[].text` 和 OpenAI-compatible chat `messages[].content` strings 也由同一个 recursive JSON-string walk 覆盖。
 
-Gateway boundary note: Privacy Filter receives the original client-to-gateway body because the gateway must inspect the prompt before it can redact it. The protection guarantee is that the gateway-to-upstream provider request body and persisted request logs are redacted when the plugin is enabled and the matching strategy is selected. If you inspect the local client request before the gateway hook runs, you may still see the original input.
+Gateway boundary note：Privacy Filter 会接收原始 client-to-gateway body，因为 gateway 必须先看到 prompt 才能脱敏。它的保护保证是：当插件启用并选中匹配策略后，gateway-to-upstream provider request body 和 persisted request logs 会被脱敏。如果你检查 hook 执行前的本地 client request，仍可能看到原始输入。
 
-Important limitation:
+重要限制：
 
-Like upstream, Privacy Filter is irreversible redaction. It does not restore original sensitive values into model responses after upstream processing.
+和 upstream 一样，Privacy Filter 是 irreversible redaction。它不会在 upstream processing 后把原始敏感值恢复到模型响应中。
 
-## Official-Style Example Checklist
+## 官方风格示例清单
 
-An official-style example must include:
+一个 official-style example 必须包含：
 
-- a minimal manifest;
-- a fixture for Claude messages;
-- a fixture for Codex/OpenAI Responses input;
-- a local replay command;
-- a package command;
-- the exact permissions it requests;
-- a short explanation of what is intentionally unsupported.
+- 一个 minimal manifest。
+- 一个 Claude messages fixture。
+- 一个 Codex/OpenAI Responses input fixture。
+- 一个 local replay command。
+- 一个 package command。
+- 精确列出它请求的 permissions。
+- 简短说明哪些行为是 intentionally unsupported。
 
-For community examples, prefer `declarativeRules` unless the behavior requires deterministic code execution that cannot fit the rule runtime. WASM examples may demonstrate ABI packaging, but gateway execution remains policy-gated until the host enables it.
+社区示例应优先使用 `declarativeRules`。只有当行为需要确定性代码执行且规则运行时无法表达时，才考虑 WASM。WASM examples 可以展示 ABI packaging，但 gateway execution 在宿主启用前仍受策略限制。
 
-## Retired Built-In Examples
+## 已移除的内置示例
 
-Earlier drafts included built-in prompt optimizer, safety detector, and generic redactor examples. They are no longer bundled official plugins.
+早期草案包含 built-in prompt optimizer、safety detector 和 generic redactor examples。它们不再作为官方插件内置。
 
-Similar behavior should be implemented as community plugins:
+类似行为应实现为社区插件：
 
-- Prompt rewriting: `declarativeRules` on `gateway.request.afterBodyRead`.
-- Response safety checks: `declarativeRules` on `gateway.response.after` or `gateway.response.chunk`.
-- Generic log redaction: `declarativeRules` on `log.beforePersist`, or WASM when the rule runtime is not expressive enough.
+- Prompt rewriting：在 `gateway.request.afterBodyRead` 上使用 `declarativeRules`。
+- Response safety checks：在 `gateway.response.after` 或 `gateway.response.chunk` 上使用 `declarativeRules`。
+- Generic log redaction：在 `log.beforePersist` 上使用 `declarativeRules`；规则运行时表达力不够时再考虑 WASM。
 
-## Where It Lives
+## 代码位置
 
-The official plugin fixture is stored in the host repository:
+官方插件 fixture 存放在宿主仓库：
 
 ```text
 src-tauri/resources/plugins/official/privacy-filter/
 ```
 
-The host registers it in:
+宿主在这里注册它：
 
 ```text
 src-tauri/src/app/plugins/official.rs
 ```
 
-The fixture remains in this repository while plugin API v1 is stabilizing. After the API is stable, the SDK, scaffolder, and community examples can move to dedicated repositories.
+在 plugin API v1 稳定前，该 fixture 会继续保留在本仓库。API 稳定后，SDK、scaffolder 和 community examples 可以迁移到独立仓库。

@@ -32,10 +32,9 @@ docs/*
 !docs/plugin-system-development-plan.md
 !docs/plugin-system-rfc.md
 !docs/plugin-manifest-v1.md
-!docs/superpowers/
-!docs/superpowers/**
 !docs/plugins/
 !docs/plugins/**
+docs/superpowers/
 .vscode/
 *CLAUDE.md
 .ace-tool/

@@ -1,80 +1,80 @@
-# Process Plugin Runtime PoC
+# 进程插件运行时 PoC
 
-## Goal
+## 目标
 
-The process runtime PoC explores plugin isolation through a child process using JSON-RPC over stdio. It is a design and lifecycle foundation only: it is disabled by default and has no marketplace enablement by default.
+process runtime PoC 探索通过 child process 和 JSON-RPC over stdio 实现插件隔离。它只是设计和生命周期基础：disabled by default，并且 no marketplace enablement by default。
 
-This runtime is not a replacement for the WASM runtime. It exists for future plugins that cannot fit the WASM ABI but still need isolation from the Rust main process and Tauri WebView.
+这个运行时不是 WASM runtime 的替代品。它服务于未来无法放进 WASM ABI、但仍需要与 Rust main process 和 Tauri WebView 隔离的插件。
 
-## Boundary
+## 边界
 
-The process runtime runs a plugin executable as a child process with:
+process runtime 会把插件 executable 作为 child process 运行，并满足：
 
-- stdin and stdout used only for JSON-RPC over stdio.
-- stderr captured as bounded diagnostics.
-- no inherited stdin from the app.
-- no direct access to Tauri WebView.
-- no direct access to app SQLite connections.
-- no implicit network or filesystem grant from the host.
+- stdin 和 stdout 只用于 JSON-RPC over stdio。
+- stderr 只作为 bounded diagnostics 捕获。
+- 不继承 app stdin。
+- 不能直接访问 Tauri WebView。
+- 不能直接访问 app SQLite connections。
+- 宿主不会隐式授予 network 或 filesystem 权限。
 
-Any future filesystem, network, or secret access must go through explicit host-mediated APIs. M5 does not expose those APIs.
+未来任何 filesystem、network 或 secret access 都必须通过显式 host-mediated APIs。M5 不暴露这些 API。
 
-## JSON-RPC over stdio
+## JSON-RPC over stdio 协议
 
-Each request is a single newline-delimited JSON-RPC 2.0 object:
+每个 request 是一个 newline-delimited JSON-RPC 2.0 object：
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"plugin.handleHook","params":{"hook":"gateway.request.afterBodyRead","context":{}}}
 ```
 
-Each response is one newline-delimited JSON-RPC 2.0 object:
+每个 response 是一个 newline-delimited JSON-RPC 2.0 object：
 
 ```json
 {"jsonrpc":"2.0","id":1,"result":{"action":"pass"}}
 ```
 
-The host rejects:
+宿主会拒绝：
 
-- malformed JSON;
-- mismatched IDs;
-- responses over the configured byte limit;
-- plugin-side JSON-RPC errors;
-- output after the hook timeout.
+- malformed JSON。
+- mismatched IDs。
+- 超过 configured byte limit 的 response。
+- plugin-side JSON-RPC errors。
+- hook timeout 后输出的内容。
 
-## Lifecycle
+## 生命周期
 
-The process lifecycle has four bounded phases:
+process lifecycle 有四个有边界阶段：
 
-1. Spawn the child with a start timeout.
-2. Send a hook request and wait for one response with a hook timeout.
-3. Keep the process warm only until idle recycle expires.
-4. Kill and reap the child on timeout, crash, protocol error, or idle recycle.
+1. 在 start timeout 内 spawn child。
+2. 发送 hook request，并在 hook timeout 内等待一个 response。
+3. 只在 idle recycle 过期前保持进程 warm。
+4. 在 timeout、crash、protocol error 或 idle recycle 时 kill 并 reap child。
 
-The initial PoC starts one process per test session and reuses it only while it remains healthy and idle time is below the configured threshold.
+初始 PoC 每个 test session 启动一个 process，并且只在它保持 healthy 且 idle time 低于配置阈值时复用。
 
-## Required Limits
+## 必需限制
 
-- start timeout defaults to 500 ms.
-- hook timeout defaults to 300 ms.
-- idle recycle defaults to 30 seconds.
-- request and response lines are each capped at 256 KiB.
-- stderr diagnostics are bounded and never streamed into the UI unbounded.
+- start timeout 默认 500 ms。
+- hook timeout 默认 300 ms。
+- idle recycle 默认 30 seconds。
+- request 和 response lines 分别限制在 256 KiB。
+- stderr diagnostics 有边界，不会无上限 stream 到 UI。
 
-## Safety Policy
+## 安全策略
 
-- The runtime is disabled by default.
-- There is no marketplace enablement by default.
-- Process plugins must be explicitly marked experimental by host policy before use.
-- crash isolation must prevent a child exit from crashing the app.
-- Timeouts must kill the child process and record an English diagnostic message.
-- The host must treat every protocol error as a runtime failure.
+- The runtime is disabled by default。
+- There is no marketplace enablement by default。
+- 使用前，host policy 必须显式把 process plugins 标记为 experimental。
+- crash isolation 必须保证 child exit 不会导致 app crash。
+- Timeouts 必须 kill child process，并记录一条英文 diagnostic message。
+- 宿主必须把每个 protocol error 视为 runtime failure。
 
-## M5 Acceptance Tests
+## M5 验收测试
 
-M5 backend tests cover:
+M5 backend tests 覆盖：
 
-- A valid child process starts and returns a JSON-RPC hook result.
-- A child that sleeps during startup hits start timeout.
-- A child that sleeps during hook handling hits hook timeout and is killed.
-- A child that exits early is reported as crash isolation, not a host crash.
-- A healthy idle child is recycled after idle recycle.
+- 合法 child process 能启动并返回 JSON-RPC hook result。
+- startup 期间 sleep 的 child 会触发 start timeout。
+- hook handling 期间 sleep 的 child 会触发 hook timeout 并被 kill。
+- 提前退出的 child 会被报告为 crash isolation，而不是 host crash。
+- healthy idle child 会在 idle recycle 后被回收。

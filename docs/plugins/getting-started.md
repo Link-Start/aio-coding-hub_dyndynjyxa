@@ -1,36 +1,36 @@
-# Plugin Getting Started
+# 插件快速开始
 
-Use this guide to create, validate, package, and import a local AIO Coding Hub plugin.
+这份指南用于创建、校验、打包并导入一个本地 AIO Coding Hub 插件。
 
-For a full map of plugin documentation, see [Plugin Development](./README.md).
+完整文档导航见 [插件开发手册](./README.md)，从 0 到发布的主线说明见 [插件开发总指南](./developer-guide.md)。
 
-## Choose A Runtime
+## 选择运行时
 
-Start with `declarativeRules` when the plugin can be expressed as regex matching, replacement, warning, blocking, or appending messages. `declarativeRules` is the default community runtime for vNext.
+如果插件可以表达为 regex matching、replacement、warning、blocking 或 appending messages，优先使用 `declarativeRules`。`declarativeRules` 是 vNext 的默认社区运行时。
 
-Use WASM only when a plugin needs code execution and can fit the isolated WASM ABI. Arbitrary JavaScript and TypeScript plugins are not supported.
+只有当插件确实需要 code execution，并且能放进隔离的 WASM ABI 时，才使用 WASM。不支持任意 JavaScript 和 TypeScript 插件。
 
-## Install The SDK
+## 安装与检查 SDK
 
-Community plugins should use `@aio-coding-hub/plugin-sdk` for shared manifest, hook, permission, and validation types.
+社区插件应使用 `@aio-coding-hub/plugin-sdk` 获取共享的 manifest、hook、permission 和 validation types。
 
 ```bash
 pnpm --filter @aio-coding-hub/plugin-sdk typecheck
 ```
 
-SDK details: [Plugin SDK](./sdk.md).
+SDK 细节见 [插件 SDK](./sdk.md)。
 
-WASM plugins should use the Rust `aio-plugin-wasm-sdk` contracts:
+WASM 插件应使用 Rust `aio-plugin-wasm-sdk` contracts：
 
 ```bash
 pnpm plugin-wasm-sdk:test
 ```
 
-The minimal Rust example lives at `packages/plugin-wasm-sdk/examples/redactor`.
+最小 Rust 示例位于 `packages/plugin-wasm-sdk/examples/redactor`。
 
-## Create A Plugin
+## 创建插件
 
-Use `create-aio-plugin` to scaffold a local plugin:
+使用 `create-aio-plugin` scaffold 本地插件：
 
 ```bash
 pnpm --filter create-aio-plugin test
@@ -38,9 +38,9 @@ pnpm create-aio-plugin acme.redactor rule
 pnpm create-aio-plugin acme.policy wasm
 ```
 
-Each scaffold contains a `plugin.json`. Rule plugins also contain `rules/main.json`; WASM plugins contain a minimal Rust entrypoint skeleton.
+每个 scaffold 都包含 `plugin.json`。规则插件还包含 `rules/main.json`；WASM 插件包含一个最小 Rust entrypoint skeleton。
 
-## Minimal Declarative Rule Plugin
+## 最小声明式规则插件
 
 `plugin.json`:
 
@@ -94,37 +94,37 @@ Each scaffold contains a `plugin.json`. Rule plugins also contain `rules/main.js
 }
 ```
 
-Rule details: [Declarative Rules Runtime](./declarative-rules.md).
+规则细节见 [声明式规则运行时](./declarative-rules.md)。
 
-## Local Development Flow
+## 本地开发流程
 
-1. Edit `plugin.json`.
-2. Validate the real plugin directory with `pnpm create-aio-plugin validate ./acme.redactor`.
-3. Replay a fixture with `pnpm create-aio-plugin replay ./acme.redactor ./fixtures/request.json gateway.request.afterBodyRead`.
-4. Pack the plugin as `acme.redactor.aio-plugin` with `pnpm create-aio-plugin pack ./acme.redactor`.
-5. Sign package bytes with `pnpm create-aio-plugin sign <bytes> [privateKey]`.
-6. Verify package bytes with `pnpm create-aio-plugin verify <bytes> <signature> <publicKey>`.
-7. Import the package from the Plugins page.
+1. 编辑 `plugin.json`。
+2. 用 `pnpm create-aio-plugin validate ./acme.redactor` 校验真实插件目录。
+3. 用 `pnpm create-aio-plugin replay ./acme.redactor ./fixtures/request.json gateway.request.afterBodyRead` 回放 fixture。
+4. 用 `pnpm create-aio-plugin pack ./acme.redactor` 打包为 `acme.redactor.aio-plugin`。
+5. 用 `pnpm create-aio-plugin sign <bytes> [privateKey]` 对 package bytes 签名。
+6. 用 `pnpm create-aio-plugin verify <bytes> <signature> <publicKey>` 校验 package bytes。
+7. 从 Plugins 页面导入该包。
 
-WASM gateway execution is policy-gated and disabled by default in vNext. `plugin.wasm` artifacts are packaged as binary files by `create-aio-plugin pack`.
+WASM gateway execution 受策略控制，在 vNext 默认关闭。`plugin.wasm` artifacts 会由 `create-aio-plugin pack` 作为 binary files 打包。
 
-## Golden Path
+## 推荐流程
 
-1. Scaffold a declarative rule plugin.
+1. Scaffold 一个声明式规则插件。
 
    ```bash
    pnpm create-aio-plugin acme.redactor rule
    ```
 
-2. Validate `plugin.json` and rule files.
+2. 校验 `plugin.json` 和规则文件。
 
    ```bash
    pnpm create-aio-plugin validate ./acme.redactor
    ```
 
-3. Add Claude and Codex request shapes as replay fixtures.
+3. 添加 Claude 和 Codex request shapes 作为 replay fixtures。
 
-   Claude fixture:
+   Claude fixture：
 
    ```json
    {
@@ -134,7 +134,7 @@ WASM gateway execution is policy-gated and disabled by default in vNext. `plugin
    }
    ```
 
-   Codex/OpenAI Responses fixture:
+   Codex/OpenAI Responses fixture：
 
    ```json
    {
@@ -144,36 +144,36 @@ WASM gateway execution is policy-gated and disabled by default in vNext. `plugin
    }
    ```
 
-4. Replay both fixtures locally.
+4. 在本地回放两个 fixtures。
 
    ```bash
    pnpm create-aio-plugin replay ./acme.redactor ./fixtures/claude-request.json gateway.request.afterBodyRead
    pnpm create-aio-plugin replay ./acme.redactor ./fixtures/codex-request.json gateway.request.afterBodyRead
    ```
 
-5. Pack the plugin.
+5. 打包插件。
 
    ```bash
    pnpm create-aio-plugin pack ./acme.redactor
    ```
 
-6. Install locally from the Plugins page.
+6. 从 Plugins 页面本地安装。
 
-   Use the Plugins page local package install action and select `acme.redactor.aio-plugin`.
+   使用 Plugins 页面里的本地包安装操作，选择 `acme.redactor.aio-plugin`。
 
-7. Grant requested permissions and enable the plugin.
+7. 授权请求的 permissions 并启用插件。
 
-   Confirm the requested `request.body.read` and `request.body.write` permissions before enabling.
+   启用前确认插件请求的 `request.body.read` 和 `request.body.write` permissions。
 
-8. Inspect audit logs.
+8. 检查 audit logs。
 
-   After a matching request, the plugin detail panel should show hook completion or block/failure events without storing sensitive payload text.
+   命中请求后，插件详情面板应展示 hook completion 或 block/failure events，且不应存储 sensitive payload text。
 
-## Next References
+## 下一步参考
 
 - [Manifest](./manifest.md)
 - [Hooks](./hooks.md)
 - [Permissions](./permissions.md)
-- [Config Schema](./config-schema.md)
-- [Official Examples](./official-examples.md)
-- [Publishing](./publishing.md)
+- [配置 Schema](./config-schema.md)
+- [官方示例](./official-examples.md)
+- [发布插件](./publishing.md)

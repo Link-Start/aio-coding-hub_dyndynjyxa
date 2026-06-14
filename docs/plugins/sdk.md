@@ -1,35 +1,35 @@
-# Plugin SDK
+# 插件 SDK
 
-`@aio-coding-hub/plugin-sdk` provides shared TypeScript contracts for plugin manifests, hooks, permissions, runtimes, and validation helpers.
+`@aio-coding-hub/plugin-sdk` 提供插件 manifest、hooks、permissions、runtimes 和 validation helpers 的共享 TypeScript 契约。
 
-`aio-plugin-wasm-sdk` provides the matching Rust/WASM ABI contracts for code plugins that compile to WebAssembly.
+`aio-plugin-wasm-sdk` 提供与之匹配的 Rust/WASM ABI contracts，用于编译为 WebAssembly 的代码插件。
 
-The SDK is intended for:
+SDK 面向这些场景：
 
-- plugin authors writing `plugin.json`;
-- scaffold and packaging tools;
-- marketplace/index validation;
-- examples and compatibility tests.
+- 插件作者编写 `plugin.json`。
+- scaffold 和 packaging tools。
+- marketplace/index validation。
+- examples 和 compatibility tests。
 
-## Package Location
+## 包位置
 
-In this repository the SDK lives at:
+本仓库中的 SDK 位于：
 
 ```text
 packages/plugin-sdk
 packages/plugin-wasm-sdk
 ```
 
-Run the SDK checks:
+运行 SDK 检查：
 
 ```bash
 pnpm --filter @aio-coding-hub/plugin-sdk typecheck
 pnpm plugin-wasm-sdk:test
 ```
 
-## Main Types
+## 主要类型
 
-The SDK exports:
+TypeScript SDK 导出：
 
 - `PluginManifest`
 - `PluginRuntime`
@@ -40,12 +40,12 @@ The SDK exports:
 - `PluginHookContext`
 - `PluginHookResult`
 
-It also exports helpers:
+同时导出辅助函数：
 
 - `permissionRisk(permission)`
 - `validateManifest(manifest)`
 
-`create-aio-plugin` uses the SDK for manifest validation and adds local development commands over real plugin directories:
+`create-aio-plugin` 使用 SDK 做 manifest validation，并针对真实插件目录提供本地开发命令：
 
 ```bash
 pnpm create-aio-plugin validate ./acme.redactor
@@ -53,7 +53,7 @@ pnpm create-aio-plugin replay ./acme.redactor ./fixtures/request.json gateway.re
 pnpm create-aio-plugin pack ./acme.redactor
 ```
 
-The Rust/WASM SDK exports:
+Rust/WASM SDK 导出：
 
 - `PluginManifest`
 - `PluginRuntime`
@@ -65,7 +65,7 @@ The Rust/WASM SDK exports:
 - `aio_plugin_entrypoint!`
 - pointer/length helpers for the ABI return value
 
-## Minimal Manifest In TypeScript
+## TypeScript 中的最小 Manifest
 
 ```ts
 import type { PluginManifest } from "@aio-coding-hub/plugin-sdk";
@@ -105,13 +105,13 @@ if (!result.ok) {
 }
 ```
 
-## SDK Boundary
+## SDK 边界
 
-The SDK is a contract package. It does not execute plugin code and does not grant host capabilities.
+SDK 是契约包。它不执行插件代码，也不会授予宿主能力。
 
-The Rust/WASM SDK follows the same rule. It only serializes ABI-compatible JSON, defines hook result helpers, and provides the `aio_plugin_entrypoint!` macro for exporting `aio_plugin_handle`.
+Rust/WASM SDK 遵循同样边界。它只负责序列化 ABI-compatible JSON、定义 hook result helpers，并提供 `aio_plugin_entrypoint!` macro 用于导出 `aio_plugin_handle`。
 
-`PluginHookResult` uses the same active mutation envelope as the gateway host:
+`PluginHookResult` 使用与 gateway host 相同的 active mutation envelope：
 
 ```ts
 const result = {
@@ -121,34 +121,34 @@ const result = {
 } satisfies PluginHookResult;
 ```
 
-Use `requestBody`, `responseBody`, `streamChunk`, `logMessage`, and `headers` for replacements. `contextPatch` is not an active vNext gateway mutation field.
+替换内容时使用 `requestBody`、`responseBody`、`streamChunk`、`logMessage` 和 `headers`。`contextPatch` 不是 active vNext gateway mutation field。
 
-Host enforcement still happens in the Rust application:
+真正的宿主强制检查仍发生在 Rust application 中：
 
-- manifest compatibility checks;
-- permission grants;
-- hook context trimming;
-- mutation permission enforcement;
-- runtime timeout and failure policy handling;
-- package checksum/signature verification.
+- manifest compatibility checks。
+- permission grants。
+- hook context trimming。
+- mutation permission enforcement。
+- runtime timeout 和 failure policy handling。
+- package checksum/signature verification。
 
-## Rust/WASM Example
+## Rust/WASM 示例
 
-The repository includes a minimal WASM redactor example:
+仓库内包含一个最小 WASM redactor example：
 
 ```text
 packages/plugin-wasm-sdk/examples/redactor
 ```
 
-It can be tested with:
+可以这样测试：
 
 ```bash
 pnpm plugin-wasm-sdk:test
 ```
 
-## Versioning Guidance
+## 版本建议
 
-- Keep `apiVersion` aligned with the plugin API major version.
-- Use SemVer for plugin package versions.
-- If the SDK adds backward-compatible types, plugin API major version can stay the same.
-- Breaking hook, permission, runtime, or manifest changes require a new plugin API major version.
+- `apiVersion` 应与插件 API 主版本保持一致。
+- 插件包版本使用 SemVer。
+- 如果 SDK 只添加向后兼容的类型，插件 API 主版本可以不变。
+- Breaking hook、permission、runtime 或 manifest changes 需要新的插件 API 主版本。

@@ -1,46 +1,47 @@
-# AIO Coding Hub Plugin Development
+# AIO Coding Hub 插件开发手册
 
-This directory is the developer guide for the AIO Coding Hub plugin system.
+本目录是 AIO Coding Hub 插件系统的中文开发手册。插件可以扩展本地网关、请求和响应 hook、日志脱敏，以及由界面管理的配置表单。
 
-Plugins extend the local gateway, request and response hooks, log redaction, and GUI-managed configuration. Short-term community plugins should prefer `declarativeRules`; code plugins must use isolated runtimes such as WASM when host policy enables them.
+社区插件优先使用 `declarativeRules`。只有当规则运行时无法表达插件逻辑，并且宿主策略明确启用隔离运行时时，才考虑 WASM 或未来的进程运行时。`native` 只保留给宿主内置官方插件。
 
-## Start Here
+## 入门路径
 
-- [Getting Started](./getting-started.md): first local plugin, validation, replay, packaging, and import flow.
-- [Plugin SDK](./sdk.md): TypeScript types and validation helpers for plugin authors and tooling.
-- [Declarative Rules](./declarative-rules.md): no-code rule runtime for request/log redaction, safety checks, and prompt edits.
-- [Official Examples](./official-examples.md): the built-in Privacy Filter and what it demonstrates.
+- [插件开发总指南](./developer-guide.md)：从插件目录、`plugin.json`、配置表单、fixture replay 到发布的完整路径。
+- [快速开始](./getting-started.md)：创建第一个本地插件，完成校验、回放、打包和导入。
+- [插件 SDK](./sdk.md)：插件作者和工具链使用的 TypeScript/Rust 契约与校验辅助函数。
+- [声明式规则](./declarative-rules.md)：无需执行任意代码即可完成请求改写、日志脱敏、安全检查和提示词追加。
+- [官方示例](./official-examples.md)：内置 `official.privacy-filter` 展示的能力边界。
 
-## Core Contracts
+## 核心契约
 
-- [Manifest](./manifest.md): `plugin.json` required fields and runtime declarations.
-- [Full Manifest v1](../plugin-manifest-v1.md): canonical manifest specification with examples.
-- [Hooks](./hooks.md): gateway and log hook names, timing, and use cases.
-- [Permissions](./permissions.md): permission names, risk levels, and authorization behavior.
-- [Config Schema](./config-schema.md): supported config schema subset for GUI rendering and backend validation.
-- [Compatibility](./compatibility.md): app, plugin API, platform, and ABI version rules.
+- [Manifest](./manifest.md)：`plugin.json` 必填字段、运行时声明和命名规则。
+- [Manifest v1 完整规范](../plugin-manifest-v1.md)：规范性 manifest 文档和完整示例。
+- [Hooks](./hooks.md)：网关和日志 hook 名称、触发阶段、超时和使用场景。
+- [Permissions](./permissions.md)：权限名称、风险等级和授权行为。
+- [Config Schema](./config-schema.md)：用于界面渲染和后端校验的配置 schema 子集。
+- [兼容性](./compatibility.md)：应用版本、插件 API、平台和 WASM ABI 的版本规则。
 
-## Runtime And Distribution
+## 运行时与分发
 
-- [Security](./security.md): least privilege, isolation, signing, and failure policies.
-- [Streaming](./streaming.md): bounded stream chunk processing.
-- [WASM Runtime](./wasm-runtime.md): ABI v1 design and execution limits.
-- [Process Runtime PoC](./process-runtime-poc.md): disabled-by-default process isolation design.
-- [Publishing](./publishing.md): `.aio-plugin` packaging, checksum, signatures, updates, and rollback.
-- [Architecture Audit](./architecture-audit.md): trust boundaries, runtime choices, performance, and stability guidance.
+- [安全与隔离](./security.md)：最小权限、运行时隔离、签名和失败策略。
+- [流式响应插件](./streaming.md)：有边界的 stream chunk 处理。
+- [WASM 运行时](./wasm-runtime.md)：WASM ABI v1 和资源限制。
+- [进程运行时 PoC](./process-runtime-poc.md)：默认关闭的进程隔离设计。
+- [发布插件](./publishing.md)：`.aio-plugin` 打包、校验和、签名、更新与回滚。
+- [架构审计](./architecture-audit.md)：信任边界、运行时选择、性能和稳定性建议。
 
-## Recommended Development Order
+## 推荐开发顺序
 
-1. Choose `declarativeRules` unless the plugin truly needs code execution.
-2. Write `plugin.json` with the narrowest hooks and permissions.
-3. Add focused fixture rules or WASM entrypoint code.
-4. Validate with `create-aio-plugin`.
-5. Replay test fixtures before importing into the desktop app.
-6. Package and sign release artifacts only after local behavior is stable.
+1. 如果插件不需要执行代码，先选择 `declarativeRules`。
+2. 编写 `plugin.json`，只声明必需的 hooks 和 permissions。
+3. 添加聚焦的规则文件、fixture，或 WASM 入口代码。
+4. 使用 `create-aio-plugin` 校验真实插件目录。
+5. 在导入桌面应用前，用 replay fixture 覆盖 Claude 和 Codex/OpenAI Responses 请求形态。
+6. 本地行为稳定后再打包 `.aio-plugin`，需要可信分发时再补签名。
 
-## Current Stability Notes
+## 当前稳定性说明
 
-- Arbitrary JavaScript and TypeScript plugins are not supported.
-- WASM and process runtime docs describe the isolation contract; marketplace enablement is still guarded by host policy.
-- Active hooks and permissions are the only capabilities accepted by manifest validation; reserved hooks and permissions are documented for future host integration.
-- Only `official.privacy-filter` is bundled as an official native plugin. Community extensions should use `declarativeRules`, WASM, or a future isolated process runtime rather than `native`.
+- 不支持任意 JavaScript 或 TypeScript 插件直接运行。
+- WASM 和进程运行时文档描述的是隔离契约；是否允许执行仍由宿主策略控制。
+- Manifest 校验只接受已激活 hooks 和 permissions；保留项仅用于未来兼容命名。
+- 当前只有 `official.privacy-filter` 是内置官方 `native` 插件。社区扩展应使用 `declarativeRules`、WASM，或未来隔离进程运行时。

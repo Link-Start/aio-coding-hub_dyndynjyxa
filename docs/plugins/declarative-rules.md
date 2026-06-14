@@ -1,10 +1,10 @@
-# Declarative Rules Runtime
+# 声明式规则运行时
 
-`declarativeRules` is the preferred short-term runtime for community plugins. It lets plugins inspect and transform request bodies, response bodies, stream chunks, and log messages without executing arbitrary code in the host.
+`declarativeRules` 是社区插件当前优先使用的运行时。它允许插件在不向宿主注入任意代码的前提下，检查和转换 request bodies、response bodies、stream chunks 和 log messages。
 
-## Manifest Runtime
+## Manifest 运行时声明
 
-Declare rule files in `plugin.json`:
+在 `plugin.json` 中声明规则文件：
 
 ```json
 {
@@ -15,9 +15,9 @@ Declare rule files in `plugin.json`:
 }
 ```
 
-Rule paths are relative to the plugin root. They must not contain `..` or absolute path prefixes.
+规则路径相对于插件根目录。路径不能包含 `..`，也不能使用绝对路径前缀。
 
-## Rule File Shape
+## 规则文件结构
 
 ```json
 {
@@ -42,47 +42,47 @@ Rule paths are relative to the plugin root. They must not contain `..` or absolu
 }
 ```
 
-Each rule has:
+每条规则包含：
 
-- `id`: stable rule identifier for diagnostics.
-- `hook`: one hook name from [Hooks](./hooks.md).
-- `target`: where the rule scans.
-- `match.regex`: Rust `regex` pattern.
-- `match.caseSensitive`: optional, defaults to `true`.
-- `action`: what to do after a match.
-- `when`: optional runtime filter.
+- `id`：稳定的规则标识，用于诊断。
+- `hook`：[Hooks](./hooks.md) 中的一个 hook 名。
+- `target`：规则扫描的位置。
+- `match.regex`：Rust `regex` pattern。
+- `match.caseSensitive`：可选，默认 `true`。
+- `action`：命中后的动作。
+- `when`：可选的运行时过滤条件。
 
-## Targets
+## Targets 目标字段
 
-Supported `target.field` values:
+支持的 `target.field` 值：
 
 - `request.body`
 - `response.body`
 - `stream.chunk`
 - `log.message`
 
-`request.body` and `response.body` may include `jsonPath` for string fields inside JSON payloads.
+`request.body` 和 `response.body` 可以通过 `jsonPath` 指向 JSON payload 内部的字符串字段。
 
-Supported JSONPath subset:
+支持的 JSONPath 子集：
 
 - `$`
 - `.key`
 - `[*]`
 
-Examples:
+示例：
 
 - `$.input`
 - `$.prompt`
 - `$.messages[*].content`
 - `$.choices[*].message.content`
 
-Quoted keys, filters, recursive descent, numeric indexes, and arbitrary JSONPath expressions are not supported.
+暂不支持 quoted keys、filters、recursive descent、numeric indexes 和任意 JSONPath 表达式。
 
-## Actions
+## Actions 动作
 
 ### replace
 
-Replaces all regex matches in the selected text.
+替换所选文本中的所有 regex 命中。
 
 ```json
 {
@@ -91,7 +91,7 @@ Replaces all regex matches in the selected text.
 }
 ```
 
-Capture groups are supported by the Rust regex replacement syntax:
+Capture groups 使用 Rust regex replacement syntax：
 
 ```json
 {
@@ -102,7 +102,7 @@ Capture groups are supported by the Rust regex replacement syntax:
 
 ### block
 
-Stops the current request, response, or stream processing when the pipeline and hook allow blocking.
+当 pipeline 和 hook 允许阻断时，停止当前 request、response 或 stream processing。
 
 ```json
 {
@@ -113,7 +113,7 @@ Stops the current request, response, or stream processing when the pipeline and 
 
 ### warn
 
-Records a warning reason without mutating the target.
+记录 warning reason，但不修改 target。
 
 ```json
 {
@@ -124,7 +124,7 @@ Records a warning reason without mutating the target.
 
 ### appendMessage
 
-Appends a `system` or `developer` message to chat-style request bodies.
+向 chat-style request bodies 追加 `system` 或 `developer` message。
 
 ```json
 {
@@ -134,9 +134,9 @@ Appends a `system` or `developer` message to chat-style request bodies.
 }
 ```
 
-## Conditional Rules
+## 条件规则
 
-Use `when` to limit a rule by CLI, model, or config value:
+使用 `when` 根据 CLI、model 或 config value 限制规则生效范围：
 
 ```json
 {
@@ -150,50 +150,50 @@ Use `when` to limit a rule by CLI, model, or config value:
 }
 ```
 
-All provided conditions must match.
+提供的条件必须全部匹配。
 
-## Permissions
+## 权限
 
-Rules still need matching manifest permissions:
+规则仍然需要 manifest 中声明匹配的 permissions：
 
-- Reading request body: `request.body.read`
-- Mutating request body: `request.body.write`
-- Reading response body: `response.body.read`
-- Mutating response body: `response.body.write`
-- Reading stream chunks: `stream.inspect`
-- Mutating stream chunks: `stream.modify`
-- Redacting logs: `log.redact`
+- 读取 request body：`request.body.read`
+- 修改 request body：`request.body.write`
+- 读取 response body：`response.body.read`
+- 修改 response body：`response.body.write`
+- 读取 stream chunks：`stream.inspect`
+- 修改 stream chunks：`stream.modify`
+- 日志脱敏：`log.redact`
 
-The host trims hook context before rule execution and rejects unauthorized mutations after execution.
+宿主会在规则执行前裁剪 hook context，并在规则执行后拒绝未授权 mutation。
 
-## Runtime Limits
+## 运行时限制
 
-- Maximum regex pattern length: 4 KiB.
-- Maximum compiled regex size: 2 MiB.
-- Maximum rules per runtime: 256.
-- Hook execution is bounded by the gateway plugin timeout.
-- Invalid JSON targets are skipped when the target cannot be parsed as JSON syntax.
+- 最大 regex pattern length：4 KiB。
+- 最大 compiled regex size：2 MiB。
+- 每个 runtime 最多规则数：256。
+- Hook execution 受 gateway plugin timeout 约束。
+- 当 target 无法解析为 JSON syntax 时，会跳过 invalid JSON targets。
 
-## Local Replay Compatibility
+## 本地 Replay 兼容性
 
-`create-aio-plugin replay` implements the host-supported v1.1 declarative rule subset for local fixtures. It is intentionally deterministic and does not execute WASM, process plugins, network calls, or host-only native engines.
+`create-aio-plugin replay` 为本地 fixtures 实现宿主支持的 v1.1 declarative rule subset。它刻意保持确定性，不执行 WASM、process plugins、network calls 或 host-only native engines。
 
-Replay supports the same v1.1 rule actions for the community rule runtime: `replace`, `block`, `warn`, and `appendMessage`. For request body rewrites, it supports raw text targets and the documented JSONPath subset such as `$.messages[*].content`, `$.input[*].content[*].text`, and `$.input`.
+Replay 支持社区规则运行时相同的 v1.1 rule actions：`replace`、`block`、`warn` 和 `appendMessage`。对 request body rewrites，它支持 raw text targets，也支持文档化 JSONPath 子集，例如 `$.messages[*].content`、`$.input[*].content[*].text` 和 `$.input`。
 
-## Good Uses
+## 适合场景
 
-- Prompt optimization by appending instructions.
-- API key, token, email, and log redaction.
-- Safety checks that block known dangerous command patterns.
-- Lightweight response warnings.
+- 通过追加 instructions 做 prompt optimization。
+- API key、token、email 和 log redaction。
+- 阻断已知危险命令模式的 safety checks。
+- 轻量 response warnings。
 
-## Poor Fits
+## 不适合场景
 
-Use WASM or a future isolated process runtime instead when a plugin requires:
+当插件需要以下能力时，应使用 WASM 或未来的隔离进程运行时：
 
-- entropy scoring;
-- Luhn validation;
-- external API calls;
-- model-based classification;
-- filesystem access;
-- complex stateful analysis.
+- entropy scoring。
+- Luhn validation。
+- external API calls。
+- model-based classification。
+- filesystem access。
+- complex stateful analysis。

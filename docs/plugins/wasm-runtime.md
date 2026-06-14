@@ -1,30 +1,30 @@
-# WASM Plugin Runtime Design
+# WASM 插件运行时设计
 
-## Goal
+## 目标
 
-WASM runtime is the policy-gated community code-plugin runtime for aio coding hub. It exists to run plugin logic outside the Rust main-process trust boundary while preserving deterministic resource limits, permission trimming, auditability, and cross-platform behavior. `declarativeRules` is the default community runtime; WASM is for plugins that truly need code execution once host policy enables it.
+WASM runtime 是 AIO Coding Hub 面向社区 code-plugin 的 policy-gated runtime。它用于把插件逻辑放在 Rust main-process trust boundary 之外执行，同时保留 deterministic resource limits、permission trimming、auditability 和 cross-platform behavior。`declarativeRules` 是默认社区运行时；WASM 只用于宿主策略启用后，确实需要 code execution 的插件。
 
-WASM packages are installable only when host policy enables execution. This runtime is not enabled for arbitrary marketplace execution until the compatibility tests, signing policy, and host allowlist are all in place. `plugin.wasm` artifacts are packaged as binary files by `create-aio-plugin pack`.
+WASM packages are installable only when host policy enables execution。在 compatibility tests、signing policy 和 host allowlist 都到位前，该运行时不会允许任意 marketplace execution。`plugin.wasm` artifacts 会由 `create-aio-plugin pack` 作为 binary files 打包。
 
-## vNext Host Policy
+## vNext 宿主策略
 
-In vNext, WASM manifests are part of the compatibility contract, but gateway execution is policy-gated. A plugin with `runtime.kind = "wasm"` must not be enabled unless host policy explicitly sets `wasm_enabled = true`; otherwise the gateway returns `PLUGIN_RUNTIME_DISABLED`.
+在 vNext 中，WASM manifests 是 compatibility contract 的一部分，但 gateway execution 受策略控制。除非 host policy 显式设置 `wasm_enabled = true`，否则 `runtime.kind = "wasm"` 的插件不能启用；否则 gateway 返回 `PLUGIN_RUNTIME_DISABLED`。
 
-WASM enablement is rejected while host policy disables execution. The plugin can still be packaged and validated as an ABI artifact, but users cannot enable it in the gateway until the host policy explicitly allows WASM execution.
+WASM enablement is rejected while host policy disables execution。插件仍可作为 ABI artifact 被打包和校验，但在 host policy 显式允许 WASM execution 前，用户不能在 gateway 中启用它。
 
 ## WASM ABI v1
 
-The WASM ABI v1 contract is intentionally narrow:
+WASM ABI v1 contract 刻意保持很窄：
 
-- The guest module exports one guest entrypoint named `aio_plugin_handle`.
-- The host writes one UTF-8 JSON request into guest memory.
-- The guest returns one UTF-8 JSON response pointer/length pair encoded as `u64`.
-- The response must be a hook result compatible with the existing gateway plugin pipeline.
-- The host only passes permission-trimmed JSON, never internal Rust references, database handles, provider secrets, or WebView state.
+- guest module 导出一个名为 `aio_plugin_handle` 的 guest entrypoint。
+- host 向 guest memory 写入一个 UTF-8 JSON request。
+- guest 返回一个编码为 `u64` 的 UTF-8 JSON response pointer/length pair。
+- response 必须是与现有 gateway plugin pipeline 兼容的 hook result。
+- host only passes permission-trimmed JSON，绝不传递 internal Rust references、database handles、provider secrets 或 WebView state。
 
-Rust plugin authors should use `aio-plugin-wasm-sdk` from `packages/plugin-wasm-sdk` for these ABI shapes and the `aio_plugin_entrypoint!` macro.
+Rust 插件作者应使用 `packages/plugin-wasm-sdk` 中的 `aio-plugin-wasm-sdk` 获取这些 ABI shapes 和 `aio_plugin_entrypoint!` macro。
 
-The initial JSON envelope is:
+初始 JSON envelope：
 
 ```json
 {
@@ -37,7 +37,7 @@ The initial JSON envelope is:
 }
 ```
 
-The guest response envelope is:
+guest response envelope：
 
 ```json
 {
@@ -50,84 +50,84 @@ The guest response envelope is:
 }
 ```
 
-`action` may be `pass`, `replace`, `block`, or `warn` only when the hook and granted permissions allow that action. Replacement fields use the same active gateway envelope as the host: `requestBody`, `responseBody`, `streamChunk`, `logMessage`, and `headers`. Legacy `contextPatch` output is rejected in vNext.
+只有当 hook 和 granted permissions 允许时，`action` 才可以是 `pass`、`replace`、`block` 或 `warn`。Replacement fields 使用与 host 相同的 active gateway envelope：`requestBody`、`responseBody`、`streamChunk`、`logMessage` 和 `headers`。Legacy `contextPatch` output 在 vNext 中会被拒绝。
 
-## Guest Entrypoint
+## Guest Entrypoint 入口
 
-The guest entrypoint signature is:
+guest entrypoint signature：
 
 ```wat
 (func (export "aio_plugin_handle") (param i32 i32) (result i64))
 ```
 
-The two parameters are pointer and byte length for the request JSON. The return value packs response pointer and byte length:
+两个参数分别是 request JSON 的 pointer 和 byte length。返回值把 response pointer 和 byte length 打包在一起：
 
 ```text
 return = (ptr << 32) | len
 ```
 
-The host requires an exported linear memory named `memory`. The host does not pass host functions for filesystem, network, environment variables, wall-clock access, process spawning, or random data in ABI v1.
+host 要求导出名为 `memory` 的 linear memory。ABI v1 中，host 不会传递 filesystem、network、environment variables、wall-clock access、process spawning 或 random data 的 host functions。
 
-## memory/time/filesystem/network restrictions
+## memory/time/filesystem/network 限制
 
-M5 enforces these default limits:
+M5 强制执行这些默认限制：
 
-- Maximum input JSON bytes: 256 KiB.
-- Maximum output JSON bytes: 256 KiB.
-- Default guest memory limit: 16 MiB unless a lower manifest limit is provided.
-- Default hook timeout: inherited from the gateway hook timeout, capped by the runtime.
-- Fuel is consumed per Wasmtime instruction and exhausted modules are terminated.
-- no WASI filesystem imports are provided.
-- no network imports are provided.
-- no environment variable imports are provided.
-- no host clock import is provided.
+- Maximum input JSON bytes：256 KiB。
+- Maximum output JSON bytes：256 KiB。
+- Default guest memory limit：16 MiB，除非 manifest 提供更低限制。
+- Default hook timeout：继承 gateway hook timeout，并受 runtime 上限约束。
+- 每条 Wasmtime instruction 消耗 fuel，fuel 耗尽的 module 会被终止。
+- no WASI filesystem imports are provided。
+- no network imports are provided。
+- no environment variable imports are provided。
+- no host clock import is provided。
 
-The host never mounts app data, plugin data, logs, cache, or user directories into WASM. Any future storage API must be a dedicated, permission-gated host function with size limits and audit logs.
+host 绝不会把 app data、plugin data、logs、cache 或 user directories mount 到 WASM。未来任何 storage API 都必须是专用、permission-gated 的 host function，并带有 size limits 和 audit logs。
 
-## Execution Model
+## 执行模型
 
-The host creates a fresh Wasmtime store for each hook call in M5. This is slower than pooling but simpler and safer for the foundation phase. Pooling can be added later after deterministic reset semantics are tested.
+M5 中 host 会为每次 hook call 创建 fresh Wasmtime store。这比 pooling 慢，但在 foundation phase 更简单、更稳。等 deterministic reset semantics 经过测试后，可以再加入 pooling。
 
-Each execution:
+每次执行：
 
-1. Validates the manifest runtime kind is `wasm`.
-2. Reads the module from the installed plugin directory.
-3. Compiles and instantiates the module with no WASI imports.
-4. Writes the permission-trimmed JSON envelope into exported memory.
-5. Executes `aio_plugin_handle`.
-6. Reads and bounds-checks the response JSON.
-7. Converts timeout, trap, bad pointer, malformed JSON, and missing export into structured runtime failures.
+1. 校验 manifest runtime kind 是 `wasm`。
+2. 从已安装插件目录读取 module。
+3. 在没有 WASI imports 的情况下 compile 和 instantiate module。
+4. 把 permission-trimmed JSON envelope 写入 exported memory。
+5. 执行 `aio_plugin_handle`。
+6. 读取并 bounds-check response JSON。
+7. 把 timeout、trap、bad pointer、malformed JSON 和 missing export 转成 structured runtime failures。
 
-## Security Requirements
+## 安全要求
 
-- host only passes permission-trimmed JSON.
-- The plugin cannot read sensitive headers unless `request.header.readSensitive` was granted and the hook allows it.
-- The plugin cannot write body, headers, or stream chunks unless the matching write/modify permission was granted.
-- The plugin cannot access files because no WASI filesystem imports are available.
-- The plugin cannot access the network because no network imports are available.
-- fuel-based termination is mandatory for dead-loop protection.
-- All runtime failures must be auditable with English diagnostic messages.
+- host only passes permission-trimmed JSON。
+- 除非已授权 `request.header.readSensitive` 且 hook 允许，否则插件不能读取 sensitive headers。
+- 除非已授权对应 write/modify permission，否则插件不能写 body、headers 或 stream chunks。
+- 插件不能访问文件，因为 no WASI filesystem imports are available。
+- 插件不能访问网络，因为 no network imports are available。
+- fuel-based termination 是 dead-loop protection 的强制要求。
+- 所有 runtime failures 都必须能通过英文 diagnostic messages 审计。
 
-## Failure Policy
+## 失败策略
 
-WASM runtime failures are isolated to the current hook invocation:
+WASM runtime failures 会隔离在当前 hook invocation 内：
 
-- Missing export: runtime failure, plugin result is treated as hook error.
-- Trap or fuel exhaustion: runtime failure, plugin result is treated as hook error.
-- Oversized input or output: runtime failure, plugin result is treated as hook error.
-- Malformed output JSON: runtime failure, plugin result is treated as hook error.
+- Missing export：runtime failure，plugin result 视为 hook error。
+- Trap 或 fuel exhaustion：runtime failure，plugin result 视为 hook error。
+- Oversized input 或 output：runtime failure，plugin result 视为 hook error。
+- Malformed output JSON：runtime failure，plugin result 视为 hook error。
 
-The gateway pipeline still decides fail-open or fail-closed from the hook policy. The runtime itself never silently ignores errors.
+gateway pipeline 仍根据 hook policy 决定 fail-open 或 fail-closed。runtime 自身绝不会静默忽略错误。
 
-## M5 Acceptance Tests
+## M5 验收测试
 
-M5 backend tests cover:
+M5 backend tests 覆盖：
 
-- A valid WASM module can echo a small hook response.
-- A module importing WASI filesystem APIs is denied at instantiation.
-- A dead-loop module terminates by fuel exhaustion instead of blocking the host.
+- 合法 WASM module 可以 echo 一个小 hook response。
+- 导入 WASI filesystem APIs 的 module 会在 instantiation 被拒绝。
+- dead-loop module 会因 fuel exhaustion 终止，而不是阻塞 host。
 
-SDK and example checks run through:
+SDK 和示例检查命令：
 
 ```bash
 pnpm plugin-wasm-sdk:test

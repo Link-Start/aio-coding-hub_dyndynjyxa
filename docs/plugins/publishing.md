@@ -1,23 +1,23 @@
-# Plugin Publishing
+# 插件发布
 
-The package format is `.aio-plugin`, a zip archive with `plugin.json` at the root or inside one top-level directory.
+插件包格式是 `.aio-plugin`。它本质上是一个 zip archive，`plugin.json` 必须位于压缩包根目录，或唯一顶层目录内。
 
-Publishing checklist:
+发布检查清单：
 
-- Validate `plugin.json`.
-- Keep package size and entry count small.
-- Compute `sha256` over the package bytes.
-- Sign release metadata with Ed25519 when publishing through a trusted index.
-- Include rollback notes for breaking updates.
+- 校验 `plugin.json`。
+- 控制 package size 和 entry count。
+- 对 package bytes 计算 `sha256`。
+- 通过可信 index 发布时，用 Ed25519 签名 release metadata。
+- 对 breaking update 写清 rollback 说明。
 
-The current implementation supports local/offline package import, constrained remote `.aio-plugin` download, checksum/signature verification, update permission deltas, revoked-plugin quarantine, and rollback snapshots.
+当前实现支持本地/离线包导入、受约束的远程 `.aio-plugin` 下载、checksum/signature verification、更新时的 permission delta 检查、已撤销插件 quarantine，以及 rollback snapshots。
 
-Remote package installation is intentionally narrow:
+远程包安装刻意保持窄能力：
 
-- download URLs must be `https://` or `file://` without credentials;
-- artifact paths must end in `.aio-plugin`;
-- packages are size-limited before extraction;
-- checksum is mandatory for remote and GitHub release installs;
-- Ed25519 signatures are verified when a signature and trusted public key are provided.
+- 下载 URL 必须是无凭据的 `https://` 或 `file://`。
+- artifact path 必须以 `.aio-plugin` 结尾。
+- 包在解压前会受到大小限制。
+- remote 和 GitHub release install 必须提供 checksum。
+- 如果同时提供 signature 和 trusted public key，宿主会校验 Ed25519 signature。
 
-Developer tooling emits Ed25519 signatures as base64. Public keys are raw 32-byte Ed25519 public keys encoded as base64, matching the host verifier input.
+开发者工具输出 base64 编码的 Ed25519 signature。Public key 是原始 32-byte Ed25519 public key 的 base64 编码，和宿主 verifier 输入保持一致。

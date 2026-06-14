@@ -1,97 +1,97 @@
-# Plugin Architecture Audit
+# 插件架构审计
 
-This audit records the current plugin-system architecture after narrowing the official catalog to `official.privacy-filter`.
+本文记录将官方 catalog 收敛到 `official.privacy-filter` 后，当前插件系统架构的审计结论。
 
-## Decision
+## 决策
 
-Keep only `official.privacy-filter` as a bundled official plugin.
+只保留 `official.privacy-filter` 作为 bundled official plugin。
 
-Remove the previous built-in prompt optimizer, safety detector, and generic redactor examples from the official catalog. Their behaviors remain valid extension scenarios, but they should be implemented as community plugins through `declarativeRules`, WASM, or a future isolated process runtime.
+移除之前官方 catalog 中的 built-in prompt optimizer、safety detector 和 generic redactor examples。它们仍然是有效扩展场景，但应通过 `declarativeRules`、WASM 或未来隔离进程运行时作为社区插件实现。
 
-## Architecture Rationale
+## 架构依据
 
-Mature plugin systems keep a small trusted host core and expose stable extension points instead of accumulating host-owned examples:
+成熟插件系统通常保持小而可信的 host core，并暴露稳定 extension points，而不是不断累积 host-owned examples：
 
 - VS Code uses manifest-declared [contribution points](https://code.visualstudio.com/api/references/contribution-points) and [activation events](https://code.visualstudio.com/api/references/activation-events).
 - Chrome extensions require manifest-declared [permissions](https://developer.chrome.com/docs/extensions/develop/concepts/declare-permissions) and use constrained background [service workers](https://developer.chrome.com/docs/extensions/develop/migrate/to-service-workers).
 - IDE plugin platforms expose explicit [extension points](https://plugins.jetbrains.com/docs/intellij/plugin-extension-points.html) and versioned compatibility contracts.
 
-AIO Coding Hub follows the same shape:
+AIO Coding Hub 采用同样形态：
 
-- `plugin.json` declares ID, runtime, hooks, permissions, config schema, and host compatibility.
-- Hooks are explicit gateway/log extension points with bounded timeouts and permission-trimmed contexts.
-- Community code execution stays out of the Rust main process and WebView.
-- `native` is reserved for built-in official engines. Third-party packages cannot declare host-native engines.
+- `plugin.json` 声明 ID、runtime、hooks、permissions、config schema 和 host compatibility。
+- Hooks 是明确的 gateway/log extension points，带有 bounded timeouts 和 permission-trimmed contexts。
+- 社区代码执行不会进入 Rust main process 和 WebView。
+- `native` 只保留给 built-in official engines。第三方包不能声明 host-native engines。
 
-## Trust Boundaries
+## 信任边界
 
-The host trust boundary is:
+当前 host trust boundary：
 
-- Trusted: Rust host, gateway pipeline, database, packaged official native privacy engine.
-- Semi-trusted: signed marketplace metadata and package checksums.
-- Untrusted by default: local packages, marketplace packages, GitHub release packages, rule files, WASM bytecode, process runtime binaries.
+- Trusted：Rust host、gateway pipeline、database、packaged official native privacy engine。
+- Semi-trusted：signed marketplace metadata 和 package checksums。
+- Untrusted by default：local packages、marketplace packages、GitHub release packages、rule files、WASM bytecode、process runtime binaries。
 
-The `official.*` namespace must remain host-owned. Local, marketplace, and GitHub packages must use publisher namespaces such as `acme.plugin-name`.
+`official.*` namespace 必须继续由宿主拥有。本地、marketplace 和 GitHub 包必须使用类似 `acme.plugin-name` 的 publisher namespace。
 
-## Extension Model
+## 扩展模型
 
-Recommended runtime order:
+推荐 runtime 选择顺序：
 
-1. `declarativeRules` for JSON path selection, regex detection, replacement, warning, blocking, and message append behavior.
-2. WASM for deterministic code plugins that need logic beyond rule files.
-3. Managed process runtime only for future cases that cannot fit WASM, with disabled-by-default marketplace enablement.
+1. `declarativeRules`：用于 JSON path selection、regex detection、replacement、warning、blocking 和 message append behavior。
+2. WASM：用于需要 rule files 之外逻辑的 deterministic code plugins。
+3. Managed process runtime：只用于未来无法适配 WASM 的场景，并且默认没有 marketplace enablement。
 
-Do not open third-party `native` plugins without a separate signed binary policy, ABI stability story, crash isolation model, upgrade story, and platform-specific security review.
+不要开放第三方 `native` 插件，除非先补齐独立 signed binary policy、ABI stability story、crash isolation model、upgrade story 和 platform-specific security review。
 
-## Performance And Stability Guidance
+## 性能与稳定性建议
 
-Keep the hot path predictable:
+保持 hot path 可预测：
 
-- Execute hooks in priority order with fixed timeout budgets.
-- Keep request and response bodies bounded before exposing them to plugins.
-- Keep stream hooks chunk-based with sliding-window context instead of buffering full streams.
-- Cache parsed rule/native engine state by plugin ID, version, and runtime key.
-- Fail open for non-security enrichment; fail closed only for security/privacy gates that users explicitly enable.
-- Record runtime failures and circuit-open skips so repeated bad plugins do not keep degrading the gateway.
-- Keep official native engines few and focused so host startup, binary size, and maintenance risk stay controlled.
+- 按 priority 顺序执行 hooks，并使用固定 timeout budgets。
+- 在暴露给插件前，对 request 和 response bodies 做大小边界控制。
+- Stream hooks 保持 chunk-based，并提供 sliding-window context，而不是缓冲完整 stream。
+- 按 plugin ID、version 和 runtime key 缓存 parsed rule/native engine state。
+- 对非安全增强使用 fail open；只对用户明确启用的 security/privacy gates 使用 fail closed。
+- 记录 runtime failures 和 circuit-open skips，避免坏插件持续拖慢 gateway。
+- official native engines 要少而聚焦，控制 host startup、binary size 和维护风险。
 
 ## v1.1 Performance Budgets
 
-- Empty plugin pipeline request hook: no allocation-heavy runtime dispatch and below 25 microseconds on the maintainer laptop performance smoke.
-- One noop declarative plugin request hook: below 250 microseconds on the maintainer laptop performance smoke.
-- No `gateway.response.chunk` plugins: direct stream pass-through path must remain active.
-- One declarative rule plugin: parsed rule runtime must be cached after first execution.
-- Privacy Filter: compiled detector must be cached by plugin ID, version, installed directory, and runtime key.
+- Empty plugin pipeline request hook：不应有 allocation-heavy runtime dispatch，在维护者笔记本 performance smoke 上低于 25 microseconds。
+- One noop declarative plugin request hook：在维护者笔记本 performance smoke 上低于 250 microseconds。
+- 没有 `gateway.response.chunk` plugins 时：direct stream pass-through path 必须保持 active。
+- One declarative rule plugin：parsed rule runtime 必须在首次执行后缓存。
+- Privacy Filter：compiled detector 必须按 plugin ID、version、installed directory 和 runtime key 缓存。
 
-## Current Shape
+## 当前形态
 
-Bundled official plugin:
+Bundled official plugin：
 
-- `official.privacy-filter`: native host engine aligned with `packyme/privacy-filter`, used for irreversible pre-upstream privacy redaction and log redaction.
+- `official.privacy-filter`：与 `packyme/privacy-filter` 对齐的 native host engine，用于 irreversible pre-upstream privacy redaction 和 log redaction。
 
-Open community capability:
+开放给社区的能力：
 
-- Declarative prompt helpers.
-- Declarative response safety checks.
-- Declarative or WASM log redactors.
-- WASM examples and SDK contracts.
-- Process runtime proof-of-concept documentation, disabled by default.
+- Declarative prompt helpers。
+- Declarative response safety checks。
+- Declarative 或 WASM log redactors。
+- WASM examples 和 SDK contracts。
+- 默认关闭的 Process runtime proof-of-concept documentation。
 
-## Follow-Up Review Points
+## 后续审计点
 
-Before promoting plugin API v1 as stable:
+在把 plugin API v1 标记为 stable 前：
 
-- Confirm hook names and permission names are final enough for semantic versioning.
-- Add marketplace policy for WASM enablement and package signing.
-- Keep official examples in documentation as community patterns, not bundled host plugins.
-- Add benchmarks around plugin hook overhead and Privacy Filter redaction latency on large but allowed payloads.
-- Add telemetry-safe counters for plugin timeouts, skips, and quarantines without logging sensitive payloads.
+- 确认 hook names 和 permission names 已足够稳定，可以进入 semantic versioning。
+- 补充 WASM enablement 和 package signing 的 marketplace policy。
+- 把 official examples 保留为文档中的 community patterns，而不是 bundled host plugins。
+- 增加 plugin hook overhead 和 Privacy Filter 在大型但允许 payload 上 redaction latency 的 benchmarks。
+- 增加 telemetry-safe counters，记录 plugin timeouts、skips 和 quarantines，但不记录 sensitive payloads。
 
-## v1.1 Hardening Decisions
+## v1.1 加固决策
 
-- Plugin API v1.1 uses `plugin-api-v1-contract.json` as the source of truth.
-- Provider-neutral request context is available through `request.normalizedMessages`.
-- WASM enablement remains rejected while host policy disables execution.
-- Runtime caches are pruned on plugin refresh.
-- Plugin hot-path performance smoke tests are part of release readiness.
-- `create-aio-plugin replay` matches the supported declarative rule subset.
+- Plugin API v1.1 使用 `plugin-api-v1-contract.json` 作为 source of truth。
+- Provider-neutral request context 通过 `request.normalizedMessages` 提供。
+- 当 host policy disables execution 时，WASM enablement remains rejected。
+- Plugin refresh 时会清理 runtime caches。
+- Plugin hot-path performance smoke tests 是 release readiness 的一部分。
+- `create-aio-plugin replay` 与受支持的 declarative rule subset 保持一致。

@@ -1,54 +1,54 @@
-# Plugin Manifest v1
+# 插件 Manifest v1
 
-`plugin.json` is the stable package contract between a plugin and aio coding hub. Manifest v1 supports declarative rule plugins first, WASM code plugins when host policy enables them, and a small set of official-only native engines.
+`plugin.json` 是插件与 AIO Coding Hub 之间稳定的 package contract。Manifest v1 优先支持声明式规则插件；当 host policy 启用时支持 WASM code plugins；同时保留少量 official-only native engines。
 
-## 1. Required Fields
+## 1. 必填字段
 
-| Field | Type | Description |
+| 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `id` | string | Globally unique plugin ID. |
-| `name` | string | User-visible name. |
-| `version` | string | Plugin version, using SemVer. |
-| `apiVersion` | string | Plugin API version, for example `1.0.0`. |
-| `runtime` | object | Runtime declaration. |
-| `hooks` | array | Hook registrations. |
-| `permissions` | array | Requested permissions. |
-| `hostCompatibility` | object | Supported aio coding hub host range. |
+| `id` | string | 全局唯一插件 ID。 |
+| `name` | string | 展示给用户的名称。 |
+| `version` | string | 插件版本，使用 SemVer。 |
+| `apiVersion` | string | 插件 API 版本，例如 `1.0.0`。 |
+| `runtime` | object | 运行时声明。 |
+| `hooks` | array | Hook 注册信息。 |
+| `permissions` | array | 请求的权限。 |
+| `hostCompatibility` | object | 支持的 AIO Coding Hub 宿主版本范围。 |
 
-## 2. Optional Fields
+## 2. 可选字段
 
-| Field | Type | Description |
+| 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `entry` | string | Runtime artifact path, such as `plugin.wasm`; not required for declarative rules. |
-| `configSchema` | object | JSON Schema subset for user configuration. |
-| `configVersion` | integer | Configuration schema version. |
-| `description` | string | Short user-visible summary. |
-| `author` | string or object | Author metadata. |
-| `homepage` | string | Project homepage URL. |
-| `repository` | string or object | Source repository metadata. |
-| `license` | string | SPDX license expression when possible. |
-| `checksum` | string | Package checksum. |
-| `signature` | string | Package signature. |
-| `category` | string | `security`, `productivity`, `redaction`, or `utility`. |
+| `entry` | string | 运行时 artifact path，例如 `plugin.wasm`；声明式规则不需要该字段。 |
+| `configSchema` | object | 用于用户配置的 JSON Schema subset。 |
+| `configVersion` | integer | 配置 schema 版本。 |
+| `description` | string | 展示给用户的简短摘要。 |
+| `author` | string or object | 作者元数据。 |
+| `homepage` | string | 项目主页 URL。 |
+| `repository` | string or object | 源码仓库元数据。 |
+| `license` | string | 尽量使用 SPDX license expression。 |
+| `checksum` | string | Package checksum。 |
+| `signature` | string | Package signature。 |
+| `category` | string | `security`、`productivity`、`redaction` 或 `utility`。 |
 
-## 3. ID And Version Rules
+## 3. ID 与版本规则
 
-Plugin IDs use the format `publisher.plugin-name`.
+Plugin IDs 使用 `publisher.plugin-name` 格式。
 
-- The publisher and name segments must be lowercase ASCII.
-- Each segment may contain letters, digits, and hyphens.
-- Dots separate namespace segments.
-- Path separators, `..`, spaces, shell metacharacters, and empty segments are invalid.
-- `official.privacy-filter` is the only bundled official plugin ID.
-- The `official.*` namespace can only be installed through the built-in official plugin source; local, marketplace, and GitHub packages must use their own publisher namespace.
+- publisher 和 name segment 必须是 lowercase ASCII。
+- 每个 segment 可以包含字母、数字和 hyphen。
+- 使用 dots 分隔 namespace segments。
+- Path separators、`..`、spaces、shell metacharacters 和 empty segments 都是非法的。
+- `official.privacy-filter` 是唯一 bundled official plugin ID。
+- `official.*` namespace 只能通过 built-in official plugin source 安装；local、marketplace 和 GitHub packages 必须使用自己的 publisher namespace。
 
-Versions must follow SemVer. Pre-release versions are allowed for local development and unsigned packages but marketplace stable releases should use release versions.
+Versions 必须遵循 SemVer。Pre-release versions 可用于本地开发和 unsigned packages；marketplace stable releases 应使用 release versions。
 
-`apiVersion` is independent from the app version. The host may add backward-compatible fields within the same major API. Breaking changes require a new major API.
+`apiVersion` 独立于 app version。宿主可以在同一 major API 内添加 backward-compatible fields。Breaking changes 需要新的 major API。
 
 ## 4. Runtime
 
-Runtime v1 supports community declarative rules:
+Runtime v1 支持社区声明式规则：
 
 ```json
 {
@@ -57,7 +57,7 @@ Runtime v1 supports community declarative rules:
 }
 ```
 
-WASM runtime:
+WASM runtime：
 
 ```json
 {
@@ -67,11 +67,11 @@ WASM runtime:
 }
 ```
 
-WASM packages are installable only when host policy enables execution. A host that has not enabled WASM execution must reject or disable WASM plugins instead of routing them through another runtime.
+WASM packages are installable only when host policy enables execution。未启用 WASM execution 的宿主必须拒绝或禁用 WASM plugins，不能把它们路由到其他 runtime。
 
-Short-term validation must reject arbitrary JavaScript/TypeScript, Node.js, Deno, native dynamic libraries, and WebView code.
+短期 validation 必须拒绝 arbitrary JavaScript/TypeScript、Node.js、Deno、native dynamic libraries 和 WebView code。
 
-Official-only native runtime:
+Official-only native runtime：
 
 ```json
 {
@@ -80,11 +80,11 @@ Official-only native runtime:
 }
 ```
 
-`native` is reserved for built-in official plugins installed from the built-in official source. Third-party packages cannot declare host-native engines.
+`native` 只保留给从 built-in official source 安装的 built-in official plugins。第三方包不能声明 host-native engines。
 
 ## 5. Host Compatibility
 
-`hostCompatibility` constrains plugin installation and enablement:
+`hostCompatibility` 约束插件安装和启用：
 
 ```json
 {
@@ -94,24 +94,24 @@ Official-only native runtime:
 }
 ```
 
-Incompatible plugins are marked `incompatible` and never enter the hook pipeline.
+不兼容插件会被标记为 `incompatible`，不会进入 hook pipeline。
 
 ## 6. Hook v1
 
-Active hooks in plugin API v1 are the hooks currently wired into the gateway or log pipeline. Reserved hooks for future host integration are documented so the names can stay stable, but manifest validation rejects them with `PLUGIN_RESERVED_HOOK` until the host implements their call sites.
+Active hooks in plugin API v1 是当前已经接入 gateway 或 log pipeline 的 hooks。Reserved hooks for future host integration 会被记录下来以稳定命名；但在宿主实现对应调用点前，manifest validation 会用 `PLUGIN_RESERVED_HOOK` 拒绝它们。
 
-| Hook | Trigger | Modification | Default timeout | Default failure policy | Matching permissions |
+| Hook | 触发时机 | 可修改内容 | 默认超时 | 默认失败策略 | 匹配权限 |
 | --- | --- | --- | --- | --- | --- |
-| `gateway.request.afterBodyRead` | Body reader finished buffering allowed body | JSON body, raw body metadata | 200 ms | fail-open | `request.body.read`, `request.body.write` |
-| `gateway.request.beforeSend` | Before reqwest sends upstream request | headers and body | 300 ms | fail-open or security fail-closed | `request.header.write`, `request.body.write` |
-| `gateway.response.chunk` | Stream chunk before CLI output | chunk pass, replace, block, warn | 20 ms | security fail-closed, non-security fail-open | `stream.inspect`, `stream.modify` |
-| `gateway.response.after` | Complete non-stream response below size budget | body pass, replace, block, warn | 300 ms | security fail-closed, non-security fail-open | `response.body.read`, `response.body.write` |
-| `gateway.error` | Host or upstream error observed | no host-error hiding | 100 ms | fail-open | `request.meta.read` |
-| `log.beforePersist` | Request or audit log before persistence | redacted log fields | 100 ms | fail-closed-to-host-redaction | `log.redact` |
+| `gateway.request.afterBodyRead` | Body reader 完成 allowed body buffering 后 | JSON body、raw body metadata | 200 ms | fail-open | `request.body.read`, `request.body.write` |
+| `gateway.request.beforeSend` | reqwest 发送 upstream request 前 | headers 和 body | 300 ms | fail-open 或 security fail-closed | `request.header.write`, `request.body.write` |
+| `gateway.response.chunk` | CLI output 前的 stream chunk | chunk pass、replace、block、warn | 20 ms | security fail-closed、non-security fail-open | `stream.inspect`, `stream.modify` |
+| `gateway.response.after` | 大小预算内的完整 non-stream response | body pass、replace、block、warn | 300 ms | security fail-closed、non-security fail-open | `response.body.read`, `response.body.write` |
+| `gateway.error` | 观察到 host 或 upstream error 后 | 不隐藏 host error | 100 ms | fail-open | `request.meta.read` |
+| `log.beforePersist` | Request 或 audit log 持久化前 | redacted log fields | 100 ms | fail-closed-to-host-redaction | `log.redact` |
 
-Streaming hooks receive bounded chunks plus a fixed-size sliding window. They do not receive an unlimited full response.
+Streaming hooks 接收 bounded chunks 和固定大小 sliding window，不会接收无限制完整响应。
 
-Reserved hooks:
+Reserved hooks：
 
 - `gateway.request.received`
 - `gateway.request.beforeProviderResolution`
@@ -119,55 +119,55 @@ Reserved hooks:
 
 ## 7. Permission v1
 
-Reserved permissions for future host-mediated APIs are documented for naming stability, but manifest validation rejects them with `PLUGIN_RESERVED_PERMISSION` until those APIs exist.
+Reserved permissions for future host-mediated APIs 会被记录下来以稳定命名；但在这些 API 存在前，manifest validation 会用 `PLUGIN_RESERVED_PERMISSION` 拒绝它们。
 
-| Permission | Risk | Description |
+| Permission | Risk | 说明 |
 | --- | --- | --- |
-| `request.meta.read` | low | Read method, path, CLI key, trace ID, provider hints. |
-| `request.header.read` | medium | Read non-sensitive request headers. |
-| `request.header.readSensitive` | high | Read sensitive request headers such as `Authorization` and `Cookie`. |
-| `request.header.write` | high | Modify request headers. |
-| `request.body.read` | high | Read request body. |
-| `request.body.write` | high | Modify request body. |
-| `response.header.read` | low | Read response headers. |
-| `response.header.write` | medium | Modify safe response headers returned to CLI. |
-| `response.body.read` | high | Read complete non-stream response body when below budget. |
-| `response.body.write` | high | Modify non-stream response body. |
-| `stream.inspect` | high | Inspect streamed chunks and sliding window. |
-| `stream.modify` | high | Replace or block streamed chunks. |
-| `log.redact` | medium | Redact log fields before persistence. |
+| `request.meta.read` | low | 读取 method、path、CLI key、trace ID、provider hints。 |
+| `request.header.read` | medium | 读取非敏感 request headers。 |
+| `request.header.readSensitive` | high | 读取 `Authorization` 和 `Cookie` 等 sensitive request headers。 |
+| `request.header.write` | high | 修改 request headers。 |
+| `request.body.read` | high | 读取 request body。 |
+| `request.body.write` | high | 修改 request body。 |
+| `response.header.read` | low | 读取 response headers。 |
+| `response.header.write` | medium | 修改返回给 CLI 的 safe response headers。 |
+| `response.body.read` | high | 在预算内读取完整 non-stream response body。 |
+| `response.body.write` | high | 修改 non-stream response body。 |
+| `stream.inspect` | high | 检查 streamed chunks 和 sliding window。 |
+| `stream.modify` | high | 替换或阻断 streamed chunks。 |
+| `log.redact` | medium | 持久化前脱敏 log fields。 |
 
-Reserved permissions:
+Reserved permissions：
 
 | Permission | Risk | Future host-mediated API |
 | --- | --- | --- |
-| `plugin.storage` | medium | Use isolated plugin storage. |
-| `network.fetch` | high | Make host-mediated network requests. |
-| `file.read` | high | Read host-mediated files. |
-| `file.write` | high | Write host-mediated files. |
-| `secret.read` | critical | Read host-managed secrets. |
+| `plugin.storage` | medium | 使用隔离 plugin storage。 |
+| `network.fetch` | high | 发起 host-mediated network requests。 |
+| `file.read` | high | 读取 host-mediated files。 |
+| `file.write` | high | 写入 host-mediated files。 |
+| `secret.read` | critical | 读取 host-managed secrets。 |
 
-高危权限需要二次授权. Critical permissions require second confirmation and stronger UI copy.
+高危权限需要二次授权。Critical permissions require second confirmation and stronger UI copy。
 
-插件升级新增权限必须重新授权. The host must keep the plugin disabled or partially disabled until the new permissions are approved.
+插件升级新增权限必须重新授权。The host must keep the plugin disabled or partially disabled until the new permissions are approved。
 
-## 8. Hook And Permission Compatibility
+## 8. Hook 与 Permission 兼容性
 
-Validation rejects:
+Validation 会拒绝：
 
-- Unknown hook names.
-- Reserved hook names.
-- Unknown permissions.
-- Reserved permissions.
-- Write permissions requested for hooks that cannot modify.
-- Sensitive header reads without `request.header.readSensitive`.
-- Body writes without matching body read/write permission.
-- `stream.modify` actions without `stream.modify`.
-- `network.fetch`, `file.read`, `file.write`, or `secret.read` until the host provides those APIs.
+- Unknown hook names。
+- Reserved hook names。
+- Unknown permissions。
+- Reserved permissions。
+- 为不能修改的 hooks 请求 write permissions。
+- 没有 `request.header.readSensitive` 却读取 sensitive header。
+- 没有匹配 body read/write permission 却写 body。
+- 没有 `stream.modify` 却执行 `stream.modify` actions。
+- 在 host 提供对应 API 前请求 `network.fetch`、`file.read`、`file.write` 或 `secret.read`。
 
-## 9. Config Schema Subset
+## 9. Config Schema 子集
 
-The supported `configSchema` subset includes:
+受支持的 `configSchema` subset 包括：
 
 - `string`
 - `number`
@@ -178,11 +178,11 @@ The supported `configSchema` subset includes:
 - `object`
 - `password`
 
-Plugins cannot provide custom GUI code. The host renders the form, validates before saving, and validates again before enabling. Sensitive values are not returned to the frontend in plaintext.
+插件不能提供 custom GUI code。宿主负责渲染表单、保存前校验，并在启用前再次校验。Sensitive values 不会以 plaintext 返回前端。
 
-## 10. State Machine
+## 10. 状态机
 
-States:
+状态：
 
 - `available`
 - `installed`
@@ -193,28 +193,28 @@ States:
 - `quarantined`
 - `uninstalled`
 
-Allowed transitions:
+允许的状态转换：
 
 | From | To | Trigger |
 | --- | --- | --- |
-| `available` | `installed` | User installs package or market plugin. |
-| `installed` | `enabled` | User grants required permissions and valid config. |
-| `installed` | `disabled` | User installs but does not enable. |
-| `enabled` | `disabled` | User disables plugin. |
-| `disabled` | `enabled` | User enables plugin after validation. |
-| `enabled` | `update_available` | Market detects newer compatible version. |
-| `disabled` | `update_available` | Market detects newer compatible version. |
-| `update_available` | `enabled` | Update succeeds and permissions remain valid. |
-| `update_available` | `disabled` | Update succeeds but needs new permission approval. |
-| `installed` | `incompatible` | Host/API/platform version is incompatible. |
-| `enabled` | `quarantined` | Repeated crash, timeout, signature failure, or revoked market status. |
-| `disabled` | `quarantined` | Signature failure or revoked market status. |
-| `quarantined` | `disabled` | User acknowledges and restores after validation. |
-| any active state | `uninstalled` | User uninstalls plugin. |
+| `available` | `installed` | 用户安装 package 或 market plugin。 |
+| `installed` | `enabled` | 用户授权 required permissions 且配置有效。 |
+| `installed` | `disabled` | 用户安装但不启用。 |
+| `enabled` | `disabled` | 用户禁用插件。 |
+| `disabled` | `enabled` | 用户在校验通过后启用插件。 |
+| `enabled` | `update_available` | Market 发现新的兼容版本。 |
+| `disabled` | `update_available` | Market 发现新的兼容版本。 |
+| `update_available` | `enabled` | 更新成功且 permissions 仍有效。 |
+| `update_available` | `disabled` | 更新成功但需要新的 permission approval。 |
+| `installed` | `incompatible` | Host/API/platform version 不兼容。 |
+| `enabled` | `quarantined` | 重复 crash、timeout、signature failure 或 revoked market status。 |
+| `disabled` | `quarantined` | Signature failure 或 revoked market status。 |
+| `quarantined` | `disabled` | 用户确认并在校验后恢复。 |
+| any active state | `uninstalled` | 用户卸载插件。 |
 
-Upgrade failure restores the previous version, config snapshot, permissions, and enabled state. Signature failure moves the plugin to `quarantined`. Runtime crash and repeated timeout can move an enabled plugin to `quarantined`.
+Upgrade failure 会恢复 previous version、config snapshot、permissions 和 enabled state。Signature failure 会让插件进入 `quarantined`。Runtime crash 和 repeated timeout 可以让 enabled plugin 进入 `quarantined`。
 
-## 11. Example Manifest: Community Prompt Helper
+## 11. Manifest 示例：社区 Prompt Helper
 
 ```json
 {
@@ -260,7 +260,7 @@ Upgrade failure restores the previous version, config snapshot, permissions, and
 }
 ```
 
-## 12. Example Manifest: Privacy Filter
+## 12. Manifest 示例：Privacy Filter
 
 ```json
 {
