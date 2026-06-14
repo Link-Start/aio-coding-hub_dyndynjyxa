@@ -866,28 +866,38 @@ fn migrate_legacy_official_privacy_filter_config(
     if stored_config_version.unwrap_or(0) >= current_version {
         return;
     }
-    let Some(default_sensitive_types) = detail
+    let default_sensitive_types = detail
         .manifest
         .config_schema
         .as_ref()
         .and_then(|schema| schema.pointer("/properties/sensitiveTypes/default"))
-        .and_then(serde_json::Value::as_array)
-    else {
-        return;
-    };
+        .and_then(serde_json::Value::as_array);
+    let default_redaction_scopes = detail
+        .manifest
+        .config_schema
+        .as_ref()
+        .and_then(|schema| schema.pointer("/properties/redactionScopes/default"))
+        .cloned();
     let Some(config) = detail.config.as_object_mut() else {
         return;
     };
-    let Some(sensitive_types) = config
-        .get_mut("sensitiveTypes")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return;
-    };
 
-    for item in default_sensitive_types {
-        if !sensitive_types.iter().any(|existing| existing == item) {
-            sensitive_types.push(item.clone());
+    if let Some(default_sensitive_types) = default_sensitive_types {
+        if let Some(sensitive_types) = config
+            .get_mut("sensitiveTypes")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for item in default_sensitive_types {
+                if !sensitive_types.iter().any(|existing| existing == item) {
+                    sensitive_types.push(item.clone());
+                }
+            }
+        }
+    }
+
+    if !config.contains_key("redactionScopes") {
+        if let Some(default_redaction_scopes) = default_redaction_scopes {
+            config.insert("redactionScopes".to_string(), default_redaction_scopes);
         }
     }
 }
@@ -1585,6 +1595,15 @@ DROP TABLE plugins;
             .get("sensitiveTypes")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|items| items.iter().any(|item| item == "cn_phone")));
+        assert_eq!(
+            active[0].config["redactionScopes"],
+            serde_json::json!([
+                "system_instructions",
+                "user_prompts",
+                "tool_results",
+                "legacy_prompt"
+            ])
+        );
 
         let pipeline = GatewayPluginPipeline::for_tests(
             active,
@@ -1667,6 +1686,15 @@ DROP TABLE plugins;
             .get("sensitiveTypes")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|items| items.iter().any(|item| item == "cn_phone")));
+        assert_eq!(
+            active[0].config["redactionScopes"],
+            serde_json::json!([
+                "system_instructions",
+                "user_prompts",
+                "tool_results",
+                "legacy_prompt"
+            ])
+        );
 
         let pipeline = GatewayPluginPipeline::for_tests(
             active,
@@ -1730,12 +1758,13 @@ DROP TABLE plugins;
         repository::save_plugin_config(
             &db,
             "official.privacy-filter",
-            2,
+            3,
             &serde_json::json!({
                 "redactBeforeUpstream": true,
                 "redactLogs": true,
                 "profile": "balanced",
-                "sensitiveTypes": ["email"]
+                "sensitiveTypes": ["email"],
+                "redactionScopes": ["user_prompts"]
             }),
             &[],
         )
@@ -1750,6 +1779,52 @@ DROP TABLE plugins;
             .get("sensitiveTypes")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|items| !items.iter().any(|item| item == "cn_phone")));
+        assert_eq!(
+            active[0].config["redactionScopes"],
+            serde_json::json!(["user_prompts"])
+        );
+    }
+
+    #[test]
+    fn enabled_official_privacy_filter_preserves_existing_redaction_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::init_for_tests(
+            &dir.path()
+                .join("official-privacy-filter-redaction-scopes.db"),
+        )
+        .unwrap();
+        let installed_root = dir.path().join("installed");
+
+        install_official_plugin(
+            &db,
+            "official.privacy-filter",
+            env!("CARGO_PKG_VERSION"),
+            &installed_root,
+        )
+        .unwrap();
+        repository::save_plugin_config(
+            &db,
+            "official.privacy-filter",
+            2,
+            &serde_json::json!({
+                "redactBeforeUpstream": true,
+                "redactLogs": true,
+                "profile": "balanced",
+                "sensitiveTypes": ["email"],
+                "redactionScopes": ["user_prompts"]
+            }),
+            &[],
+        )
+        .unwrap();
+        enable_plugin(&db, "official.privacy-filter", env!("CARGO_PKG_VERSION")).unwrap();
+
+        let active = enabled_plugins_for_gateway(&db).unwrap();
+
+        assert_eq!(active.len(), 1);
+        assert_eq!(
+            active[0].config["redactionScopes"],
+            serde_json::json!(["user_prompts"])
+        );
     }
 
     #[test]

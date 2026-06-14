@@ -67,6 +67,12 @@ fn official_default_config(plugin_id: &str) -> Value {
             "redactBeforeUpstream": true,
             "redactLogs": true,
             "profile": "balanced",
+            "redactionScopes": [
+                "system_instructions",
+                "user_prompts",
+                "tool_results",
+                "legacy_prompt"
+            ],
             "sensitiveTypes": [
                 "email",
                 "cn_phone",

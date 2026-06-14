@@ -1284,7 +1284,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn official_privacy_filter_redacts_identity_codex_responses_before_upstream_and_logs() {
+    async fn official_privacy_filter_redacts_full_codex_responses_payload_before_upstream_and_logs()
+    {
         let _env_lock = crate::test_support::test_env_lock();
         let home = tempfile::tempdir().expect("home dir");
         let _env = isolate_app_env(home.path());
@@ -1300,8 +1301,12 @@ mod tests {
             .expect("enable codex cli proxy");
 
         let db_dir = tempfile::tempdir().expect("db dir");
-        let db = db::init_for_tests(&db_dir.path().join("privacy-filter-identity-test.sqlite"))
-            .expect("init test db");
+        let db = db::init_for_tests(
+            &db_dir
+                .path()
+                .join("privacy-filter-full-codex-payload-test.sqlite"),
+        )
+        .expect("init test db");
         let fixture = official::official_plugin("official.privacy-filter")
             .expect("official privacy filter fixture");
         let permissions = fixture.manifest.permissions.clone();
@@ -1360,14 +1365,50 @@ mod tests {
         ));
         let plain_body = serde_json::json!({
             "model": "gpt-plugin",
-            "input": [{
-                "type": "message",
-                "role": "user",
-                "content": [{
-                    "type": "input_text",
-                    "text": "你知道 13344441520 是哪里的手机号嘛"
-                }]
-            }]
+            "instructions": "developer prompt with sys@example.com",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "developer-visible phone 13344441521"
+                    }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "你知道 13344441520 是哪里的手机号嘛"
+                    }]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "lookup_phone",
+                    "arguments": "{\"phone\":\"13344441522\"}"
+                }
+            ],
+            "tools": [{
+                "type": "function",
+                "name": "lookup_phone",
+                "description": "Lookup 13344441523",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "phone": {
+                            "type": "string",
+                            "description": "Phone like 13344441524"
+                        }
+                    }
+                }
+            }],
+            "tool_choice": "auto",
+            "reasoning": { "effort": "xhigh" },
+            "client_metadata": {
+                "x-codex-window-id": "13344441525"
+            }
         })
         .to_string();
         let request = Request::builder()
@@ -1386,11 +1427,30 @@ mod tests {
 
         let body_text = String::from_utf8_lossy(&captured.body);
         assert!(body_text.contains("[电话]"));
+        assert!(body_text.contains("[邮箱]"));
         assert!(!body_text.contains("13344441520"));
+        assert!(!body_text.contains("13344441521"));
+        assert!(
+            body_text.contains("13344441522"),
+            "function_call.arguments should remain unchanged: {body_text}"
+        );
+        assert!(
+            body_text.contains("13344441523"),
+            "tool description should remain unchanged: {body_text}"
+        );
+        assert!(
+            body_text.contains("13344441524"),
+            "tool parameters should remain unchanged: {body_text}"
+        );
+        assert!(
+            body_text.contains("13344441525"),
+            "client_metadata should remain unchanged: {body_text}"
+        );
 
         let request_log = recv_terminal_request_log(&mut log_rx).await;
         assert_eq!(request_log.status, Some(200));
         assert!(!request_log.attempts_json.contains("13344441520"));
+        assert!(!request_log.attempts_json.contains("13344441521"));
         assert!(!request_log
             .provider_chain_json
             .as_deref()
