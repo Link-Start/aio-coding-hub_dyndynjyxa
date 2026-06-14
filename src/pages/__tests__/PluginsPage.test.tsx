@@ -16,6 +16,7 @@ import {
   usePluginInstallOfficialMutation,
   usePluginQuery,
   usePluginRollbackMutation,
+  usePluginSaveConfigMutation,
   usePluginUpdateFromFileMutation,
   usePluginsListQuery,
   usePluginUninstallMutation,
@@ -51,6 +52,7 @@ vi.mock("../../query/plugins", async () => {
     usePluginGrantPermissionsMutation: vi.fn(),
     usePluginDisableMutation: vi.fn(),
     usePluginUninstallMutation: vi.fn(),
+    usePluginSaveConfigMutation: vi.fn(),
   };
 });
 
@@ -146,6 +148,7 @@ describe("pages/PluginsPage", () => {
     vi.mocked(usePluginGrantPermissionsMutation).mockReturnValue(mutation() as any);
     vi.mocked(usePluginDisableMutation).mockReturnValue(mutation() as any);
     vi.mocked(usePluginUninstallMutation).mockReturnValue(mutation() as any);
+    vi.mocked(usePluginSaveConfigMutation).mockReturnValue(mutation() as any);
     vi.mocked(usePluginQuery).mockReturnValue({
       data: detail(),
       isLoading: false,
@@ -191,6 +194,22 @@ describe("pages/PluginsPage", () => {
     expect(screen.getByText("设置")).toBeInTheDocument();
     expect(screen.getByText("开发者信息")).toBeInTheDocument();
     expect(screen.getByText("读取你发送给模型的内容")).toBeInTheDocument();
+  });
+
+  it("disables plugin actions while config save is pending", () => {
+    vi.mocked(usePluginsListQuery).mockReturnValue({
+      data: [summary({ status: "disabled", update_available: true })],
+      isLoading: false,
+      isFetching: false,
+      error: null,
+    } as any);
+    vi.mocked(usePluginSaveConfigMutation).mockReturnValue(mutation({ isPending: true }) as any);
+
+    renderWithProviders(<PluginsPage />);
+
+    expect(screen.getByRole("button", { name: /启用/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /卸载/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /授权待审批权限/ })).toBeDisabled();
   });
 
   it("uses the generic schema form for official plugin configuration", () => {

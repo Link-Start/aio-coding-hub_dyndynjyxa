@@ -435,7 +435,8 @@ export function PluginsPage() {
     enableMutation.isPending ||
     grantPermissionsMutation.isPending ||
     disableMutation.isPending ||
-    uninstallMutation.isPending;
+    uninstallMutation.isPending ||
+    saveConfigMutation.isPending;
 
   async function runAction(action: string, task: () => Promise<unknown>) {
     try {
