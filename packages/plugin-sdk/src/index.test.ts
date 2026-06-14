@@ -102,6 +102,22 @@ describe("validateManifest", () => {
     });
   });
 
+  it("rejects permissions that do not apply to declared hooks", () => {
+    const scopedManifest = {
+      ...manifest,
+      hooks: [{ name: "log.beforePersist" as const, priority: 10 }],
+      permissions: ["request.body.read", "log.redact"] as const,
+    };
+
+    expect(validateManifest(scopedManifest as never)).toEqual({
+      ok: false,
+      error: {
+        code: "PLUGIN_PERMISSION_SCOPE_MISMATCH",
+        message: "permission request.body.read does not apply to any declared hook",
+      },
+    });
+  });
+
   it("rejects manifests without a supported host compatibility range", () => {
     expect(
       validateManifest({

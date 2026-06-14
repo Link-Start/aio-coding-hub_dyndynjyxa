@@ -255,6 +255,8 @@ export function validateManifest(manifest: PluginManifest): ValidationResult {
   }
   const permissionSetError = validatePermissionSet(manifest.permissions);
   if (permissionSetError) return permissionSetError;
+  const permissionScopeError = validatePermissionScope(manifest);
+  if (permissionScopeError) return permissionScopeError;
   return { ok: true };
 }
 
@@ -300,6 +302,45 @@ function validatePermissionSet(permissions: PluginPermission[]): ValidationResul
   }
   if (set.has("stream.modify") && !set.has("stream.inspect")) {
     return invalid("PLUGIN_INVALID_PERMISSION_SET", "stream.modify requires stream.inspect");
+  }
+  return null;
+}
+
+function hookAllowsPermission(hookName: GatewayHookName, permission: PluginPermission): boolean {
+  if (
+    permission === "request.meta.read" ||
+    permission === "request.header.read" ||
+    permission === "request.header.readSensitive" ||
+    permission === "request.header.write" ||
+    permission === "request.body.read" ||
+    permission === "request.body.write"
+  ) {
+    return hookName === "gateway.request.afterBodyRead" || hookName === "gateway.request.beforeSend";
+  }
+  if (
+    permission === "response.header.read" ||
+    permission === "response.header.write" ||
+    permission === "response.body.read" ||
+    permission === "response.body.write"
+  ) {
+    return hookName === "gateway.response.after" || hookName === "gateway.error";
+  }
+  if (permission === "stream.inspect" || permission === "stream.modify") {
+    return hookName === "gateway.response.chunk";
+  }
+  if (permission === "log.redact") return hookName === "log.beforePersist";
+  return false;
+}
+
+function validatePermissionScope(manifest: PluginManifest): ValidationResult | null {
+  for (const permission of manifest.permissions) {
+    if (RESERVED_PERMISSIONS.has(permission)) continue;
+    if (!manifest.hooks.some((hook) => hookAllowsPermission(hook.name, permission))) {
+      return invalid(
+        "PLUGIN_PERMISSION_SCOPE_MISMATCH",
+        `permission ${permission} does not apply to any declared hook`
+      );
+    }
   }
   return null;
 }

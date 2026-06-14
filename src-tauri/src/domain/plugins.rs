@@ -246,6 +246,7 @@ pub fn validate_manifest(
     validate_hooks(&manifest.hooks)?;
     validate_permissions(&manifest.permissions)?;
     validate_hook_permissions(&manifest.hooks, &manifest.permissions)?;
+    validate_permission_scope(&manifest.hooks, &manifest.permissions)?;
     validate_config_schema(manifest.config_schema.as_ref())?;
     validate_host_compatibility(&manifest.host_compatibility, host_version)?;
     Ok(())
@@ -436,6 +437,50 @@ fn validate_hook_permissions(
                 ));
             }
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn hook_allows_permission(hook_name: &str, permission: &str) -> bool {
+    match permission {
+        "request.meta.read"
+        | "request.header.read"
+        | "request.header.readSensitive"
+        | "request.header.write"
+        | "request.body.read"
+        | "request.body.write" => matches!(
+            hook_name,
+            "gateway.request.afterBodyRead" | "gateway.request.beforeSend"
+        ),
+        "response.header.read"
+        | "response.header.write"
+        | "response.body.read"
+        | "response.body.write" => {
+            matches!(hook_name, "gateway.response.after" | "gateway.error")
+        }
+        "stream.inspect" | "stream.modify" => hook_name == "gateway.response.chunk",
+        "log.redact" => hook_name == "log.beforePersist",
+        _ => false,
+    }
+}
+
+fn validate_permission_scope(
+    hooks: &[PluginHook],
+    permissions: &[String],
+) -> Result<(), PluginValidationError> {
+    for permission in permissions {
+        if is_reserved_permission(permission) {
+            continue;
+        }
+        let allowed = hooks
+            .iter()
+            .any(|hook| hook_allows_permission(&hook.name, permission));
+        if !allowed {
+            return Err(PluginValidationError::new(
+                "PLUGIN_PERMISSION_SCOPE_MISMATCH",
+                format!("permission {permission} does not apply to any declared hook"),
+            ));
         }
     }
     Ok(())
@@ -695,6 +740,19 @@ mod tests {
             assert_eq!(err.code, "PLUGIN_RESERVED_PERMISSION");
             assert!(err.message.contains(permission));
         }
+    }
+
+    #[test]
+    fn manifest_rejects_permissions_that_do_not_apply_to_declared_hooks() {
+        let mut raw = valid_manifest();
+        raw["hooks"] = serde_json::json!([
+            { "name": "log.beforePersist", "priority": 10, "failurePolicy": "fail-open" }
+        ]);
+        raw["permissions"] = serde_json::json!(["request.body.read", "log.redact"]);
+        let manifest: PluginManifest = serde_json::from_value(raw).unwrap();
+        let err = validate_manifest(&manifest, "0.56.0").unwrap_err();
+        assert_eq!(err.code, "PLUGIN_PERMISSION_SCOPE_MISMATCH");
+        assert!(err.message.contains("request.body.read"));
     }
 
     #[test]
