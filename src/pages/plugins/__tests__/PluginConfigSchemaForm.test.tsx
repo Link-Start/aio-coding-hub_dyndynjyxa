@@ -224,6 +224,58 @@ describe("PluginConfigSchemaForm", () => {
     expect(onSubmit).toHaveBeenCalledWith({ advanced: { retries: 3 } });
   });
 
+  it("blocks submit and shows a field error for invalid json fields", () => {
+    const onSubmit = vi.fn();
+
+    render(
+      <PluginConfigSchemaForm
+        identity="publisher.advanced:1"
+        schema={{
+          type: "object",
+          properties: {
+            advanced: { type: "object", title: "高级配置" },
+          },
+        }}
+        value={{ advanced: { retries: 2 } }}
+        pending={false}
+        onSubmit={onSubmit}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText("高级配置"), {
+      target: { value: '{"retries":' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByText("请输入合法的 JSON 对象。")).toBeInTheDocument();
+  });
+
+  it("keeps blank optional numbers unset instead of coercing them to zero", () => {
+    const onSubmit = vi.fn();
+
+    render(
+      <PluginConfigSchemaForm
+        identity="publisher.number:1"
+        schema={{
+          type: "object",
+          properties: {
+            threshold: { type: "integer", title: "阈值" },
+            enabled: { type: "boolean", default: true },
+          },
+        }}
+        value={{ threshold: 3 }}
+        pending={false}
+        onSubmit={onSubmit}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText("阈值"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+
+    expect(onSubmit).toHaveBeenCalledWith({ enabled: true });
+  });
+
   it("submits numeric enum select values without converting them to strings", () => {
     const onSubmit = vi.fn();
 

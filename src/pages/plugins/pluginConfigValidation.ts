@@ -4,6 +4,10 @@ import type { JsonValue } from "../../services/plugins";
 
 export type PluginConfigObject = Record<string, JsonValue>;
 
+export type ConfigFieldParseResult =
+  | { ok: true; value: JsonValue | undefined }
+  | { ok: false; error: string };
+
 export function isRecord(value: JsonValue | unknown): value is Record<string, JsonValue> {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
@@ -45,25 +49,34 @@ export function schemaArrayItemEnum(schema: JsonValue | undefined): JsonValue[] 
   return schemaEnum(items);
 }
 
-export function coerceConfigField(raw: string, type: string | null): JsonValue {
-  switch (type) {
-    case "integer": {
-      const parsed = Number.parseInt(raw, 10);
-      return Number.isFinite(parsed) ? parsed : 0;
+export function parseConfigField(raw: string, type: string | null): ConfigFieldParseResult {
+  if (type === "integer" || type === "number") {
+    if (raw.trim() === "") return { ok: true, value: undefined };
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || (type === "integer" && !Number.isInteger(parsed))) {
+      return { ok: false, error: "请输入有效数字。" };
     }
-    case "number": {
-      const parsed = Number.parseFloat(raw);
-      return Number.isFinite(parsed) ? parsed : 0;
-    }
-    case "array":
-    case "object": {
-      try {
-        return JSON.parse(raw) as JsonValue;
-      } catch {
-        return raw;
-      }
-    }
-    default:
-      return raw;
+    return { ok: true, value: parsed };
   }
+
+  if (type === "array" || type === "object") {
+    if (raw.trim() === "") return { ok: true, value: undefined };
+    try {
+      const parsed = JSON.parse(raw) as JsonValue;
+      if (type === "array" && !Array.isArray(parsed)) {
+        return { ok: false, error: "请输入合法的 JSON 数组。" };
+      }
+      if (type === "object" && !isRecord(parsed)) {
+        return { ok: false, error: "请输入合法的 JSON 对象。" };
+      }
+      return { ok: true, value: parsed };
+    } catch {
+      return {
+        ok: false,
+        error: type === "array" ? "请输入合法的 JSON 数组。" : "请输入合法的 JSON 对象。",
+      };
+    }
+  }
+
+  return { ok: true, value: raw };
 }

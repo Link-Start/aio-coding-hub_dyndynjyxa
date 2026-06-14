@@ -10,7 +10,7 @@ import {
   buildPluginConfigRenderModel,
   type PluginConfigFieldModel,
 } from "./pluginConfigRenderModel";
-import { coerceConfigField, isRecord, type PluginConfigObject } from "./pluginConfigValidation";
+import { isRecord, parseConfigField, type PluginConfigObject } from "./pluginConfigValidation";
 
 export type PluginConfigSchemaFormProps = {
   identity: string;
@@ -38,7 +38,8 @@ function selectValueForField(value: JsonValue | undefined): string {
 
 function selectedValueForField(field: PluginConfigFieldModel, raw: string): JsonValue {
   if (field.type === "number" || field.type === "integer") {
-    return coerceConfigField(raw, field.type);
+    const parsed = parseConfigField(raw, field.type);
+    return parsed.ok ? (parsed.value ?? "") : raw;
   }
   const option = field.options.find((item) => String(item.value) === raw);
   return option?.value ?? raw;
@@ -52,6 +53,7 @@ export function PluginConfigSchemaForm({
   onSubmit,
 }: PluginConfigSchemaFormProps) {
   const [draft, setDraft] = useState<PluginConfigObject>(() => initialObject(value));
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const valueRef = useRef(value);
   const model = useMemo(
     () => buildPluginConfigRenderModel({ schema, value: draft }),
@@ -61,6 +63,7 @@ export function PluginConfigSchemaForm({
   valueRef.current = value;
   useEffect(() => {
     setDraft(initialObject(valueRef.current));
+    setFieldErrors({});
   }, [identity]);
 
   if (!model.editable) {
@@ -78,6 +81,28 @@ export function PluginConfigSchemaForm({
     setDraft((current) => ({ ...current, [key]: next }));
   }
 
+  function setParsedField(key: string, raw: string, type: string | null) {
+    const parsed = parseConfigField(raw, type);
+    if (!parsed.ok) {
+      setFieldErrors((current) => ({ ...current, [key]: parsed.error }));
+      return;
+    }
+    setFieldErrors((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    setDraft((current) => {
+      const next = { ...current };
+      if (parsed.value === undefined) {
+        delete next[key];
+      } else {
+        next[key] = parsed.value;
+      }
+      return next;
+    });
+  }
+
   function buildSubmitValue(): PluginConfigObject {
     const next = { ...draft };
     for (const section of model.sections) {
@@ -92,6 +117,12 @@ export function PluginConfigSchemaForm({
 
   function fieldAriaLabel(field: PluginConfigFieldModel): string {
     return field.label === `${field.key} *` ? field.key : field.label;
+  }
+
+  function renderFieldError(field: PluginConfigFieldModel) {
+    return fieldErrors[field.key] ? (
+      <span className="text-xs text-destructive">{fieldErrors[field.key]}</span>
+    ) : null;
   }
 
   function renderField(field: PluginConfigFieldModel, sectionTitle: string) {
@@ -142,6 +173,7 @@ export function PluginConfigSchemaForm({
             ))}
           </select>
           {field.warning ? <span className="text-xs text-warning">{field.warning}</span> : null}
+          {renderFieldError(field)}
         </label>
       );
     }
@@ -192,6 +224,7 @@ export function PluginConfigSchemaForm({
               {field.warning}
             </div>
           ) : null}
+          {renderFieldError(field)}
         </fieldset>
       );
     }
@@ -207,11 +240,10 @@ export function PluginConfigSchemaForm({
             aria-label={ariaLabel}
             placeholder={field.placeholder ?? undefined}
             value={fieldToText(current, field.type)}
-            onChange={(event) =>
-              setField(field.key, coerceConfigField(event.target.value, field.type))
-            }
+            onChange={(event) => setParsedField(field.key, event.target.value, field.type)}
           />
           {field.warning ? <span className="text-xs text-warning">{field.warning}</span> : null}
+          {renderFieldError(field)}
         </label>
       );
     }
@@ -226,10 +258,9 @@ export function PluginConfigSchemaForm({
           <Textarea
             aria-label={ariaLabel}
             value={fieldToText(current, field.type)}
-            onChange={(event) =>
-              setField(field.key, coerceConfigField(event.target.value, field.type))
-            }
+            onChange={(event) => setParsedField(field.key, event.target.value, field.type)}
           />
+          {renderFieldError(field)}
         </label>
       );
     }
@@ -247,11 +278,10 @@ export function PluginConfigSchemaForm({
             field.widget === "password" ? "password" : field.widget === "number" ? "number" : "text"
           }
           value={fieldToText(current, field.type)}
-          onChange={(event) =>
-            setField(field.key, coerceConfigField(event.target.value, field.type))
-          }
+          onChange={(event) => setParsedField(field.key, event.target.value, field.type)}
         />
         {field.warning ? <span className="text-xs text-warning">{field.warning}</span> : null}
+        {renderFieldError(field)}
       </label>
     );
   }
@@ -261,6 +291,7 @@ export function PluginConfigSchemaForm({
       className="space-y-4"
       onSubmit={(event) => {
         event.preventDefault();
+        if (Object.keys(fieldErrors).length > 0) return;
         onSubmit(buildSubmitValue());
       }}
     >
@@ -281,7 +312,7 @@ export function PluginConfigSchemaForm({
       </div>
 
       <div className="flex justify-end">
-        <Button type="submit" disabled={pending}>
+        <Button type="submit" disabled={pending || Object.keys(fieldErrors).length > 0}>
           保存配置
         </Button>
       </div>
