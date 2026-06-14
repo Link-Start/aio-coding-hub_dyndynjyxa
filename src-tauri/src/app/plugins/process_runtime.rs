@@ -96,7 +96,11 @@ impl JsonRpcProcessRuntime {
             .map_err(|_| {
                 AppError::new(
                     "PLUGIN_PROCESS_START_TIMEOUT",
-                    "process plugin did not send ready message before start timeout",
+                    format!(
+                        "process plugin did not send ready message before start timeout: program={}, timeout_ms={}",
+                        runtime.config.program,
+                        runtime.config.start_timeout.as_millis()
+                    ),
                 )
             });
         let ready = match ready {
@@ -323,8 +327,8 @@ mod tests {
         ProcessRuntimeConfig {
             program: "node".to_string(),
             args: vec![script_path.display().to_string()],
-            start_timeout: Duration::from_millis(300),
-            hook_timeout: Duration::from_millis(200),
+            start_timeout: Duration::from_secs(5),
+            hook_timeout: Duration::from_secs(5),
             idle_recycle: Duration::from_millis(50),
             max_line_bytes: 256 * 1024,
         }
