@@ -71,7 +71,17 @@ mod tests {
                 .descriptor(hook_name)
                 .unwrap_or_else(|| panic!("descriptor missing for hook {}", contract.id));
 
+            assert_eq!(descriptor.hook_name, hook_name);
             assert_eq!(descriptor.id, contract.id);
+            assert_eq!(descriptor.kind, contract.kind);
+            assert_eq!(descriptor.read_permissions, contract.read_permissions);
+            assert_eq!(descriptor.write_permissions, contract.write_permissions);
+            assert_eq!(descriptor.mutation_fields, contract.mutation_fields);
+            assert_eq!(descriptor.timeout_ms, contract.timeout_ms);
+            assert_eq!(
+                descriptor.default_failure_policy,
+                contract.default_failure_policy
+            );
         }
     }
 
