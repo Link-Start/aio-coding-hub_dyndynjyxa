@@ -253,6 +253,8 @@ export function doctorPluginFiles(files: ScaffoldFiles, options: DoctorOptions =
     return { ok: false, diagnostics };
   }
 
+  diagnostics.push(...manifestShapeDiagnostics(manifest));
+
   let validation: ValidationResult;
   try {
     validation = validateManifest(manifest);
@@ -353,10 +355,85 @@ function manifestRuntimeKind(
   ) {
     return "declarativeRules";
   }
-  if (runtime?.kind === "wasm") {
+  if (runtime?.kind === "wasm" && typeof runtime.abiVersion === "string") {
     return "wasm";
   }
   return null;
+}
+
+function manifestShapeDiagnostics(manifest: Partial<PluginManifest>): PluginDiagnostic[] {
+  const diagnostics: PluginDiagnostic[] = [];
+  for (const field of ["id", "name", "version", "apiVersion"] as const) {
+    if (typeof manifest[field] !== "string") {
+      diagnostics.push({
+        severity: "error",
+        code: "PLUGIN_INVALID_MANIFEST",
+        message: `${field} must be a string`,
+        path: `plugin.json#/${field}`,
+        hint: "Use the Plugin API v1 manifest field types.",
+      });
+    }
+  }
+  if (!Array.isArray(manifest.hooks)) {
+    diagnostics.push({
+      severity: "error",
+      code: "PLUGIN_INVALID_MANIFEST",
+      message: "hooks must be an array",
+      path: "plugin.json#/hooks",
+      hint: "Declare at least one Plugin API v1 hook.",
+    });
+  }
+  if (!Array.isArray(manifest.permissions)) {
+    diagnostics.push({
+      severity: "error",
+      code: "PLUGIN_INVALID_MANIFEST",
+      message: "permissions must be an array",
+      path: "plugin.json#/permissions",
+      hint: "Declare Plugin API v1 permissions as strings.",
+    });
+  }
+  const compatibility = asRecord(manifest.hostCompatibility);
+  if (!compatibility) {
+    diagnostics.push({
+      severity: "error",
+      code: "PLUGIN_INVALID_MANIFEST",
+      message: "hostCompatibility must be an object",
+      path: "plugin.json#/hostCompatibility",
+      hint: "Set hostCompatibility.app and hostCompatibility.pluginApi.",
+    });
+  } else {
+    for (const field of ["app", "pluginApi"] as const) {
+      if (typeof compatibility[field] !== "string") {
+        diagnostics.push({
+          severity: "error",
+          code: "PLUGIN_INVALID_MANIFEST",
+          message: `hostCompatibility.${field} must be a string`,
+          path: `plugin.json#/hostCompatibility/${field}`,
+          hint: "Use Plugin API v1 compatibility range strings.",
+        });
+      }
+    }
+  }
+  if (manifest.entry != null && typeof manifest.entry !== "string") {
+    diagnostics.push({
+      severity: "error",
+      code: "PLUGIN_INVALID_MANIFEST",
+      message: "entry must be a string when present",
+      path: "plugin.json#/entry",
+      hint: "Use a package-relative entry path.",
+    });
+  }
+  const runtime = asRecord(manifest.runtime);
+  if (runtime?.kind === "wasm" && typeof runtime.abiVersion !== "string") {
+    diagnostics.push({
+      severity: "error",
+      code: "PLUGIN_INVALID_RUNTIME",
+      message: "wasm runtime requires a string abiVersion",
+      path: "plugin.json#/runtime/abiVersion",
+      hint: 'Use runtime: { kind: "wasm", abiVersion: "1.0.0" }.',
+    });
+  }
+  return diagnostics;
 }
 
 function runtimeShapeDiagnostic(manifest: Partial<PluginManifest>): PluginDiagnostic {

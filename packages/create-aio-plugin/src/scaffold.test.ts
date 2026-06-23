@@ -369,6 +369,59 @@ describe("create-aio-plugin scaffold", () => {
     );
   });
 
+  it("doctor rejects malformed manifest field types that SDK validation can coerce", () => {
+    const files = createPluginScaffold({
+      id: "acme.redactor",
+      name: "Redactor",
+      template: "rule",
+    });
+    const manifest = JSON.parse(files["plugin.json"] ?? "{}") as Record<string, unknown>;
+    manifest.name = 123;
+    files["plugin.json"] = `${JSON.stringify(manifest, null, 2)}\n`;
+
+    const result = doctorPluginFiles(files);
+
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        severity: "error",
+        code: "PLUGIN_INVALID_MANIFEST",
+        path: "plugin.json#/name",
+      })
+    );
+  });
+
+  it("doctor rejects malformed wasm runtime metadata", () => {
+    const files = createPluginScaffold({
+      id: "acme.policy",
+      name: "Policy",
+      template: "wasm",
+    });
+    const manifest = JSON.parse(files["plugin.json"] ?? "{}") as Record<string, unknown>;
+    manifest.runtime = { kind: "wasm", abiVersion: ["1.0.0"] };
+    manifest.entry = 42;
+    files["plugin.json"] = `${JSON.stringify(manifest, null, 2)}\n`;
+    files["42"] = "";
+
+    const result = doctorPluginFiles(files);
+
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        severity: "error",
+        code: "PLUGIN_INVALID_RUNTIME",
+        path: "plugin.json#/runtime/abiVersion",
+      })
+    );
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        severity: "error",
+        code: "PLUGIN_INVALID_MANIFEST",
+        path: "plugin.json#/entry",
+      })
+    );
+  });
+
   it("doctor command reads a real plugin directory and returns non-zero for errors", () => {
     const root = mkdtempSync(join(tmpdir(), "aio-plugin-doctor-"));
     writeScaffold(root, createPluginScaffold({ id: "acme.real", name: "Real", template: "rule" }));
