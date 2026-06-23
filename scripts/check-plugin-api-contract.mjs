@@ -180,6 +180,33 @@ function runtimeTokens(contract) {
   return [...contract.communityRuntimes, ...contract.policyGatedRuntimes];
 }
 
+function devtoolsPermissionTokens(contract) {
+  const developerToolPermissions = new Set([
+    "request.body.read",
+    "request.body.write",
+    "response.body.read",
+    "response.body.write",
+    "stream.inspect",
+    "stream.modify",
+    "log.redact",
+  ]);
+  return (contract.activePermissions ?? []).filter((permission) =>
+    developerToolPermissions.has(permission)
+  );
+}
+
+function devtoolsMutationFieldTokens(contract) {
+  const developerToolMutationFields = new Set([
+    "requestBody",
+    "responseBody",
+    "streamChunk",
+    "logMessage",
+  ]);
+  return (contract.activeMutationFields ?? []).filter((field) =>
+    developerToolMutationFields.has(field)
+  );
+}
+
 function officialRuntimeTokens(contract) {
   return contract.officialRuntimes.flatMap((runtime) => runtime.split(":"));
 }
@@ -289,6 +316,51 @@ if (contract) {
     scaffold,
     ["gateway.request.afterBodyRead", "request.body.read", "request.body.write"],
     "default scaffold contract token"
+  );
+
+  const devtools = readText("packages/create-aio-plugin/src/devtools.ts");
+  requireIncludes(
+    "packages/create-aio-plugin/src/devtools.ts",
+    devtools,
+    contract.activeHooks,
+    "developer tool active hook"
+  );
+  requireIncludes(
+    "packages/create-aio-plugin/src/devtools.ts",
+    devtools,
+    devtoolsPermissionTokens(contract),
+    "developer tool active permission"
+  );
+  requireIncludes(
+    "packages/create-aio-plugin/src/devtools.ts",
+    devtools,
+    runtimeTokens(contract),
+    "developer tool runtime"
+  );
+  requireIncludes(
+    "packages/create-aio-plugin/src/devtools.ts",
+    devtools,
+    devtoolsMutationFieldTokens(contract),
+    "developer tool mutation field"
+  );
+  requireIncludes(
+    "packages/create-aio-plugin/src/devtools.ts",
+    devtools,
+    [
+      "doctorPluginFiles",
+      "validatePluginFilesStrict",
+      "replayHookExplain",
+      "PLUGIN_RULE_PERMISSION_MISMATCH",
+      "PLUGIN_REPLAY_UNSUPPORTED_RUNTIME",
+      "PLUGIN_WASM_POLICY_GATED",
+    ],
+    "developer tool diagnostic surface"
+  );
+  requireNotIncludes(
+    "packages/create-aio-plugin/src/devtools.ts",
+    devtools,
+    ["contextPatch"],
+    "legacy mutation field"
   );
 
   const rustContract = readText("src-tauri/src/gateway/plugins/contract.rs");

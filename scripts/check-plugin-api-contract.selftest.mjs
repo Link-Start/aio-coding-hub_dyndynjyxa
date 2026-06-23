@@ -28,6 +28,35 @@ function runCheck(root) {
   });
 }
 
+function writePassingDevtools(root) {
+  writeFileSync(
+    join(root, "packages/create-aio-plugin/src/devtools.ts"),
+    [
+      [
+        "gateway.request.afterBodyRead",
+        "gateway.request.beforeSend",
+        "gateway.response.chunk",
+        "gateway.response.after",
+        "gateway.error",
+        "log.beforePersist",
+      ].join(" "),
+      [
+        "request.body.read",
+        "request.body.write",
+        "response.body.read",
+        "response.body.write",
+        "stream.inspect",
+        "stream.modify",
+        "log.redact",
+      ].join(" "),
+      "requestBody responseBody streamChunk logMessage headers",
+      "declarativeRules wasm",
+      "PLUGIN_RULE_PERMISSION_MISMATCH PLUGIN_REPLAY_UNSUPPORTED_RUNTIME PLUGIN_WASM_POLICY_GATED",
+      "validatePluginFilesStrict replayHookExplain doctorPluginFiles",
+    ].join("\n")
+  );
+}
+
 function writePassingScaffold(root) {
   writeFileSync(
     join(root, "packages/plugin-sdk/src/index.ts"),
@@ -143,6 +172,7 @@ function writePassingScaffold(root) {
     join(root, "packages/plugin-wasm-sdk/src/lib.rs"),
     'request_body #[serde(rename_all = "camelCase")]'
   );
+  writePassingDevtools(root);
 }
 
 const reservedHookRoot = makeRoot("reserved-hook");
@@ -333,6 +363,53 @@ if (
 ) {
   throw new Error(
     `expected hookMatrix duplicate metadata failure, got status ${duplicateHookMetadataResult.status}\n${duplicateHookMetadataResult.stderr}`
+  );
+}
+
+const missingDevtoolsMetadataRoot = makeRoot("missing-devtools-metadata");
+writeJson(missingDevtoolsMetadataRoot, "docs/plugins/plugin-api-v1-contract.json", {
+  apiVersion: "1.0.0",
+  defaultHookTimeoutMs: 150,
+  defaultFailurePolicy: "fail-open",
+  activeHooks: ["gateway.request.afterBodyRead"],
+  reservedHooks: ["gateway.response.headers"],
+  activeMutationFields: ["requestBody"],
+  configSchemaTypes: ["object"],
+  activePermissions: ["request.body.read", "request.body.write"],
+  reservedPermissions: ["network.fetch"],
+  hookMatrix: {
+    "gateway.request.afterBodyRead": {
+      phase: "after request body read and before upstream provider send",
+      kind: "request",
+      status: "active",
+      defaultFailurePolicy: "fail-open",
+      timeoutMs: 150,
+      reservedHeaderPolicy: "block-gateway-owned",
+      readPermissions: ["request.body.read"],
+      writePermissions: ["request.body.write"],
+      permissionDependencies: { "request.body.write": ["request.body.read"] },
+      mutationFields: ["requestBody"],
+      contextFields: ["traceId"],
+    },
+  },
+  communityRuntimes: ["declarativeRules"],
+  policyGatedRuntimes: ["wasm"],
+  officialRuntimes: ["native:privacyFilter"],
+});
+writePassingScaffold(missingDevtoolsMetadataRoot);
+writeFileSync(
+  join(missingDevtoolsMetadataRoot, "packages/create-aio-plugin/src/devtools.ts"),
+  "declarativeRules validatePluginFilesStrict replayHookExplain doctorPluginFiles"
+);
+
+const missingDevtoolsMetadataResult = runCheck(missingDevtoolsMetadataRoot);
+if (
+  missingDevtoolsMetadataResult.status === 0 ||
+  !missingDevtoolsMetadataResult.stderr.includes("packages/create-aio-plugin/src/devtools.ts") ||
+  !missingDevtoolsMetadataResult.stderr.includes("requestBody")
+) {
+  throw new Error(
+    `expected devtools metadata failure, got status ${missingDevtoolsMetadataResult.status}\n${missingDevtoolsMetadataResult.stderr}`
   );
 }
 
