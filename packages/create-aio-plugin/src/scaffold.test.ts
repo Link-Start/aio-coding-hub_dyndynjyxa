@@ -281,6 +281,37 @@ describe("create-aio-plugin scaffold", () => {
     );
   });
 
+  it("validate strict rejects merged rule files that exceed the host runtime limit", () => {
+    const files = createPluginScaffold({ id: "acme.real", name: "Real", template: "rule" });
+    const manifest = JSON.parse(files["plugin.json"] ?? "{}") as {
+      runtime: { kind: "declarativeRules"; rules: string[] };
+    };
+    manifest.runtime.rules = ["rules/a.json", "rules/b.json"];
+    files["plugin.json"] = `${JSON.stringify(manifest, null, 2)}\n`;
+    const rules = (prefix: string) =>
+      Array.from({ length: 200 }, (_, index) => ({
+        id: `${prefix}-${index}`,
+        hook: "gateway.request.afterBodyRead",
+        target: { field: "request.body" },
+        match: { regex: "SECRET" },
+        action: { kind: "replace", replacement: "[x]" },
+      }));
+    files["rules/a.json"] = `${JSON.stringify({ rules: rules("a") }, null, 2)}\n`;
+    files["rules/b.json"] = `${JSON.stringify({ rules: rules("b") }, null, 2)}\n`;
+    delete files["rules/main.json"];
+
+    const result = validatePluginFilesStrict(files);
+
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        severity: "error",
+        code: "PLUGIN_RULE_TOO_MANY_RULES",
+        path: "plugin.json#/runtime/rules",
+      })
+    );
+  });
+
   it("validate strict rejects rules whose hook is not declared by the manifest", () => {
     const files = createPluginScaffold({ id: "acme.real", name: "Real", template: "rule" });
     const manifest = JSON.parse(files["plugin.json"] ?? "{}") as {
@@ -478,6 +509,13 @@ describe("create-aio-plugin scaffold", () => {
             match: { regex: "a".repeat(4097) },
             action: { kind: "replace", replacement: "[x]" },
           },
+          {
+            id: "invalid-syntax",
+            hook: "gateway.request.afterBodyRead",
+            target: { field: "request.body" },
+            match: { regex: "[" },
+            action: { kind: "replace", replacement: "[x]" },
+          },
         ],
       },
       null,
@@ -499,6 +537,84 @@ describe("create-aio-plugin scaffold", () => {
         code: "PLUGIN_RULE_MATCHER_INVALID",
         path: "rules/main.json#/rules/1/match/regex",
         message: expect.stringContaining("too large"),
+      })
+    );
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "PLUGIN_RULE_MATCHER_INVALID",
+        path: "rules/main.json#/rules/2/match/regex",
+        message: expect.stringContaining("invalid regex"),
+      })
+    );
+  });
+
+  it("validate strict rejects matcher and when fields that host serde cannot parse", () => {
+    const files = createPluginScaffold({ id: "acme.real", name: "Real", template: "rule" });
+    files["rules/main.json"] = `${JSON.stringify(
+      {
+        rules: [
+          {
+            id: "bad-case-sensitive",
+            hook: "gateway.request.afterBodyRead",
+            target: { field: "request.body" },
+            match: { regex: "SECRET", caseSensitive: "false" },
+            action: { kind: "replace", replacement: "[x]" },
+          },
+          {
+            id: "bad-when-cli-keys",
+            hook: "gateway.request.afterBodyRead",
+            target: { field: "request.body" },
+            match: { regex: "SECRET" },
+            action: { kind: "replace", replacement: "[x]" },
+            when: { cliKeys: "codex" },
+          },
+          {
+            id: "bad-when-models",
+            hook: "gateway.request.afterBodyRead",
+            target: { field: "request.body" },
+            match: { regex: "SECRET" },
+            action: { kind: "replace", replacement: "[x]" },
+            when: { models: [7] },
+          },
+          {
+            id: "bad-when-config",
+            hook: "gateway.request.afterBodyRead",
+            target: { field: "request.body" },
+            match: { regex: "SECRET" },
+            action: { kind: "replace", replacement: "[x]" },
+            when: { configEquals: [] },
+          },
+        ],
+      },
+      null,
+      2
+    )}\n`;
+
+    const result = validatePluginFilesStrict(files);
+
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "PLUGIN_RULE_MATCHER_INVALID",
+        path: "rules/main.json#/rules/0/match/caseSensitive",
+      })
+    );
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "PLUGIN_RULE_WHEN_INVALID",
+        path: "rules/main.json#/rules/1/when/cliKeys",
+      })
+    );
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "PLUGIN_RULE_WHEN_INVALID",
+        path: "rules/main.json#/rules/2/when/models",
+      })
+    );
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "PLUGIN_RULE_WHEN_INVALID",
+        path: "rules/main.json#/rules/3/when/configEquals",
       })
     );
   });

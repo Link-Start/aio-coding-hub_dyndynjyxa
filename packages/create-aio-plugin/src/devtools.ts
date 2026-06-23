@@ -411,6 +411,8 @@ function strictRuleDiagnostics(files: ScaffoldFiles, manifest: PluginManifest): 
         )
       : []
   );
+  const ruleDocuments: Array<{ rulePath: string; rules: unknown[] }> = [];
+  let totalRules = 0;
 
   for (const rulePath of runtime.rules) {
     if (!hasPluginFile(files, rulePath)) continue;
@@ -441,6 +443,7 @@ function strictRuleDiagnostics(files: ScaffoldFiles, manifest: PluginManifest): 
       continue;
     }
 
+    totalRules += document.rules.length;
     if (document.rules.length > MAX_RULES_PER_RUNTIME) {
       diagnostics.push({
         severity: "error",
@@ -452,7 +455,21 @@ function strictRuleDiagnostics(files: ScaffoldFiles, manifest: PluginManifest): 
       continue;
     }
 
-    document.rules.forEach((rawRule, index) => {
+    ruleDocuments.push({ rulePath, rules: document.rules });
+  }
+
+  if (totalRules > MAX_RULES_PER_RUNTIME) {
+    diagnostics.push({
+      severity: "error",
+      code: "PLUGIN_RULE_TOO_MANY_RULES",
+      message: `merged rule documents have more than ${MAX_RULES_PER_RUNTIME} rules`,
+      path: "plugin.json#/runtime/rules",
+      hint: `Keep the combined declarative rule count at ${MAX_RULES_PER_RUNTIME} rules or fewer.`,
+    });
+  }
+
+  for (const { rulePath, rules } of ruleDocuments) {
+    rules.forEach((rawRule, index) => {
       const rule = asRecord(rawRule);
       if (!rule) {
         diagnostics.push({
@@ -522,8 +539,9 @@ function strictRuleDiagnostics(files: ScaffoldFiles, manifest: PluginManifest): 
           hint: "Use a Rust regex-compatible string.",
         });
       } else {
-        diagnostics.push(...ruleMatcherDiagnostics(matcher.regex, rulePath, index));
+        diagnostics.push(...ruleMatcherDiagnostics(matcher, matcher.regex, rulePath, index));
       }
+      diagnostics.push(...ruleWhenDiagnostics(rule.when, rulePath, index));
       const action = asRecord(rule.action);
       if (!action) {
         diagnostics.push({
@@ -608,34 +626,54 @@ function permissionsForRuleTarget(field: string, actionKind: string): string[] {
 }
 
 function ruleMatcherDiagnostics(
+  matcher: Record<string, unknown>,
   regex: string,
   rulePath: string,
   index: number
 ): PluginDiagnostic[] {
+  const diagnostics: PluginDiagnostic[] = [];
   const path = `${rulePath}#/rules/${index}/match/regex`;
+  if ("caseSensitive" in matcher && typeof matcher.caseSensitive !== "boolean") {
+    diagnostics.push({
+      severity: "error",
+      code: "PLUGIN_RULE_MATCHER_INVALID",
+      message: "rule match.caseSensitive must be a boolean",
+      path: `${rulePath}#/rules/${index}/match/caseSensitive`,
+      hint: "Set caseSensitive to true or false, or omit it.",
+    });
+  }
   if (new TextEncoder().encode(regex).length > MAX_RULE_REGEX_PATTERN_BYTES) {
-    return [
-      {
-        severity: "error",
-        code: "PLUGIN_RULE_MATCHER_INVALID",
-        message: "rule match.regex is too large for the host runtime",
-        path,
-        hint: `Keep regex patterns at ${MAX_RULE_REGEX_PATTERN_BYTES} bytes or fewer.`,
-      },
-    ];
+    diagnostics.push({
+      severity: "error",
+      code: "PLUGIN_RULE_MATCHER_INVALID",
+      message: "rule match.regex is too large for the host runtime",
+      path,
+      hint: `Keep regex patterns at ${MAX_RULE_REGEX_PATTERN_BYTES} bytes or fewer.`,
+    });
+    return diagnostics;
   }
   if (usesUnsupportedRustRegexSyntax(regex)) {
-    return [
-      {
-        severity: "error",
-        code: "PLUGIN_RULE_MATCHER_INVALID",
-        message: "rule match.regex uses unsupported Rust regex syntax",
-        path,
-        hint: "Avoid look-around and backreferences; Plugin API v1 declarative rules use Rust regex syntax.",
-      },
-    ];
+    diagnostics.push({
+      severity: "error",
+      code: "PLUGIN_RULE_MATCHER_INVALID",
+      message: "rule match.regex uses unsupported Rust regex syntax",
+      path,
+      hint: "Avoid look-around and backreferences; Plugin API v1 declarative rules use Rust regex syntax.",
+    });
+    return diagnostics;
   }
-  return [];
+  try {
+    new RegExp(regex);
+  } catch (error) {
+    diagnostics.push({
+      severity: "error",
+      code: "PLUGIN_RULE_MATCHER_INVALID",
+      message: `invalid regex for host runtime: ${errorMessage(error)}`,
+      path,
+      hint: "Fix the regex pattern before packing the plugin.",
+    });
+  }
+  return diagnostics;
 }
 
 function usesUnsupportedRustRegexSyntax(regex: string): boolean {
@@ -721,6 +759,48 @@ function ruleJsonPathDiagnostics(
   }
 
   return [];
+}
+
+function ruleWhenDiagnostics(when: unknown, rulePath: string, index: number): PluginDiagnostic[] {
+  if (when == null) return [];
+  const path = `${rulePath}#/rules/${index}/when`;
+  const record = asRecord(when);
+  if (!record) {
+    return [
+      {
+        severity: "error",
+        code: "PLUGIN_RULE_WHEN_INVALID",
+        message: "rule when must be an object",
+        path,
+        hint: "Use when.cliKeys, when.models, or when.configEquals.",
+      },
+    ];
+  }
+
+  const diagnostics: PluginDiagnostic[] = [];
+  for (const field of ["cliKeys", "models"] as const) {
+    const value = record[field];
+    if (value == null) continue;
+    if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+      diagnostics.push({
+        severity: "error",
+        code: "PLUGIN_RULE_WHEN_INVALID",
+        message: `rule when.${field} must be an array of strings`,
+        path: `${path}/${field}`,
+        hint: `Use ${field}: ["value"].`,
+      });
+    }
+  }
+  if (record.configEquals != null && !asRecord(record.configEquals)) {
+    diagnostics.push({
+      severity: "error",
+      code: "PLUGIN_RULE_WHEN_INVALID",
+      message: "rule when.configEquals must be an object",
+      path: `${path}/configEquals`,
+      hint: "Use key-value pairs that should match plugin config.",
+    });
+  }
+  return diagnostics;
 }
 
 function ruleActionDiagnostics(
