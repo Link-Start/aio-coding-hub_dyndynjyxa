@@ -50,6 +50,10 @@ export type DoctorResult = {
   };
 };
 
+export type StrictValidationResult =
+  | { ok: true; diagnostics: PluginDiagnostic[] }
+  | { ok: false; error: { code: string; message: string }; diagnostics: PluginDiagnostic[] };
+
 type DoctorOptions = {
   strict?: boolean;
 };
@@ -88,8 +92,21 @@ export function runCreateAioPluginCli(args: string[], cwd: string, io: CliIo = c
   }
 
   if (commandOrId === "validate") {
+    const strict = firstArg === "--strict";
+    const pluginDir = strict ? secondArg : firstArg;
     try {
-      io.log(JSON.stringify(validatePluginDirectory(resolve(cwd, firstArg ?? "."))));
+      const root = resolve(cwd, pluginDir ?? ".");
+      if (strict) {
+        const result = validatePluginDirectoryStrict(root);
+        const text = JSON.stringify(result);
+        if (result.ok) {
+          io.log(text);
+          return 0;
+        }
+        io.error(text);
+        return 1;
+      }
+      io.log(JSON.stringify(validatePluginDirectory(root)));
       return 0;
     } catch (error) {
       io.error(`failed to validate plugin directory: ${errorMessage(error)}`);
@@ -207,6 +224,23 @@ export function readPluginDirectoryBytes(root: string): PluginFileBytes {
 
 export function validatePluginDirectory(root: string): ValidationResult {
   return validatePluginFiles(readPluginDirectory(root));
+}
+
+export function validatePluginDirectoryStrict(root: string): StrictValidationResult {
+  return validatePluginFilesStrict(readPluginDirectory(root));
+}
+
+export function validatePluginFilesStrict(files: ScaffoldFiles): StrictValidationResult {
+  const result = doctorPluginFiles(files, { strict: true });
+  const firstError = result.diagnostics.find((diagnostic) => diagnostic.severity === "error");
+  if (!firstError) {
+    return { ok: true, diagnostics: result.diagnostics };
+  }
+  return {
+    ok: false,
+    error: { code: firstError.code, message: firstError.message },
+    diagnostics: result.diagnostics,
+  };
 }
 
 export function doctorPluginDirectory(root: string, options: DoctorOptions = {}): DoctorResult {
@@ -341,11 +375,149 @@ function hasPluginFile(files: ScaffoldFiles, path: string): boolean {
   return Object.prototype.hasOwnProperty.call(files, path);
 }
 
-function strictRuleDiagnostics(
-  _files: ScaffoldFiles,
-  _manifest: PluginManifest
-): PluginDiagnostic[] {
-  return [];
+const RULE_TARGET_FIELDS_BY_HOOK: Record<string, readonly string[]> = {
+  "gateway.request.afterBodyRead": ["request.body"],
+  "gateway.request.beforeSend": ["request.body"],
+  "gateway.response.after": ["response.body"],
+  "gateway.response.chunk": ["stream.chunk"],
+  "gateway.error": ["request.body", "response.body"],
+  "log.beforePersist": ["log.message"],
+};
+
+function strictRuleDiagnostics(files: ScaffoldFiles, manifest: PluginManifest): PluginDiagnostic[] {
+  const runtime = asRecord(manifest.runtime);
+  if (
+    runtime?.kind !== "declarativeRules" ||
+    !Array.isArray(runtime.rules) ||
+    !runtime.rules.every((rulePath) => typeof rulePath === "string")
+  ) {
+    return [];
+  }
+
+  const diagnostics: PluginDiagnostic[] = [];
+  const declaredHooks = new Set<string>(
+    Array.isArray(manifest.hooks)
+      ? manifest.hooks
+          .map((hook) => asRecord(hook)?.name)
+          .filter((name): name is string => typeof name === "string")
+      : []
+  );
+  const grantedPermissions = new Set<string>(
+    Array.isArray(manifest.permissions)
+      ? manifest.permissions.flatMap((permission) =>
+          typeof permission === "string" ? [permission] : []
+        )
+      : []
+  );
+
+  for (const rulePath of runtime.rules) {
+    const text = files[rulePath];
+    if (!text) continue;
+
+    let document: { rules?: unknown[] };
+    try {
+      document = JSON.parse(text) as { rules?: unknown[] };
+    } catch (error) {
+      diagnostics.push({
+        severity: "error",
+        code: "PLUGIN_RULE_FILE_INVALID_JSON",
+        message: `rule file is not valid JSON: ${errorMessage(error)}`,
+        path: rulePath,
+        hint: "Fix the rule JSON before replaying or packing the plugin.",
+      });
+      continue;
+    }
+
+    if (!Array.isArray(document.rules)) {
+      diagnostics.push({
+        severity: "error",
+        code: "PLUGIN_RULES_MISSING_ARRAY",
+        message: "rule document must contain a rules array",
+        path: `${rulePath}#/rules`,
+        hint: 'Use { "rules": [...] } as the rule document shape.',
+      });
+      continue;
+    }
+
+    document.rules.forEach((rawRule, index) => {
+      const rule = asRecord(rawRule);
+      if (!rule) {
+        diagnostics.push({
+          severity: "error",
+          code: "PLUGIN_RULE_INVALID",
+          message: "rule entry must be an object",
+          path: `${rulePath}#/rules/${index}`,
+          hint: "Replace the entry with an object containing hook, target, match, and action.",
+        });
+        return;
+      }
+
+      const hook = typeof rule.hook === "string" ? rule.hook : "";
+      if (!hook) {
+        diagnostics.push({
+          severity: "error",
+          code: "PLUGIN_RULE_HOOK_MISSING",
+          message: "rule hook is required",
+          path: `${rulePath}#/rules/${index}/hook`,
+          hint: "Set hook to one of the hooks declared in plugin.json.",
+        });
+      } else if (!declaredHooks.has(hook)) {
+        diagnostics.push({
+          severity: "error",
+          code: "PLUGIN_RULE_HOOK_NOT_DECLARED",
+          message: `rule hook is not declared in plugin.json: ${hook}`,
+          path: `${rulePath}#/rules/${index}/hook`,
+          hint: "Add the hook to manifest.hooks or change the rule hook.",
+        });
+      }
+
+      const target = asRecord(rule.target);
+      const action = asRecord(rule.action);
+      const targetField = typeof target?.field === "string" ? target.field : "request.body";
+      const actionKind = typeof action?.kind === "string" ? action.kind : "";
+      const allowedFields = RULE_TARGET_FIELDS_BY_HOOK[hook] ?? [];
+      if (hook && allowedFields.length > 0 && !allowedFields.includes(targetField)) {
+        diagnostics.push({
+          severity: "error",
+          code: "PLUGIN_RULE_TARGET_INCOMPATIBLE_WITH_HOOK",
+          message: `target field ${targetField} is not compatible with hook ${hook}`,
+          path: `${rulePath}#/rules/${index}/target/field`,
+          hint: `Use one of: ${allowedFields.join(", ")}.`,
+        });
+      }
+
+      for (const permission of permissionsForRuleTarget(targetField, actionKind)) {
+        if (!grantedPermissions.has(permission)) {
+          diagnostics.push({
+            severity: "error",
+            code: "PLUGIN_RULE_PERMISSION_MISMATCH",
+            message: `rule targeting ${targetField} with action ${
+              actionKind || "unknown"
+            } requires ${permission}`,
+            path: `${rulePath}#/rules/${index}`,
+            hint: `Add ${permission} to manifest.permissions or change the rule target/action.`,
+          });
+        }
+      }
+    });
+  }
+
+  return diagnostics;
+}
+
+function permissionsForRuleTarget(field: string, actionKind: string): string[] {
+  const mutates = actionKind === "replace" || actionKind === "appendMessage";
+  switch (field) {
+    case "response.body":
+      return mutates ? ["response.body.read", "response.body.write"] : ["response.body.read"];
+    case "stream.chunk":
+      return mutates ? ["stream.inspect", "stream.modify"] : ["stream.inspect"];
+    case "log.message":
+      return ["log.redact"];
+    case "request.body":
+    default:
+      return mutates ? ["request.body.read", "request.body.write"] : ["request.body.read"];
+  }
 }
 
 function manifestRuntimeKind(

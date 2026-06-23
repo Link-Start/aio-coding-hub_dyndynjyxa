@@ -17,6 +17,7 @@ import {
   signPackage,
   validatePluginDirectory,
   validatePluginFiles,
+  validatePluginFilesStrict,
   verifyPackage,
 } from "./devtools";
 
@@ -202,6 +203,101 @@ describe("create-aio-plugin scaffold", () => {
     const result = validatePluginDirectory(root);
 
     expect(result).toEqual({ ok: true });
+  });
+
+  it("validate strict rejects malformed declarative rule documents", () => {
+    const files = createPluginScaffold({ id: "acme.real", name: "Real", template: "rule" });
+    files["rules/main.json"] = "{ bad json";
+
+    const result = validatePluginFilesStrict(files);
+
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        severity: "error",
+        code: "PLUGIN_RULE_FILE_INVALID_JSON",
+        path: "rules/main.json",
+      })
+    );
+  });
+
+  it("validate strict rejects rules whose hook is not declared by the manifest", () => {
+    const files = createPluginScaffold({ id: "acme.real", name: "Real", template: "rule" });
+    const manifest = JSON.parse(files["plugin.json"] ?? "{}") as {
+      hooks: Array<{ name: string; priority?: number }>;
+    };
+    manifest.hooks = [{ name: "gateway.response.after", priority: 100 }];
+    files["plugin.json"] = `${JSON.stringify(manifest, null, 2)}\n`;
+
+    const result = validatePluginFilesStrict(files);
+
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        severity: "error",
+        code: "PLUGIN_RULE_HOOK_NOT_DECLARED",
+        path: "rules/main.json#/rules/0/hook",
+      })
+    );
+  });
+
+  it("validate strict rejects missing permissions for mutating declarative rules", () => {
+    const files = createPluginScaffold({ id: "acme.real", name: "Real", template: "rule" });
+    const manifest = JSON.parse(files["plugin.json"] ?? "{}") as {
+      permissions: string[];
+    };
+    manifest.permissions = ["request.body.read"];
+    files["plugin.json"] = `${JSON.stringify(manifest, null, 2)}\n`;
+
+    const result = validatePluginFilesStrict(files);
+
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        severity: "error",
+        code: "PLUGIN_RULE_PERMISSION_MISMATCH",
+        message: expect.stringContaining("request.body.write"),
+      })
+    );
+  });
+
+  it("legacy validate remains manifest-only while validate strict reports package errors", () => {
+    const files = createPluginScaffold({ id: "acme.real", name: "Real", template: "rule" });
+    delete files["rules/main.json"];
+
+    expect(validatePluginFiles(files)).toEqual({ ok: true });
+    expect(validatePluginFilesStrict(files)).toMatchObject({
+      ok: false,
+      diagnostics: [expect.objectContaining({ code: "PLUGIN_RULE_FILE_MISSING" })],
+    });
+  });
+
+  it("validate strict command preserves the old validate command shape unless strict is requested", () => {
+    const root = mkdtempSync(join(tmpdir(), "aio-plugin-strict-"));
+    const files = createPluginScaffold({ id: "acme.real", name: "Real", template: "rule" });
+    delete files["rules/main.json"];
+    writeScaffold(root, files);
+    const normalOutput: string[] = [];
+    const strictOutput: string[] = [];
+
+    expect(
+      runCreateAioPluginCli(["validate", root], process.cwd(), {
+        log: (line) => normalOutput.push(line),
+        error: (line) => normalOutput.push(line),
+      })
+    ).toBe(0);
+    expect(JSON.parse(normalOutput[0] ?? "{}")).toEqual({ ok: true });
+
+    expect(
+      runCreateAioPluginCli(["validate", "--strict", root], process.cwd(), {
+        log: (line) => strictOutput.push(line),
+        error: (line) => strictOutput.push(line),
+      })
+    ).toBe(1);
+    expect(JSON.parse(strictOutput[0] ?? "{}")).toMatchObject({
+      ok: false,
+      diagnostics: [expect.objectContaining({ code: "PLUGIN_RULE_FILE_MISSING" })],
+    });
   });
 
   it("doctor reports a structured error when plugin.json is missing", () => {
