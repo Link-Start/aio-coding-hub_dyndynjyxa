@@ -5,6 +5,10 @@ use super::runtime_lifecycle::PluginRuntimeCache;
 use crate::gateway::plugins::context::{
     GatewayHookAction, GatewayHookResult, GatewayVisibleHookContext,
 };
+use crate::gateway::plugins::mutation::{
+    DEFAULT_PLUGIN_MUTATION_BODY_BYTES, DEFAULT_PLUGIN_MUTATION_LOG_BYTES,
+    DEFAULT_PLUGIN_MUTATION_STREAM_BYTES,
+};
 use crate::gateway::plugins::permissions::GatewayPluginError;
 use crate::gateway::plugins::pipeline::{GatewayHookFuture, GatewayPluginExecutor};
 use crate::plugins::{PluginDetail, PluginRuntime};
@@ -20,6 +24,8 @@ use std::sync::{Arc, Mutex};
 
 pub(crate) const MAX_RULE_REGEX_PATTERN_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_RULE_FILE_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_RULE_FILES_PER_RUNTIME: usize = 16;
+pub(crate) const MAX_RULE_TOTAL_FILE_BYTES: usize = 1024 * 1024;
 const MAX_RULE_REGEX_COMPILED_BYTES: usize = 2 * 1024 * 1024;
 const MAX_RULES_PER_RUNTIME: usize = 256;
 
@@ -179,9 +185,12 @@ impl RuleRuntime {
                     result.reason = Some(message.clone());
                 }
                 RuleAction::AppendMessage { role, content } => {
-                    if let Some(next_body) =
-                        append_chat_message(request_body.as_deref(), role, content)?
-                    {
+                    if let Some(next_body) = append_chat_message(
+                        request_body.as_deref(),
+                        role,
+                        content,
+                        output_limit_for_field(TargetField::RequestBody),
+                    )? {
                         request_body = Some(next_body);
                         result.request_body = request_body.clone();
                     }
@@ -361,7 +370,16 @@ fn load_rule_runtime(plugin: &PluginDetail) -> Result<RuleRuntime, RuleRuntimeEr
         )
     })?;
 
-    let mut merged_rules = Vec::new();
+    if rules.len() > MAX_RULE_FILES_PER_RUNTIME {
+        return Err(RuleRuntimeError::new(
+            "PLUGIN_RULE_TOO_MANY_FILES",
+            format!(
+                "declarative rules runtime supports at most {MAX_RULE_FILES_PER_RUNTIME} files"
+            ),
+        ));
+    }
+
+    let mut seen_rule_paths = HashSet::new();
     for rule_path in rules {
         if rule_path.contains("..") || rule_path.starts_with('/') || rule_path.starts_with('\\') {
             return Err(RuleRuntimeError::new(
@@ -372,6 +390,17 @@ fn load_rule_runtime(plugin: &PluginDetail) -> Result<RuleRuntime, RuleRuntimeEr
                 ),
             ));
         }
+        if !seen_rule_paths.insert(rule_path.as_str()) {
+            return Err(RuleRuntimeError::new(
+                "PLUGIN_RULE_DUPLICATE_FILE",
+                format!("duplicate declarative rule file path: {rule_path}"),
+            ));
+        }
+    }
+
+    let mut merged_rules = Vec::new();
+    let mut total_rule_bytes = 0_u64;
+    for rule_path in rules {
         let path = std::path::Path::new(root_dir).join(rule_path);
         let metadata = fs::metadata(&path).map_err(|err| {
             RuleRuntimeError::new(
@@ -386,6 +415,13 @@ fn load_rule_runtime(plugin: &PluginDetail) -> Result<RuleRuntime, RuleRuntimeEr
             return Err(RuleRuntimeError::new(
                 "PLUGIN_RULE_FILE_TOO_LARGE",
                 format!("rule file exceeds {MAX_RULE_FILE_BYTES} bytes: {rule_path}"),
+            ));
+        }
+        total_rule_bytes = total_rule_bytes.saturating_add(metadata.len());
+        if total_rule_bytes > MAX_RULE_TOTAL_FILE_BYTES as u64 {
+            return Err(RuleRuntimeError::new(
+                "PLUGIN_RULE_TOTAL_FILES_TOO_LARGE",
+                format!("rule files exceed {MAX_RULE_TOTAL_FILE_BYTES} bytes in total"),
             ));
         }
         let bytes = fs::read(&path).map_err(|err| {
@@ -663,21 +699,32 @@ fn apply_json_replace_batch_to_text(
     };
 
     let mut matched = false;
+    let mut projected_len = current.len();
+    let output_limit = output_limit_for_field(first.target.field);
     apply_to_json_strings_mut(&mut root, path, &mut |candidate| {
         for rule in rules {
             let RuleAction::Replace { replacement } = &rule.action else {
                 continue;
             };
-            if rule.regex.is_match(candidate) {
-                let next = rule
-                    .regex
-                    .replace_all(candidate, replacement.as_str())
-                    .into_owned();
+            if let Some(next) =
+                bounded_replace_all(&rule.regex, candidate, replacement, output_limit, &rule.id)?
+            {
+                account_projected_output_len(
+                    &mut projected_len,
+                    candidate.len(),
+                    next.len(),
+                    output_limit,
+                    &rule.id,
+                )?;
                 *candidate = next;
                 matched = true;
             }
+            if projected_len > output_limit {
+                return Err(output_too_large_error(&rule.id));
+            }
         }
-    });
+        Ok(())
+    })?;
 
     if matched {
         *current = serde_json::to_string(&root).map_err(|err| {
@@ -697,7 +744,7 @@ fn apply_json_replace_batch_to_text(
 fn apply_rule_to_text(
     text: &mut Option<String>,
     rule: &CompiledRule,
-    _output_field: OutputField,
+    output_field: OutputField,
 ) -> Result<bool, RuleRuntimeError> {
     let Some(current) = text.as_mut() else {
         return Ok(false);
@@ -709,16 +756,28 @@ fn apply_rule_to_text(
                 return Ok(false);
             };
             let mut matched = false;
+            let mut projected_len = current.len();
+            let output_limit = output_limit_for_output(output_field);
             apply_to_json_strings_mut(&mut root, path, &mut |candidate| {
-                if rule.regex.is_match(candidate) {
-                    let next = rule
-                        .regex
-                        .replace_all(candidate, replacement.as_str())
-                        .into_owned();
+                if let Some(next) = bounded_replace_all(
+                    &rule.regex,
+                    candidate,
+                    replacement,
+                    output_limit,
+                    &rule.id,
+                )? {
+                    account_projected_output_len(
+                        &mut projected_len,
+                        candidate.len(),
+                        next.len(),
+                        output_limit,
+                        &rule.id,
+                    )?;
                     *candidate = next;
                     matched = true;
                 }
-            });
+                Ok(())
+            })?;
             if matched {
                 *current = serde_json::to_string(&root).map_err(|err| {
                     RuleRuntimeError::new(
@@ -741,20 +800,112 @@ fn apply_rule_to_text(
                 if rule.regex.is_match(candidate) {
                     matched = true;
                 }
-            });
+                Ok(())
+            })?;
             Ok(matched)
         }
         (None, RuleAction::Replace { replacement }) => {
-            if !rule.regex.is_match(current) {
-                return Ok(false);
+            if let Some(next) = bounded_replace_all(
+                &rule.regex,
+                current,
+                replacement,
+                output_limit_for_output(output_field),
+                &rule.id,
+            )? {
+                *current = next;
+                Ok(true)
+            } else {
+                Ok(false)
             }
-            *current = rule
-                .regex
-                .replace_all(current, replacement.as_str())
-                .into_owned();
-            Ok(true)
         }
         (None, _) => Ok(rule.regex.is_match(current)),
+    }
+}
+
+fn bounded_replace_all(
+    regex: &Regex,
+    text: &str,
+    replacement: &str,
+    limit: usize,
+    rule_id: &str,
+) -> Result<Option<String>, RuleRuntimeError> {
+    let mut matched = false;
+    let mut out = String::new();
+    let mut last_match_end = 0usize;
+    for caps in regex.captures_iter(text) {
+        let Some(matched_text) = caps.get(0) else {
+            continue;
+        };
+        matched = true;
+        push_bounded(
+            &mut out,
+            &text[last_match_end..matched_text.start()],
+            limit,
+            rule_id,
+        )?;
+        let mut expanded = String::new();
+        caps.expand(replacement, &mut expanded);
+        push_bounded(&mut out, &expanded, limit, rule_id)?;
+        last_match_end = matched_text.end();
+    }
+    if !matched {
+        return Ok(None);
+    }
+    push_bounded(&mut out, &text[last_match_end..], limit, rule_id)?;
+    Ok(Some(out))
+}
+
+fn push_bounded(
+    out: &mut String,
+    value: &str,
+    limit: usize,
+    rule_id: &str,
+) -> Result<(), RuleRuntimeError> {
+    if out.len().saturating_add(value.len()) > limit {
+        return Err(output_too_large_error(rule_id));
+    }
+    out.push_str(value);
+    Ok(())
+}
+
+fn account_projected_output_len(
+    projected_len: &mut usize,
+    previous_len: usize,
+    next_len: usize,
+    limit: usize,
+    rule_id: &str,
+) -> Result<(), RuleRuntimeError> {
+    if next_len > previous_len {
+        *projected_len = projected_len.saturating_add(next_len - previous_len);
+        if *projected_len > limit {
+            return Err(output_too_large_error(rule_id));
+        }
+    } else {
+        *projected_len = projected_len.saturating_sub(previous_len - next_len);
+    }
+    Ok(())
+}
+
+fn output_too_large_error(rule_id: &str) -> RuleRuntimeError {
+    RuleRuntimeError::new(
+        "PLUGIN_OUTPUT_TOO_LARGE",
+        format!("rule {rule_id} output exceeds plugin mutation budget"),
+    )
+}
+
+fn output_limit_for_output(output_field: OutputField) -> usize {
+    match output_field {
+        OutputField::RequestBody | OutputField::ResponseBody => DEFAULT_PLUGIN_MUTATION_BODY_BYTES,
+        OutputField::StreamChunk => DEFAULT_PLUGIN_MUTATION_STREAM_BYTES,
+        OutputField::LogMessage => DEFAULT_PLUGIN_MUTATION_LOG_BYTES,
+    }
+}
+
+fn output_limit_for_field(field: TargetField) -> usize {
+    match field {
+        TargetField::RequestBody | TargetField::ResponseBody => DEFAULT_PLUGIN_MUTATION_BODY_BYTES,
+        TargetField::StreamChunk => DEFAULT_PLUGIN_MUTATION_STREAM_BYTES,
+        TargetField::LogMessage => DEFAULT_PLUGIN_MUTATION_LOG_BYTES,
     }
 }
 
@@ -778,10 +929,14 @@ fn append_chat_message(
     request_body: Option<&str>,
     role: &str,
     content: &str,
+    limit: usize,
 ) -> Result<Option<String>, RuleRuntimeError> {
     let Some(request_body) = request_body else {
         return Ok(None);
     };
+    if request_body.len().saturating_add(content.len()) > limit {
+        return Err(output_too_large_error("appendMessage"));
+    }
     let Some(mut root) = parse_json_or_skip(request_body)? else {
         return Ok(None);
     };
@@ -792,39 +947,48 @@ fn append_chat_message(
         "role": role,
         "content": content,
     }));
-    serde_json::to_string(&root).map(Some).map_err(|err| {
+    let output = serde_json::to_string(&root).map_err(|err| {
         RuleRuntimeError::new(
             "PLUGIN_RULE_INVALID_OUTPUT",
             format!("failed to serialize appended chat message: {err}"),
         )
-    })
+    })?;
+    if output.len() > limit {
+        return Err(output_too_large_error("appendMessage"));
+    }
+    Ok(Some(output))
 }
 
-fn apply_to_json_strings_mut<F>(value: &mut Value, path: &[JsonPathSegment], f: &mut F)
+fn apply_to_json_strings_mut<F>(
+    value: &mut Value,
+    path: &[JsonPathSegment],
+    f: &mut F,
+) -> Result<(), RuleRuntimeError>
 where
-    F: FnMut(&mut String),
+    F: FnMut(&mut String) -> Result<(), RuleRuntimeError>,
 {
     if path.is_empty() {
         if let Value::String(value) = value {
-            f(value);
+            f(value)?;
         }
-        return;
+        return Ok(());
     }
 
     match &path[0] {
         JsonPathSegment::Key(key) => {
             if let Some(next) = value.get_mut(key) {
-                apply_to_json_strings_mut(next, &path[1..], f);
+                apply_to_json_strings_mut(next, &path[1..], f)?;
             }
         }
         JsonPathSegment::WildcardArray => {
             if let Value::Array(items) = value {
                 for item in items {
-                    apply_to_json_strings_mut(item, &path[1..], f);
+                    apply_to_json_strings_mut(item, &path[1..], f)?;
                 }
             }
         }
     }
+    Ok(())
 }
 
 fn parse_json_path(path: &str) -> Result<Vec<JsonPathSegment>, RuleRuntimeError> {
@@ -1073,6 +1237,40 @@ mod tests {
     }
 
     #[test]
+    fn rule_runtime_rejects_too_many_rule_files_before_loading() {
+        let dir = tempfile::tempdir().expect("temp plugin dir");
+        let mut plugin = rule_plugin_detail(
+            "example.too-many-rules",
+            dir.path().to_string_lossy().to_string(),
+        );
+        plugin.manifest.runtime = PluginRuntime::DeclarativeRules {
+            rules: (0..=MAX_RULE_FILES_PER_RUNTIME)
+                .map(|index| format!("rules/{index}.json"))
+                .collect(),
+        };
+
+        let err = load_rule_runtime(&plugin).expect_err("too many rule files should be rejected");
+
+        assert_eq!(err.code(), "PLUGIN_RULE_TOO_MANY_FILES");
+    }
+
+    #[test]
+    fn rule_runtime_rejects_duplicate_rule_files_before_loading() {
+        let dir = tempfile::tempdir().expect("temp plugin dir");
+        let mut plugin = rule_plugin_detail(
+            "example.duplicate-rules",
+            dir.path().to_string_lossy().to_string(),
+        );
+        plugin.manifest.runtime = PluginRuntime::DeclarativeRules {
+            rules: vec!["rules/main.json".to_string(), "rules/main.json".to_string()],
+        };
+
+        let err = load_rule_runtime(&plugin).expect_err("duplicate rule files should be rejected");
+
+        assert_eq!(err.code(), "PLUGIN_RULE_DUPLICATE_FILE");
+    }
+
+    #[test]
     fn rule_plugin_runtime_replaces_regex_hits_at_json_path() {
         let runtime = RuleRuntime::from_value(json!({
             "rules": [{
@@ -1102,6 +1300,40 @@ mod tests {
         let body = result.request_body.expect("rewritten body");
         assert!(body.contains("[REDACTED]"));
         assert!(!body.contains("sk-12345678"));
+    }
+
+    #[test]
+    fn rule_plugin_runtime_rejects_replacement_output_over_budget_before_returning_result() {
+        let runtime = RuleRuntime::from_value(json!({
+            "rules": [{
+                "id": "expand-too-large",
+                "hook": "log.beforePersist",
+                "target": { "field": "log.message" },
+                "match": { "regex": "secret" },
+                "action": {
+                    "kind": "replace",
+                    "replacement": "x".repeat(DEFAULT_PLUGIN_MUTATION_LOG_BYTES + 1)
+                }
+            }]
+        }))
+        .expect("rules parse");
+        let ctx = GatewayVisibleHookContext {
+            hook_name: "log.beforePersist".to_string(),
+            trace_id: "trace-rule-budget".to_string(),
+            request: GatewayVisibleRequestContext::default(),
+            response: GatewayVisibleResponseContext::default(),
+            stream: GatewayVisibleStreamContext::default(),
+            log: GatewayVisibleLogContext {
+                message: Some("secret".to_string()),
+                ..GatewayVisibleLogContext::default()
+            },
+        };
+
+        let err = runtime
+            .execute(&ctx, &json!({}))
+            .expect_err("oversized replacement should fail inside runtime");
+
+        assert_eq!(err.code(), "PLUGIN_OUTPUT_TOO_LARGE");
     }
 
     #[test]

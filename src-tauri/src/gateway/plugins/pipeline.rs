@@ -249,6 +249,7 @@ impl GatewayPluginPipeline {
                 &plugin.granted_permissions,
                 self.config.context_budget,
             );
+            let truncation = VisibleTruncationState::from_context(&visible);
             let future = self.executor.execute_request_hook(plugin, visible);
             let result = match tokio::time::timeout(self.config.hook_timeout, future).await {
                 Ok(Ok(result)) => result,
@@ -299,6 +300,7 @@ impl GatewayPluginPipeline {
                 &plugin.granted_permissions,
                 &result,
                 self.config.mutation_budget,
+                &truncation,
             ) {
                 self.record_failure(&plugin.summary.plugin_id);
                 audit_events.push(audit_event(
@@ -392,6 +394,7 @@ impl GatewayPluginPipeline {
                 &plugin.granted_permissions,
                 self.config.context_budget,
             );
+            let truncation = VisibleTruncationState::from_context(&visible);
             let result = match tokio::time::timeout(
                 self.config.hook_timeout,
                 self.executor.execute_response_hook(plugin, visible),
@@ -423,6 +426,7 @@ impl GatewayPluginPipeline {
                 &plugin.granted_permissions,
                 &result,
                 self.config.mutation_budget,
+                &truncation,
             ) {
                 self.record_failure(&plugin.summary.plugin_id);
                 audit_events.push(failed_event(plugin, input.hook_name, &err.to_string()));
@@ -501,6 +505,7 @@ impl GatewayPluginPipeline {
                 &plugin.granted_permissions,
                 self.config.context_budget,
             );
+            let truncation = VisibleTruncationState::from_context(&visible);
             let result = match tokio::time::timeout(
                 self.config.hook_timeout,
                 self.executor.execute_stream_hook(plugin, visible),
@@ -532,6 +537,7 @@ impl GatewayPluginPipeline {
                 &plugin.granted_permissions,
                 &result,
                 self.config.mutation_budget,
+                &truncation,
             ) {
                 self.record_failure(&plugin.summary.plugin_id);
                 audit_events.push(failed_event(plugin, hook_name, &err.to_string()));
@@ -605,6 +611,7 @@ impl GatewayPluginPipeline {
                 &plugin.granted_permissions,
                 self.config.context_budget,
             );
+            let truncation = VisibleTruncationState::from_context(&visible);
             let result = match tokio::time::timeout(
                 self.config.hook_timeout,
                 self.executor.execute_log_hook(plugin, visible),
@@ -636,6 +643,7 @@ impl GatewayPluginPipeline {
                 &plugin.granted_permissions,
                 &result,
                 self.config.mutation_budget,
+                &truncation,
             ) {
                 self.record_failure(&plugin.summary.plugin_id);
                 audit_events.push(failed_event(plugin, hook_name, &err.to_string()));
@@ -782,7 +790,9 @@ fn enforce_hook_result_with_budget(
     permissions: &[String],
     result: &GatewayHookResult,
     budget: GatewayPluginMutationBudget,
+    truncation: &VisibleTruncationState,
 ) -> Result<(), GatewayPluginError> {
+    enforce_untruncated_context_mutations(result, truncation)?;
     if budget == GatewayPluginMutationBudget::default() {
         return enforce_descriptor_result_permissions(hook_name, permissions, result);
     }
@@ -798,6 +808,51 @@ fn enforce_hook_result_with_budget(
         .iter()
         .all(|permission| descriptor.allows_read_permission(permission)));
     enforce_descriptor_permissions_with_budget(descriptor, permissions, result, budget)
+}
+
+fn enforce_untruncated_context_mutations(
+    result: &GatewayHookResult,
+    truncation: &VisibleTruncationState,
+) -> Result<(), GatewayPluginError> {
+    if result.request_body.is_some() && truncation.request_body {
+        return Err(truncated_context_mutation_error("request body"));
+    }
+    if result.response_body.is_some() && truncation.response_body {
+        return Err(truncated_context_mutation_error("response body"));
+    }
+    if result.stream_chunk.is_some() && truncation.stream_chunk {
+        return Err(truncated_context_mutation_error("stream chunk"));
+    }
+    if result.log_message.is_some() && truncation.log_message {
+        return Err(truncated_context_mutation_error("log message"));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VisibleTruncationState {
+    request_body: bool,
+    response_body: bool,
+    stream_chunk: bool,
+    log_message: bool,
+}
+
+impl VisibleTruncationState {
+    fn from_context(visible: &GatewayVisibleHookContext) -> Self {
+        Self {
+            request_body: visible.request.body_truncated,
+            response_body: visible.response.body_truncated,
+            stream_chunk: visible.stream.chunk_truncated,
+            log_message: visible.log.message_truncated,
+        }
+    }
+}
+
+fn truncated_context_mutation_error(field: &'static str) -> GatewayPluginError {
+    GatewayPluginError::new(
+        "PLUGIN_CONTEXT_TRUNCATED",
+        format!("plugin cannot mutate {field} because visible context was truncated"),
+    )
 }
 
 fn failure_policy(plugin: &PluginDetail, hook_name: GatewayPluginHookName) -> FailurePolicy {
@@ -1510,6 +1565,56 @@ mod tests {
         assert!(second.audit_events.iter().any(|event| {
             event.plugin_id == "plugin.large" && event.event_type == "plugin.hook.skipped"
         }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_pipeline_rejects_truncated_context_body_mutation_before_applying() {
+        let executor =
+            InMemoryGatewayPluginExecutor::new().with_request_handler("plugin.truncated", |ctx| {
+                GatewayHookResult {
+                    request_body: ctx.request.body,
+                    ..GatewayHookResult::continue_unchanged()
+                }
+            });
+        let pipeline = GatewayPluginPipeline::for_tests(
+            vec![plugin(
+                "plugin.truncated",
+                10,
+                vec!["request.body.read", "request.body.write"],
+            )],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig {
+                hook_timeout: Duration::from_secs(1),
+                circuit_failure_threshold: 1,
+                circuit_cooldown: Duration::from_secs(60),
+                context_budget: GatewayPluginContextBudget {
+                    body_bytes: 4,
+                    ..GatewayPluginContextBudget::default()
+                },
+                ..GatewayPluginPipelineConfig::default()
+            },
+        );
+        let input = GatewayRequestHookInput {
+            body: Bytes::from_static(b"hello world"),
+            ..request_input()
+        };
+
+        let output = pipeline
+            .run_request_hook(input)
+            .await
+            .expect("fail-open truncated mutation should preserve request");
+
+        assert_eq!(output.body.as_ref(), b"hello world");
+        assert!(output.audit_events.iter().any(|event| {
+            event.plugin_id == "plugin.truncated"
+                && event.event_type == "plugin.hook.failed"
+                && event
+                    .details
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|error| error.contains("PLUGIN_CONTEXT_TRUNCATED"))
+        }));
+        assert!(pipeline.circuit_snapshot("plugin.truncated").open);
     }
 
     #[tokio::test(flavor = "current_thread")]

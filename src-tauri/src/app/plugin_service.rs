@@ -42,10 +42,19 @@ fn enabled_plugins_for_gateway_once(db: &crate::db::Db) -> AppResult<Vec<PluginD
         if summary.status != PluginStatus::Enabled {
             continue;
         }
-        out.push(detail_with_config_defaults_for_db(
+        let detail = detail_with_config_defaults_for_db(
             db,
             repository::get_plugin(db, &summary.plugin_id)?,
-        )?);
+        )?;
+        if let Err(err) = validate_manifest(&detail.manifest, env!("CARGO_PKG_VERSION")) {
+            tracing::warn!(
+                plugin_id = %summary.plugin_id,
+                error = ?err,
+                "skipping enabled plugin with invalid manifest"
+            );
+            continue;
+        }
+        out.push(detail);
     }
     Ok(out)
 }
@@ -152,7 +161,7 @@ pub(crate) fn install_plugin_from_local_package(
     )
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct LocalPackageInstallPolicy {
     pub(crate) expected_plugin_id: Option<String>,
     pub(crate) expected_checksum: Option<String>,
@@ -160,6 +169,23 @@ pub(crate) struct LocalPackageInstallPolicy {
     pub(crate) public_key: Option<String>,
     pub(crate) allow_unsigned: bool,
     pub(crate) developer_mode: bool,
+    pub(crate) install_source: PluginInstallSource,
+    pub(crate) remote_source_url: Option<String>,
+}
+
+impl Default for LocalPackageInstallPolicy {
+    fn default() -> Self {
+        Self {
+            expected_plugin_id: None,
+            expected_checksum: None,
+            signature: None,
+            public_key: None,
+            allow_unsigned: false,
+            developer_mode: false,
+            install_source: PluginInstallSource::Local,
+            remote_source_url: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -879,7 +905,7 @@ pub(crate) fn install_plugin_from_local_package_with_policy(
                 tx,
                 repository::InsertPluginInput {
                     manifest: extracted.manifest.clone(),
-                    install_source: PluginInstallSource::Local,
+                    install_source: policy.install_source,
                     status: PluginStatus::Disabled,
                     installed_dir: Some(installed_dir.to_string_lossy().to_string()),
                 },
@@ -893,17 +919,21 @@ pub(crate) fn install_plugin_from_local_package_with_policy(
             append_audit_with_tx(
                 tx,
                 Some(plugin_id.clone()),
-                "plugin.installed",
+                install_audit_event_type(policy.install_source),
                 "medium",
-                "Local plugin package installed",
-                serde_json::json!({
+                install_audit_message(policy.install_source),
+                install_audit_details(
+                    policy.install_source,
+                    policy.remote_source_url.as_deref(),
+                    serde_json::json!({
                     "source": "local",
                     "packageChecksum": extracted.checksum,
                     "cachedPackage": cache_package_path.to_string_lossy(),
                     "unsigned": !trust.signature_verified,
                     "signatureVerified": trust.signature_verified,
                     "developerMode": policy.developer_mode,
-                }),
+                    }),
+                ),
             )?;
             Ok(detail)
         })?;
@@ -967,6 +997,9 @@ pub(crate) fn install_plugin_from_remote_package_bytes(
         )
     })?;
 
+    let install_source = policy.install_source;
+    let expected_plugin_id = policy.expected_plugin_id.clone();
+    let expected_checksum = policy.expected_checksum.clone();
     let signature = policy.signature.clone();
     let public_key = remote_package_trusted_public_key(db, source_url, &policy)?;
     let result = install_plugin_from_local_package_with_policy(
@@ -976,43 +1009,22 @@ pub(crate) fn install_plugin_from_remote_package_bytes(
         installed_root,
         host_version,
         LocalPackageInstallPolicy {
-            expected_plugin_id: Some(policy.expected_plugin_id),
-            expected_checksum: Some(policy.expected_checksum),
+            expected_plugin_id: Some(expected_plugin_id),
+            expected_checksum: Some(expected_checksum),
             signature,
             public_key,
             allow_unsigned: false,
             developer_mode: false,
+            install_source,
+            remote_source_url: Some(source_url.to_string()),
         },
     )
-    .and_then(|detail| {
-        let plugin_id = detail.summary.plugin_id.clone();
-        let detail = repository::insert_plugin(
-            db,
-            repository::InsertPluginInput {
-                manifest: detail.manifest.clone(),
-                install_source: policy.install_source,
-                status: PluginStatus::Disabled,
-                installed_dir: detail.installed_dir.clone(),
-            },
-        )?;
-        append_audit(
-            db,
-            Some(plugin_id.clone()),
-            "plugin.remote.installed",
-            "medium",
-            "Remote plugin package installed",
-            serde_json::json!({
-                "sourceUrl": source_url,
-                "source": policy.install_source.as_str(),
-            }),
-        )?;
-        let next = repository::get_plugin(db, &plugin_id).unwrap_or(detail);
+    .inspect(|detail| {
         tracing::info!(
-            plugin_id,
-            source = policy.install_source.as_str(),
+            plugin_id = %detail.summary.plugin_id,
+            source = install_source.as_str(),
             "remote plugin package installed"
         );
-        Ok(next)
     });
 
     let _ = std::fs::remove_file(&package_path);
@@ -1283,10 +1295,48 @@ fn validate_local_package_install(
     policy: &LocalPackageInstallPolicy,
 ) -> AppResult<PackageTrust> {
     validate_manifest(&extracted.manifest, host_version)?;
-    validate_reserved_official_source(&extracted.manifest, PluginInstallSource::Local)?;
+    validate_reserved_official_source(&extracted.manifest, policy.install_source)?;
     let trust = verify_local_package(extracted, policy)?;
     enforce_unsigned_install_policy(&extracted.manifest, policy, trust)?;
     Ok(trust)
+}
+
+fn install_audit_event_type(source: PluginInstallSource) -> &'static str {
+    match source {
+        PluginInstallSource::Market | PluginInstallSource::GithubRelease => {
+            "plugin.remote.installed"
+        }
+        _ => "plugin.installed",
+    }
+}
+
+fn install_audit_message(source: PluginInstallSource) -> &'static str {
+    match source {
+        PluginInstallSource::Market | PluginInstallSource::GithubRelease => {
+            "Remote plugin package installed"
+        }
+        _ => "Local plugin package installed",
+    }
+}
+
+fn install_audit_details(
+    source: PluginInstallSource,
+    source_url: Option<&str>,
+    mut details: serde_json::Value,
+) -> serde_json::Value {
+    if let serde_json::Value::Object(object) = &mut details {
+        object.insert(
+            "source".to_string(),
+            serde_json::Value::String(source.as_str().to_string()),
+        );
+        if let Some(source_url) = source_url {
+            object.insert(
+                "sourceUrl".to_string(),
+                serde_json::Value::String(source_url.to_string()),
+            );
+        }
+    }
+    details
 }
 
 fn validate_reserved_official_source(
@@ -2210,6 +2260,51 @@ DROP TABLE plugins;
             exists,
             "runtime schema repair should recreate plugin tables"
         );
+    }
+
+    #[test]
+    fn enabled_plugins_for_gateway_skips_manifest_that_no_longer_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::init_for_tests(&dir.path().join("invalid-enabled-plugin.db")).unwrap();
+
+        install_plugin_manifest(
+            &db,
+            manifest(),
+            PluginInstallSource::Local,
+            None,
+            env!("CARGO_PKG_VERSION"),
+        )
+        .unwrap();
+        grant_plugin_permissions(
+            &db,
+            "community.prompt-helper",
+            vec![
+                "request.body.read".to_string(),
+                "request.body.write".to_string(),
+            ],
+        )
+        .unwrap();
+        save_plugin_config(
+            &db,
+            "community.prompt-helper",
+            serde_json::json!({"mode": "append_instruction"}),
+        )
+        .unwrap();
+        enable_plugin(&db, "community.prompt-helper", env!("CARGO_PKG_VERSION")).unwrap();
+        let mut invalid_manifest = manifest();
+        invalid_manifest.api_version = "2.0.0".to_string();
+        let invalid_manifest_json = serde_json::to_string(&invalid_manifest).unwrap();
+        db.open_connection()
+            .unwrap()
+            .execute(
+                "UPDATE plugins SET manifest_json = ?1 WHERE plugin_id = ?2",
+                rusqlite::params![invalid_manifest_json, "community.prompt-helper"],
+            )
+            .unwrap();
+
+        let active = enabled_plugins_for_gateway(&db).unwrap();
+
+        assert!(active.is_empty());
     }
 
     #[test]
@@ -3443,14 +3538,21 @@ INSERT INTO plugin_market_sources(
         .unwrap();
 
         assert_eq!(detail.summary.plugin_id, "market.signed-risky");
+        assert_eq!(detail.install_source, PluginInstallSource::Market);
         assert_eq!(detail.granted_permissions, Vec::<String>::new());
         assert_eq!(detail.pending_permissions, vec!["request.body.read"]);
         let install_audit = detail
             .audit_logs
             .iter()
-            .find(|log| log.event_type == "plugin.installed")
+            .find(|log| log.event_type == "plugin.remote.installed")
             .unwrap();
+        assert_eq!(install_audit.details["source"], "market");
+        assert_eq!(
+            install_audit.details["sourceUrl"],
+            "https://plugins.example.test/download/market-signed-risky.aio-plugin"
+        );
         assert_eq!(install_audit.details["unsigned"], false);
+        assert_eq!(install_audit.details["signatureVerified"], true);
     }
 
     #[test]
