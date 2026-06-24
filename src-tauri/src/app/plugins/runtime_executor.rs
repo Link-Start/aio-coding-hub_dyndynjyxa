@@ -2,33 +2,45 @@
 
 use crate::app::plugins::official_privacy_filter_runtime::OfficialPrivacyFilterRuntime;
 use crate::app::plugins::rule_runtime::RuleRuntimeGatewayPluginExecutor;
+use crate::app::plugins::runtime_lifecycle::RuntimeLifecycleRegistry;
 use crate::app::plugins::runtime_manager::{PluginRuntimeManager, RuntimeDispatch};
 use crate::app::plugins::runtime_policy::RuntimePolicy;
 use crate::domain::plugins::PluginDetail;
 use crate::gateway::plugins::context::{GatewayHookResult, GatewayVisibleHookContext};
 use crate::gateway::plugins::permissions::GatewayPluginError;
 use crate::gateway::plugins::pipeline::{GatewayHookFuture, GatewayPluginExecutor};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RuntimeExecutionPolicy {
     pub(crate) wasm_enabled: bool,
 }
 
-#[derive(Default)]
 pub(crate) struct RuntimeGatewayPluginExecutor {
-    rule_runtime: RuleRuntimeGatewayPluginExecutor,
-    privacy_filter_runtime: OfficialPrivacyFilterRuntime,
+    rule_runtime: Arc<RuleRuntimeGatewayPluginExecutor>,
+    privacy_filter_runtime: Arc<OfficialPrivacyFilterRuntime>,
+    lifecycle: RuntimeLifecycleRegistry,
     policy: RuntimeExecutionPolicy,
 }
 
 impl RuntimeGatewayPluginExecutor {
-    #[cfg(test)]
-    pub(crate) fn for_tests(policy: RuntimeExecutionPolicy) -> Self {
+    pub(crate) fn new(policy: RuntimeExecutionPolicy) -> Self {
+        let rule_runtime = Arc::new(RuleRuntimeGatewayPluginExecutor::default());
+        let privacy_filter_runtime = Arc::new(OfficialPrivacyFilterRuntime::default());
+        let lifecycle = RuntimeLifecycleRegistry::default();
+        lifecycle.register_cache(rule_runtime.clone());
+        lifecycle.register_cache(privacy_filter_runtime.clone());
         Self {
-            rule_runtime: RuleRuntimeGatewayPluginExecutor::default(),
-            privacy_filter_runtime: OfficialPrivacyFilterRuntime::default(),
+            rule_runtime,
+            privacy_filter_runtime,
+            lifecycle,
             policy,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests(policy: RuntimeExecutionPolicy) -> Self {
+        Self::new(policy)
     }
 
     pub(crate) fn execute_plugin_sync(
@@ -56,14 +68,23 @@ impl RuntimeGatewayPluginExecutor {
     }
 
     pub(crate) fn retain_runtime_caches_for_plugins(&self, plugins: &[PluginDetail]) {
-        self.rule_runtime.retain_runtime_caches_for_plugins(plugins);
-        self.privacy_filter_runtime
-            .retain_runtime_caches_for_plugins(plugins);
+        self.lifecycle.retain_for_plugins(plugins);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dispose_runtime_caches_for_tests(&self) {
+        self.lifecycle.dispose_all();
     }
 
     #[cfg(test)]
     fn privacy_filter_cache_size_for_tests(&self) -> usize {
         self.privacy_filter_runtime.cache_size_for_tests()
+    }
+}
+
+impl Default for RuntimeGatewayPluginExecutor {
+    fn default() -> Self {
+        Self::new(RuntimeExecutionPolicy::default())
     }
 }
 
@@ -212,6 +233,54 @@ mod tests {
         assert_eq!(executor.privacy_filter_cache_size_for_tests(), 0);
     }
 
+    #[test]
+    fn runtime_executor_disposes_registered_runtime_caches() {
+        let executor = executor();
+        let privacy_plugin = official_privacy_filter_plugin_detail(serde_json::json!({
+            "redactBeforeUpstream": true,
+            "redactLogs": true
+        }));
+        let privacy_context = hook_context("log.beforePersist", "trace-dispose");
+
+        executor
+            .execute_plugin_sync(&privacy_plugin, privacy_context)
+            .expect("official privacy filter runtime executes");
+        assert_eq!(executor.privacy_filter_cache_size_for_tests(), 1);
+
+        let dir = tempfile::tempdir().expect("temp plugin dir");
+        let rules_dir = dir.path().join("rules");
+        std::fs::create_dir_all(&rules_dir).expect("rules dir");
+        let rule_file = rules_dir.join("main.json");
+        write_replace_rule_file(&rule_file, "[FIRST]");
+        let rule_plugin =
+            rule_plugin_detail("example.rules", dir.path().to_string_lossy().to_string());
+        let rule_context = hook_context("gateway.request.afterBodyRead", "trace-rule-dispose");
+
+        let first_result = executor
+            .execute_plugin_sync(&rule_plugin, rule_context)
+            .expect("rule runtime executes");
+        assert!(first_result
+            .request_body
+            .as_deref()
+            .is_some_and(|body| body.contains("[FIRST]")));
+        write_replace_rule_file(&rule_file, "[SECOND]");
+
+        executor.dispose_runtime_caches_for_tests();
+
+        let second_result = executor
+            .execute_plugin_sync(
+                &rule_plugin,
+                hook_context("gateway.request.afterBodyRead", "trace-rule-dispose-reload"),
+            )
+            .expect("rule runtime reloads after dispose");
+
+        assert_eq!(executor.privacy_filter_cache_size_for_tests(), 0);
+        assert!(second_result
+            .request_body
+            .as_deref()
+            .is_some_and(|body| body.contains("[SECOND]")));
+    }
+
     fn executor() -> RuntimeGatewayPluginExecutor {
         RuntimeGatewayPluginExecutor::for_tests(RuntimeExecutionPolicy {
             wasm_enabled: false,
@@ -285,6 +354,23 @@ mod tests {
             runtime_failures: vec![],
             rollback_versions: vec![],
         }
+    }
+
+    fn write_replace_rule_file(path: &std::path::Path, replacement: &str) {
+        std::fs::write(
+            path,
+            json!({
+                "rules": [{
+                    "id": "replace-message",
+                    "hook": "gateway.request.afterBodyRead",
+                    "target": { "field": "request.body" },
+                    "match": { "regex": "hello" },
+                    "action": { "kind": "replace", "replacement": replacement }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("rule file");
     }
 
     fn plugin_detail(

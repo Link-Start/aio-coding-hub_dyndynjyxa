@@ -2,6 +2,7 @@
 
 use super::privacy_filter::{PrivacyFilter, PrivacyFilterError, PrivacyFilterOptions};
 use super::runtime_cache::{runtime_cache_key, RuntimeCacheKeyInput};
+use super::runtime_lifecycle::PluginRuntimeCache;
 use crate::gateway::plugins::context::{GatewayHookResult, GatewayVisibleHookContext};
 use crate::gateway::plugins::permissions::GatewayPluginError;
 use crate::plugins::PluginDetail;
@@ -38,6 +39,14 @@ impl OfficialPrivacyFilterRuntime {
             .retain(|key, _| privacy_keys.contains(key));
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn clear_runtime_caches(&self) {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
     fn get_or_load_privacy_filter(
         &self,
         plugin: &PluginDetail,
@@ -69,6 +78,16 @@ impl OfficialPrivacyFilterRuntime {
     #[cfg(test)]
     pub(crate) fn cache_size_for_tests(&self) -> usize {
         self.cache.lock().unwrap().len()
+    }
+}
+
+impl PluginRuntimeCache for OfficialPrivacyFilterRuntime {
+    fn retain_for_plugins(&self, plugins: &[PluginDetail]) {
+        self.retain_runtime_caches_for_plugins(plugins);
+    }
+
+    fn clear_all(&self) {
+        self.clear_runtime_caches();
     }
 }
 

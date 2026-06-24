@@ -7,3 +7,14 @@
 - [流式响应插件](./streaming.md)：`gateway.response.chunk`、sliding window 和 `stream.modify` 的边界。
 
 声明式规则属于插件作者最常用的社区运行时，契约文档在 [Declarative Rules](../reference/declarative-rules.md)。
+
+## Host Runtime Lifecycle
+
+0.62.3 treats runtime lifecycle as a host-owned internal contract:
+
+1. **Load**: parse and validate runtime artifacts under package limits.
+2. **Execute**: run a bounded hook invocation with timeout and mutation checks.
+3. **Retain**: keep only runtime caches that correspond to the current enabled plugin snapshot.
+4. **Dispose**: clear runtime caches when plugins are disabled, updated, uninstalled, or when the gateway plugin snapshot is replaced.
+
+Community `declarativeRules` and official `native:privacyFilter` are the only runtimes wired into gateway execution. WASM remains policy-gated, and process runtime remains PoC-only until both are routed through the same lifecycle registry with memory, IO, timeout, and shutdown guarantees.

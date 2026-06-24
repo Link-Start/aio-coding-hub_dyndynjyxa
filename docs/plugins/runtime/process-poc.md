@@ -78,3 +78,7 @@ M5 backend tests 覆盖：
 - hook handling 期间 sleep 的 child 会触发 hook timeout 并被 kill。
 - 提前退出的 child 会被报告为 crash isolation，而不是 host crash。
 - healthy idle child 会在 idle recycle 后被回收。
+
+## 0.62.3 Lifecycle Boundary
+
+The process runtime is a PoC and is not part of the public Plugin API v1 execution surface. It must remain disabled for community plugins until it is owned by the host lifecycle registry with start timeout, hook timeout, idle recycle, hard shutdown, stdout/stderr drain limits, request/response byte limits, and per-plugin process concurrency limits.

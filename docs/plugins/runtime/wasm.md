@@ -132,3 +132,7 @@ SDK 和示例检查命令：
 ```bash
 pnpm plugin-wasm-sdk:test
 ```
+
+## 0.62.3 Lifecycle Boundary
+
+WASM remains policy-gated. A WASM package can be validated only when host policy allows it, and community WASM execution must not be enabled until the runtime is wired through the host lifecycle registry. The required lifecycle guarantees are: bounded input/output JSON, bounded guest memory, bounded fuel or equivalent execution budget, module/cache eviction on plugin snapshot refresh, and disposal on disable/update/uninstall.

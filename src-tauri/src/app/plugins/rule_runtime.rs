@@ -1,6 +1,7 @@
 //! Usage: Declarative, no-code plugin rule runtime.
 
 use super::runtime_cache::{runtime_cache_key, RuntimeCacheKeyInput};
+use super::runtime_lifecycle::PluginRuntimeCache;
 use crate::gateway::plugins::context::{
     GatewayHookAction, GatewayHookResult, GatewayVisibleHookContext,
 };
@@ -226,6 +227,14 @@ impl RuleRuntimeGatewayPluginExecutor {
             .retain(|key, _| rule_keys.contains(key));
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn clear_runtime_caches(&self) {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
     fn get_or_load_rule_runtime(
         &self,
         plugin: &PluginDetail,
@@ -251,6 +260,16 @@ impl RuleRuntimeGatewayPluginExecutor {
                 .entry(cache_key)
                 .or_insert_with(|| Arc::clone(&runtime)),
         ))
+    }
+}
+
+impl PluginRuntimeCache for RuleRuntimeGatewayPluginExecutor {
+    fn retain_for_plugins(&self, plugins: &[PluginDetail]) {
+        self.retain_runtime_caches_for_plugins(plugins);
+    }
+
+    fn clear_all(&self) {
+        self.clear_runtime_caches();
     }
 }
 
