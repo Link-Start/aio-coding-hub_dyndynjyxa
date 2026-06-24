@@ -1336,6 +1336,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn plugin_pipeline_lightweight_request_hook_budget_guard() {
+        let pipeline = GatewayPluginPipeline::empty_shared();
+        let iterations = 500_u32;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let output = pipeline
+                .run_request_hook(request_input())
+                .await
+                .expect("empty pipeline should pass");
+            assert_eq!(output.body.as_ref(), b"hello");
+        }
+        let avg_nanos = start.elapsed().as_nanos() / u128::from(iterations);
+        assert!(
+            avg_nanos < 200_000,
+            "empty plugin pipeline exceeded lightweight 200us budget: {avg_nanos}ns"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     #[ignore = "performance smoke: run manually before plugin API releases"]
     async fn perf_one_noop_plugin_request_hook_budget() {
         let pipeline = GatewayPluginPipeline::for_tests_shared(
@@ -1429,6 +1448,67 @@ mod tests {
         assert_eq!(calls.lock().unwrap().as_slice(), ["a", "b"]);
         assert!(output.audit_events.iter().any(|event| {
             event.plugin_id == "plugin.a" && event.event_type == "plugin.hook.completed"
+        }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_plugin_pipeline_rejects_oversized_request_output_fail_open_before_applying() {
+        let executor =
+            InMemoryGatewayPluginExecutor::new().with_request_handler("plugin.large", |_ctx| {
+                GatewayHookResult {
+                    request_body: Some("x".repeat(32)),
+                    ..GatewayHookResult::continue_unchanged()
+                }
+            });
+        let pipeline = GatewayPluginPipeline::for_tests(
+            vec![plugin(
+                "plugin.large",
+                10,
+                vec!["request.body.read", "request.body.write"],
+            )],
+            Arc::new(executor),
+            GatewayPluginPipelineConfig {
+                hook_timeout: Duration::from_secs(1),
+                circuit_failure_threshold: 1,
+                circuit_cooldown: Duration::from_secs(60),
+                mutation_budget: GatewayPluginMutationBudget {
+                    body_bytes: 16,
+                    ..GatewayPluginMutationBudget::default()
+                },
+                ..GatewayPluginPipelineConfig::default()
+            },
+        );
+
+        let first = pipeline
+            .run_request_hook(request_input())
+            .await
+            .expect("fail-open oversized output should preserve request");
+
+        assert_eq!(first.body.as_ref(), b"hello");
+        assert!(first.audit_events.iter().any(|event| {
+            event.plugin_id == "plugin.large"
+                && event.event_type == "plugin.hook.failed"
+                && event
+                    .details
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|error| error.contains("PLUGIN_OUTPUT_TOO_LARGE"))
+        }));
+        assert!(first.audit_events.iter().all(|event| {
+            !(event.plugin_id == "plugin.large" && event.event_type == "plugin.hook.completed")
+        }));
+        let snapshot = pipeline.circuit_snapshot("plugin.large");
+        assert_eq!(snapshot.failure_count, 1);
+        assert!(snapshot.open);
+
+        let second = pipeline
+            .run_request_hook(request_input())
+            .await
+            .expect("open circuit should skip oversized plugin");
+
+        assert_eq!(second.body.as_ref(), b"hello");
+        assert!(second.audit_events.iter().any(|event| {
+            event.plugin_id == "plugin.large" && event.event_type == "plugin.hook.skipped"
         }));
     }
 

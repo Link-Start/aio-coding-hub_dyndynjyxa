@@ -18,3 +18,7 @@
 4. **Dispose**: clear runtime caches when plugins are disabled, updated, uninstalled, or when the gateway plugin snapshot is replaced.
 
 Community `declarativeRules` and official `native:privacyFilter` are the only runtimes wired into gateway execution. WASM remains policy-gated, and process runtime remains PoC-only until both are routed through the same lifecycle registry with memory, IO, timeout, and shutdown guarantees.
+
+## Release Guard
+
+0.62.3 keeps Plugin API v1 externally stable while hardening host runtime internals. Run `pnpm check:plugin-hardening` before release branches that touch plugin runtime loading, hook context budgets, output mutation budgets, SDK validation, or manifest/runtime documentation.

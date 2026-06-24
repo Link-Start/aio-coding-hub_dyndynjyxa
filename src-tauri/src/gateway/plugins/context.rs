@@ -674,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_request_context_truncates_body_and_normalized_messages_by_budget() {
+    fn gateway_plugin_context_truncates_request_body_and_normalized_messages_by_budget() {
         let body = format!(
             "{{\"messages\":[{}]}}",
             (0..5)
@@ -716,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_stream_and_log_context_truncate_by_budget() {
+    fn gateway_plugin_context_truncates_stream_and_log_by_budget() {
         let stream = GatewayStreamHookInput {
             trace_id: "trace-stream-budget".to_string(),
             chunk: Bytes::from("s".repeat(128)),
@@ -743,7 +743,29 @@ mod tests {
     }
 
     #[test]
-    fn visible_context_truncates_multibyte_text_without_replacement_characters() {
+    fn gateway_plugin_context_truncates_response_body_by_budget() {
+        let response = GatewayResponseHookInput {
+            hook_name: GatewayPluginHookName::ResponseAfter,
+            trace_id: "trace-response-budget".to_string(),
+            status: 200,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"abcdefghij"),
+        };
+        let budget = GatewayPluginContextBudget {
+            body_bytes: 4,
+            ..GatewayPluginContextBudget::default()
+        };
+
+        let visible =
+            response.visible_context_with_budget(&["response.body.read".to_string()], budget);
+
+        assert_eq!(visible.response.status, Some(200));
+        assert_eq!(visible.response.body.as_deref(), Some("abcd"));
+        assert!(visible.response.body_truncated);
+    }
+
+    #[test]
+    fn gateway_plugin_context_truncates_multibyte_text_without_replacement_characters() {
         let body = "你好🙂abc";
         let normalized_body = "{\"messages\":[{\"role\":\"user\",\"content\":\"你好🙂abc\"}]}";
         let input = GatewayRequestHookInput {
@@ -776,7 +798,6 @@ mod tests {
             log_bytes: 5,
             normalized_messages: 1,
             normalized_message_text_bytes: 8,
-            ..GatewayPluginContextBudget::default()
         };
 
         let visible_request =

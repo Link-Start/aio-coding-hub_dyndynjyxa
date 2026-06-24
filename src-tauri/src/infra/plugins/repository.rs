@@ -518,7 +518,7 @@ ON CONFLICT(plugin_id) DO UPDATE SET
     )
     .map_err(|e| db_err!("failed to mirror plugin config: {e}"))?;
 
-    get_plugin_with_conn(&conn, plugin_id)
+    get_plugin_with_conn(conn, plugin_id)
 }
 
 pub(crate) fn plugin_config_version(db: &db::Db, plugin_id: &str) -> AppResult<Option<u32>> {
