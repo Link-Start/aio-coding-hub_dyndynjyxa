@@ -196,7 +196,51 @@ Generic SSE:
 
 解析位置应靠近 stream tee/finalize，避免前端根据正文或 trace 自行推断终态。
 
-### 4. 流式 wrapper 职责
+### 4. 终止标记与日志状态码
+
+`HomeRequestLogsPanel` 当前通过 `RequestLogSummary.status`、`error_code` 和 `isPersistedRequestLogInProgress` 渲染状态徽标。终止标记不能只写入 `activity_details_json` 或 trace details；它必须先被后端归一化为最终 request log 的 `status/error_code/excluded_from_stats`，再由前端共享 helper 展示。
+
+最终日志写入契约：
+
+```text
+terminal_signal=completed
+  status: 上游成功状态码，通常为 2xx
+  error_code: null
+  excluded_from_stats: 0
+
+terminal_signal=failed | incomplete | error
+  status: 非成功状态码；若上游 HTTP 是 200，也要映射为 5xx/502 语义
+  error_code: GW_STREAM_ERROR 或更具体的既有错误码，例如 GW_FAKE_200
+  excluded_from_stats: 按现有错误统计规则处理
+
+known protocol stream closed without completion signal
+  status: 502
+  error_code: GW_STREAM_ERROR
+
+client abort before completion
+  status: 499
+  error_code: GW_REQUEST_ABORTED 或 GW_STREAM_ABORTED
+  excluded_from_stats: 1
+
+client abort after completion signal
+  status: 上游成功状态码
+  error_code: null
+  details: 记录 client_abort_after_completion
+
+gateway stop / startup recovery
+  status: 499
+  error_code: GW_REQUEST_INTERRUPTED_BY_GATEWAY_STOP 或 GW_REQUEST_INTERRUPTED_BY_RESTART
+  excluded_from_stats: 1
+```
+
+关键约束：
+
+- 不能出现 `status = 200` 且 `error_code = GW_STREAM_ERROR` 但首页仍显示“200 成功”的结果。后端必须把本阶段产生的协议错误写成非成功 status；前端 `computeStatusBadge` / `requestLogState` 也必须让终态错误码优先于成功 status，用来兜住历史或异常日志。
+- `GW_STREAM_IDLE_TIMEOUT` 不得由本阶段的空闲观测产生；空闲只影响“进行中 · 已静默 N 分钟”文案。
+- `HomeRequestLogsPanel` 不解析 SSE marker，不关心协议细节；它只消费 `requestLogState` 和 `computeStatusBadge` 给出的统一状态。
+- `requestActivityProjection` 的 pending 判定仍以 `status IS NULL AND error_code IS NULL` 为准；一旦终止标记归一化为最终日志，就不能继续显示“进行中”。
+
+### 5. 流式 wrapper 职责
 
 `TimingOnlyTeeStream`、`UsageSseTeeStream`、`UsageBodyBufferTeeStream` 负责五件事：
 
@@ -210,7 +254,7 @@ Generic SSE:
 
 本阶段不引入 idle timeout 配置或开关。任何“连续无数据后终止流”的新行为都不属于本设计。若现有代码存在 total timeout 或 idle timeout 会把仍连接的流主动 `Ready(None)`，实现时必须移除该终止行为或改为仅记录观测信息。首字节/connect 这类连接建立前的超时不在本设计范围内。
 
-### 5. 前端投影
+### 6. 前端投影
 
 `requestActivityProjection` 继续合并 request logs 和 live traces，但状态显示要分层：
 
@@ -228,7 +272,7 @@ UI 表达：
 - 长耗时但仍有活动：`进行中 · 已运行 43 分钟`
 - 恢复终止：展示已有错误码和恢复原因。
 
-### 6. 恢复与清理
+### 7. 恢复与清理
 
 `reconcile_unresolved_pending` 保留，但只在应用启动、网关停止等明确生命周期边界触发。它不应按 pending 年龄周期性扫掉仍可能活跃的请求。
 
@@ -258,6 +302,7 @@ reconcile 写入：
 - 活动更新失败：不影响流透传；最终 log 仍是更高优先级事实。
 - 前端没有 `last_activity_ms`：回退到 created time，但文案不要暗示确定活跃。
 - 终止标记解析失败：按真实流生命周期继续 finalize，同时在 details 中记录解析失败摘要，不阻塞透传。
+- 前端展示状态不一致：把 `status/error_code` 到徽标文案的规则集中在 `HomeLogShared.computeStatusBadge` 和 `requestLogState`，不要在 `HomeRequestLogsPanel` 内部分散判断。
 
 ## Testing
 
@@ -273,12 +318,15 @@ reconcile 写入：
 - activity flush 每 30 秒最多一次，finalize 一定写入最终 activity。
 - activity flush 只更新 pending row，不会修改 completed row。
 - reconcile 只处理 status/error_code 为空的 pending rows，并保留 last activity。
+- `failed`、`incomplete`、`error` 终止信号即使来自 HTTP 200 SSE，也会写成首页可识别的失败日志。
 
 前端测试：
 
 - pending 且最近活动新鲜时显示进行中。
 - pending 且最近活动很旧时仍显示进行中，但带静默提示。
 - completed log 不显示静默提示。
+- `status=200` 但带终态错误码的历史/异常日志不会在状态徽标中显示为成功。
+- `client_abort_after_completion` 不显示为“已中断”，只在详情中保留观测信息。
 - live trace 和 pending log 合并时不重复显示。
 - 老 pending log 不再从列表消失。
 
@@ -294,5 +342,6 @@ reconcile 写入：
 - 一个已断开的流式请求不会无限期保持“进行中”。
 - 一个连接未断但长时间没有新数据的请求显示为“进行中 · 已静默 N 分钟”，而不是被隐藏或强制失败。
 - 一个缺失终止标记的截断流不会被计为成功。
+- 首页请求日志状态与终止标记归一化结果一致，不会把 fake 200、incomplete 或 stream error 显示为“成功”。
 - 网关停止或应用重启后，遗留 pending log 会被 reconcile 成稳定终态。
 - 没有新增 idle timeout 开关，也没有新增默认强制中断长流的固定时间。
