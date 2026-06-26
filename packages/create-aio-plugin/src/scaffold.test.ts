@@ -1946,6 +1946,7 @@ describe("create-aio-plugin example templates", () => {
     expect(files["fixtures/claude-request.json"]).toBeDefined();
     expect(files["fixtures/codex-request.json"]).toBeDefined();
     expect(validatePluginFilesStrict(files).ok).toBe(true);
+    expectExampleReadmeDocumentsDevtoolsLoop(files);
 
     const claudeFixture = JSON.parse(files["fixtures/claude-request.json"] ?? "{}") as unknown;
     const claudeExplain = replayHookExplain(
@@ -1996,6 +1997,7 @@ describe("create-aio-plugin example templates", () => {
     expect(files["fixtures/request-miss.json"]).toBeDefined();
     expect(files["fixtures/log-redact.json"]).toBeDefined();
     expect(validatePluginFilesStrict(files).ok).toBe(true);
+    expectExampleReadmeDocumentsDevtoolsLoop(files);
 
     const hitFixture = JSON.parse(files["fixtures/request-hit.json"] ?? "{}") as unknown;
     const hitExplain = replayHookExplain(files, "gateway.request.beforeSend", hitFixture);
@@ -2036,6 +2038,7 @@ describe("create-aio-plugin example templates", () => {
     expect(files["fixtures/response-warn.json"]).toBeDefined();
     expect(files["fixtures/response-pass.json"]).toBeDefined();
     expect(validatePluginFilesStrict(files).ok).toBe(true);
+    expectExampleReadmeDocumentsDevtoolsLoop(files);
 
     const warnFixture = JSON.parse(files["fixtures/response-warn.json"] ?? "{}") as unknown;
     const warnExplain = replayHookExplain(files, "gateway.response.after", warnFixture);
@@ -2143,6 +2146,16 @@ function expectExampleCanPackAndPublishCheck(files: Record<string, string>, mani
   });
   expect(result.hooks.length).toBeGreaterThan(0);
   expect(result.permissions.length).toBeGreaterThan(0);
+}
+
+function expectExampleReadmeDocumentsDevtoolsLoop(files: Record<string, string>) {
+  const readme = files["README.md"] ?? "";
+
+  expect(readme).toContain("development template, not a default installable marketplace package");
+  expect(readme).toContain("create-aio-plugin validate --strict .");
+  expect(readme).toContain("create-aio-plugin replay --explain .");
+  expect(readme).toContain("create-aio-plugin pack .");
+  expect(readme).toContain("create-aio-plugin publish-check .");
 }
 
 function writeScaffold(root: string, files: Record<string, string>): void {

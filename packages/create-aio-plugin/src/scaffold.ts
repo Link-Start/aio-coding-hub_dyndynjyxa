@@ -169,6 +169,8 @@ function promptHelperExampleTemplate(id: string, name: string): ScaffoldFiles {
         "create-aio-plugin validate --strict .",
         "create-aio-plugin replay --explain . fixtures/claude-request.json gateway.request.afterBodyRead",
         "create-aio-plugin replay --explain . fixtures/codex-request.json gateway.request.afterBodyRead",
+        "create-aio-plugin pack .",
+        "create-aio-plugin publish-check .",
       ]
     ),
   };
@@ -227,6 +229,8 @@ function redactorExampleTemplate(id: string, name: string): ScaffoldFiles {
         "create-aio-plugin validate --strict .",
         "create-aio-plugin replay --explain . fixtures/request-hit.json gateway.request.beforeSend",
         "create-aio-plugin replay --explain . fixtures/log-redact.json log.beforePersist",
+        "create-aio-plugin pack .",
+        "create-aio-plugin publish-check .",
       ]
     ),
   };
@@ -275,6 +279,8 @@ function responseGuardExampleTemplate(id: string, name: string): ScaffoldFiles {
         "create-aio-plugin validate --strict .",
         "create-aio-plugin replay --explain . fixtures/response-warn.json gateway.response.after",
         "create-aio-plugin replay --explain . fixtures/response-pass.json gateway.response.after",
+        "create-aio-plugin pack .",
+        "create-aio-plugin publish-check .",
       ]
     ),
   };
