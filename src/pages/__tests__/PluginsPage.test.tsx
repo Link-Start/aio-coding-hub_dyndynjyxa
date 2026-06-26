@@ -662,6 +662,60 @@ describe("pages/PluginsPage", () => {
     });
   });
 
+  it("routes advanced Privacy Filter listings through remote market install", async () => {
+    const installOfficialMutation = mutation();
+    const installRemoteMutation = mutation();
+    vi.mocked(usePluginInstallOfficialMutation).mockReturnValue(installOfficialMutation as any);
+    vi.mocked(usePluginInstallRemoteMutation).mockReturnValue(installRemoteMutation as any);
+    vi.mocked(pluginParseMarketIndex).mockResolvedValue([
+      {
+        pluginId: "official.privacy-filter",
+        name: "Privacy Filter Advanced",
+        latestVersion: "1.0.0",
+        downloadUrl: "https://plugins.example.test/privacy-filter.aio-plugin",
+        checksum: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        signature: "signed-privacy-filter",
+        riskLabels: ["request.body.read", "request.body.write"],
+        revoked: false,
+        compatible: true,
+        updateAvailable: false,
+        installBlockReason: null,
+      },
+    ]);
+    vi.mocked(usePluginsListQuery).mockReturnValue({
+      data: [summary()],
+      isLoading: false,
+      isFetching: false,
+      error: null,
+    } as any);
+
+    renderWithProviders(<PluginsPage />);
+    fireEvent.click(screen.getByRole("button", { name: /高级来源/ }));
+    fireEvent.change(screen.getByLabelText("市场索引 JSON"), {
+      target: { value: '{"plugins":[]}' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "加载高级来源" }));
+
+    const advancedListing = await screen.findByText("Privacy Filter Advanced");
+    fireEvent.click(
+      within(advancedListing.closest("article") as HTMLElement).getByRole("button", {
+        name: "安装",
+      })
+    );
+
+    await waitFor(() => {
+      expect(installRemoteMutation.mutateAsync).toHaveBeenCalledWith({
+        pluginId: "official.privacy-filter",
+        downloadUrl: "https://plugins.example.test/privacy-filter.aio-plugin",
+        checksum: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        signature: "signed-privacy-filter",
+        publicKey: null,
+        source: "market",
+      });
+      expect(installOfficialMutation.mutateAsync).not.toHaveBeenCalled();
+    });
+  });
+
   it("selects an installed featured Privacy Filter instead of reinstalling it", () => {
     const installOfficialMutation = mutation();
     vi.mocked(usePluginInstallOfficialMutation).mockReturnValue(installOfficialMutation as any);

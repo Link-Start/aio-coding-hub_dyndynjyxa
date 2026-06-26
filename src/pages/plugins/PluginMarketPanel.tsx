@@ -57,13 +57,17 @@ export function PluginMarketPanel({
     }
   }
 
-  async function handleCardAction(card: PluginMarketCardView) {
+  async function handleCardAction(card: PluginMarketCardView, origin: "featured" | "advanced") {
     if (card.action === "installed") {
       onSelectInstalled(card.pluginId);
       return;
     }
 
-    if (card.pluginId === "official.privacy-filter" && card.action === "install") {
+    if (
+      origin === "featured" &&
+      card.pluginId === "official.privacy-filter" &&
+      card.action === "install"
+    ) {
       await onInstallOfficial(card.pluginId);
       return;
     }
@@ -91,7 +95,7 @@ export function PluginMarketPanel({
             key={card.pluginId}
             card={card}
             busy={busy}
-            onAction={() => handleCardAction(card)}
+            onAction={() => handleCardAction(card, "featured")}
           />
         ))}
       </div>
@@ -169,7 +173,7 @@ export function PluginMarketPanel({
                     key={card.pluginId}
                     card={card}
                     busy={busy}
-                    onAction={() => handleCardAction(card)}
+                    onAction={() => handleCardAction(card, "advanced")}
                   />
                 ))}
               </div>
