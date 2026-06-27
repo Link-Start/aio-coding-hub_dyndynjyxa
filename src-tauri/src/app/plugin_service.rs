@@ -1,15 +1,18 @@
 use crate::app::plugins::contribution_registry::ActiveContributionSnapshot;
 use crate::domain::plugins::{
-    permission_risk, validate_manifest, PluginCompatibilitySummary, PluginDetail,
+    permission_risk, validate_manifest, PluginCommandImpact, PluginCompatibilitySummary,
+    PluginContributionChange, PluginContributionImpact, PluginContributionImpactItem, PluginDetail,
     PluginHookLifecycleSummary, PluginInstallPreview, PluginInstallSource, PluginLifecycleChange,
     PluginLifecycleNotice, PluginManifest, PluginPermissionLifecycleChange,
     PluginPermissionLifecycleSummary, PluginPermissionRisk, PluginRuntime,
-    PluginRuntimeLifecycleSummary, PluginStatus, PluginTrustSummary, PluginUpdateDiff,
+    PluginRuntimeLifecycleSummary, PluginStatus, PluginTrustSummary, PluginUiSlotImpact,
+    PluginUpdateDiff,
 };
 use crate::infra::plugins::{package, repository, signing};
 use crate::shared::error::{AppError, AppResult};
 use rusqlite::OptionalExtension;
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const OFFICIAL_PRIVACY_FILTER_ID: &str = "official.privacy-filter";
@@ -440,6 +443,102 @@ fn permission_lifecycle_summaries(
         .collect()
 }
 
+fn contribution_impact(manifest: &PluginManifest) -> PluginContributionImpact {
+    let Some(contributes) = manifest.contributes.as_ref() else {
+        return PluginContributionImpact {
+            providers: Vec::new(),
+            protocols: Vec::new(),
+            protocol_bridges: Vec::new(),
+            ui_slots: Vec::new(),
+            commands: Vec::new(),
+            gateway: Vec::new(),
+            capabilities: manifest.capabilities.clone(),
+        };
+    };
+
+    let providers = contributes
+        .providers
+        .iter()
+        .map(|provider| PluginContributionImpactItem {
+            id: provider.provider_type.clone(),
+            label: Some(provider.display_name.clone()),
+        })
+        .collect();
+    let protocols = contributes
+        .protocols
+        .iter()
+        .map(|protocol| PluginContributionImpactItem {
+            id: protocol.protocol_id.clone(),
+            label: Some(format!("{:?}", protocol.direction)),
+        })
+        .collect();
+    let protocol_bridges = contributes
+        .protocol_bridges
+        .iter()
+        .map(|bridge| PluginContributionImpactItem {
+            id: bridge.bridge_type.clone(),
+            label: Some(format!(
+                "{} -> {}",
+                bridge.inbound_protocol, bridge.outbound_protocol
+            )),
+        })
+        .collect();
+    let ui_slots = contributes
+        .ui
+        .iter()
+        .flat_map(|(slot_id, contributions)| {
+            contributions
+                .iter()
+                .map(move |contribution| PluginUiSlotImpact {
+                    slot_id: slot_id.clone(),
+                    contribution_id: contribution.id.clone(),
+                    title: contribution.title.clone(),
+                })
+        })
+        .collect();
+    let commands = contributes
+        .commands
+        .iter()
+        .map(|command| PluginCommandImpact {
+            command: command.command.clone(),
+            title: command.title.clone(),
+            category: command.category.clone(),
+        })
+        .collect();
+    let gateway_hooks = contributes
+        .gateway_hooks
+        .iter()
+        .map(|hook| PluginContributionImpactItem {
+            id: hook.name.clone(),
+            label: Some(format!(
+                "priority={}, failurePolicy={}",
+                hook.priority,
+                hook.failure_policy.as_deref().unwrap_or("-")
+            )),
+        });
+    let gateway_rules = contributes
+        .gateway_rules
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| PluginContributionImpactItem {
+            id: rule
+                .id
+                .clone()
+                .unwrap_or_else(|| format!("gatewayRule.{index}")),
+            label: Some(rule.rules.join(", ")),
+        });
+
+    PluginContributionImpact {
+        providers,
+        protocols,
+        protocol_bridges,
+        ui_slots,
+        commands,
+        gateway: gateway_hooks.chain(gateway_rules).collect(),
+        capabilities: manifest.capabilities.clone(),
+    }
+}
+
 fn compatibility_summary(
     manifest: &PluginManifest,
     host_version: &str,
@@ -603,6 +702,7 @@ fn build_install_preview(
             &[],
             &manifest.permissions,
         ),
+        contribution_impact: contribution_impact(manifest),
         compatibility,
         trust: trust_summary(extracted, policy, trust),
         existing_status,
@@ -734,6 +834,7 @@ fn build_update_diff(
         runtime_change,
         hook_changes: diff_hooks(&current.manifest, manifest),
         permission_changes: diff_permissions(&current, manifest),
+        contribution_changes: diff_contributions(&current.manifest, manifest),
         config_version_change: config_version_change(&current.manifest, manifest),
         compatibility,
         trust: trust_summary(extracted, policy, trust),
@@ -851,6 +952,115 @@ fn diff_permissions(
         })
         .filter(|change| change.change != "not_requested")
         .collect()
+}
+
+fn diff_contributions(
+    before: &PluginManifest,
+    after: &PluginManifest,
+) -> Vec<PluginContributionChange> {
+    let before = contribution_signatures(before);
+    let after = contribution_signatures(after);
+    let names: BTreeSet<String> = before.keys().chain(after.keys()).cloned().collect();
+
+    names
+        .into_iter()
+        .filter_map(|name| match (before.get(&name), after.get(&name)) {
+            (Some(previous), Some(next)) if previous != next => Some(PluginContributionChange {
+                name,
+                change: "changed".to_string(),
+                before: Some(previous.clone()),
+                after: Some(next.clone()),
+            }),
+            (Some(previous), None) => Some(PluginContributionChange {
+                name,
+                change: "removed".to_string(),
+                before: Some(previous.clone()),
+                after: None,
+            }),
+            (None, Some(next)) => Some(PluginContributionChange {
+                name,
+                change: "added".to_string(),
+                before: None,
+                after: Some(next.clone()),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn contribution_signatures(manifest: &PluginManifest) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Some(contributes) = manifest.contributes.as_ref() else {
+        for capability in &manifest.capabilities {
+            out.insert(capability.clone(), "capability".to_string());
+        }
+        return out;
+    };
+
+    for provider in &contributes.providers {
+        out.insert(
+            provider.provider_type.clone(),
+            contribution_signature("provider", provider),
+        );
+    }
+    for protocol in &contributes.protocols {
+        out.insert(
+            protocol.protocol_id.clone(),
+            contribution_signature("protocol", protocol),
+        );
+    }
+    for bridge in &contributes.protocol_bridges {
+        out.insert(
+            bridge.bridge_type.clone(),
+            contribution_signature("protocolBridge", bridge),
+        );
+    }
+    for command in &contributes.commands {
+        out.insert(
+            command.command.clone(),
+            contribution_signature("command", command),
+        );
+    }
+    for hook in &contributes.gateway_hooks {
+        out.insert(
+            hook.name.clone(),
+            contribution_signature("gatewayHook", hook),
+        );
+    }
+    for (index, rule) in contributes.gateway_rules.iter().enumerate() {
+        out.insert(
+            rule.id
+                .clone()
+                .unwrap_or_else(|| format!("gatewayRule.{index}")),
+            contribution_signature("gatewayRule", rule),
+        );
+    }
+
+    let mut ui_by_slot = BTreeMap::<String, Vec<String>>::new();
+    for (slot_id, contributions) in &contributes.ui {
+        for contribution in contributions {
+            ui_by_slot
+                .entry(slot_id.clone())
+                .or_default()
+                .push(contribution_signature("ui", contribution));
+        }
+    }
+    for (slot_id, mut contributions) in ui_by_slot {
+        contributions.sort();
+        out.insert(slot_id, format!("ui:{}", contributions.join("|")));
+    }
+
+    for capability in &manifest.capabilities {
+        out.insert(capability.clone(), "capability".to_string());
+    }
+
+    out
+}
+
+fn contribution_signature<T: serde::Serialize>(kind: &str, value: &T) -> String {
+    serde_json::to_string(value)
+        .map(|json| format!("{kind}:{json}"))
+        .unwrap_or_else(|_| kind.to_string())
 }
 
 fn reconcile_permissions_for_manifest(
@@ -1974,7 +2184,7 @@ mod tests {
     use crate::gateway::plugins::context::{GatewayPluginHookName, GatewayRequestHookInput};
     use crate::gateway::plugins::pipeline::{GatewayPluginPipeline, GatewayPluginPipelineConfig};
     use std::io::Write;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     fn manifest() -> PluginManifest {
@@ -2816,6 +3026,114 @@ DROP TABLE plugins;
         })
     }
 
+    struct PluginTestContext {
+        _dir: tempfile::TempDir,
+        db: crate::db::Db,
+        package_dir: PathBuf,
+        cache_dir: PathBuf,
+    }
+
+    fn plugin_test_context() -> PluginTestContext {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::init_for_tests(&dir.path().join("plugins.db")).unwrap();
+        let package_dir = dir.path().join("packages");
+        let cache_dir = dir.path().join("plugins/cache");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        PluginTestContext {
+            _dir: dir,
+            db,
+            package_dir,
+            cache_dir,
+        }
+    }
+
+    fn extension_package_manifest(
+        plugin_id: &str,
+        version: &str,
+        contributes: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": plugin_id,
+            "name": "Extension Package Plugin",
+            "version": version,
+            "apiVersion": "1.0.0",
+            "main": "dist/extension.js",
+            "runtime": { "kind": "extensionHost", "language": "typescript" },
+            "activationEvents": ["onStartup"],
+            "contributes": contributes,
+            "capabilities": ["provider.extensionValues", "commands.execute"],
+            "hostCompatibility": {
+                "app": ">=0.56.0 <1.0.0",
+                "pluginApi": "^1.0.0",
+                "platforms": ["macos", "windows", "linux"]
+            }
+        })
+    }
+
+    fn write_extension_package(
+        ctx: &PluginTestContext,
+        plugin_id: &str,
+        contributes: serde_json::Value,
+    ) -> PathBuf {
+        let package_path = ctx.package_dir.join(format!("{plugin_id}.aio-plugin"));
+        write_local_package(
+            &package_path,
+            extension_package_manifest(plugin_id, "1.0.0", contributes),
+        );
+        package_path
+    }
+
+    fn write_extension_package_with_slots(
+        ctx: &PluginTestContext,
+        plugin_id: &str,
+        slots: Vec<&str>,
+    ) -> PathBuf {
+        let ui = slots
+            .into_iter()
+            .map(|slot| {
+                (
+                    slot.to_string(),
+                    serde_json::json!([{
+                        "id": format!("{slot}.panel"),
+                        "title": format!("{slot} panel"),
+                        "schema": { "type": "section", "fields": [] }
+                    }]),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        write_extension_package(
+            ctx,
+            plugin_id,
+            serde_json::json!({
+                "ui": ui
+            }),
+        )
+    }
+
+    fn install_extension_manifest(db: &crate::db::Db, plugin_id: &str, slots: Vec<&str>) {
+        let ui = slots
+            .into_iter()
+            .map(|slot| {
+                (
+                    slot.to_string(),
+                    serde_json::json!([{
+                        "id": format!("{slot}.panel"),
+                        "title": format!("{slot} panel"),
+                        "schema": { "type": "section", "fields": [] }
+                    }]),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        let manifest: PluginManifest = serde_json::from_value(extension_package_manifest(
+            plugin_id,
+            "1.0.0",
+            serde_json::json!({ "ui": ui }),
+        ))
+        .unwrap();
+
+        install_plugin_manifest(db, manifest, PluginInstallSource::Local, None, "0.62.0").unwrap();
+    }
+
     fn write_local_package(path: &Path, manifest: serde_json::Value) {
         let file = std::fs::File::create(path).expect("create package");
         let mut zip = zip::ZipWriter::new(file);
@@ -2826,6 +3144,17 @@ DROP TABLE plugins;
         zip.start_file("rules/main.json", opts)
             .expect("rules entry");
         zip.write_all(br#"{"rules":[]}"#).expect("rules bytes");
+        if manifest
+            .get("runtime")
+            .and_then(|runtime| runtime.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            == Some("extensionHost")
+        {
+            zip.start_file("dist/extension.js", opts)
+                .expect("extension entry");
+            zip.write_all(b"export default {};")
+                .expect("extension bytes");
+        }
         zip.finish().expect("finish package");
     }
 
@@ -2929,6 +3258,91 @@ DROP TABLE plugins;
                 && notice.message.contains("request.body.read")
         }));
         assert!(repository::get_plugin(&db, "local.preview-risky").is_err());
+    }
+
+    #[test]
+    fn install_preview_describes_extension_contribution_impact() {
+        let ctx = plugin_test_context();
+        let package = write_extension_package(
+            &ctx,
+            "acme.openrouter",
+            serde_json::json!({
+                "providers": [{
+                    "providerType": "openrouter",
+                    "displayName": "OpenRouter",
+                    "targetCliKeys": ["claude"],
+                    "extensionNamespace": "openrouter"
+                }],
+                "ui": {
+                    "providers.editor.sections": [{
+                        "id": "openrouter-routing",
+                        "title": "OpenRouter 路由",
+                        "order": 10,
+                        "schema": { "type": "section", "fields": [] }
+                    }]
+                },
+                "commands": [{ "command": "acme.openrouter.refreshModels", "title": "刷新模型" }]
+            }),
+        );
+
+        let preview = preview_plugin_from_local_package_with_policy(
+            &ctx.db,
+            &package,
+            &ctx.cache_dir,
+            "0.62.0",
+            LocalPackageInstallPolicy {
+                allow_unsigned: true,
+                developer_mode: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(preview
+            .contribution_impact
+            .providers
+            .iter()
+            .any(|p| p.id == "openrouter"));
+        assert!(preview
+            .contribution_impact
+            .ui_slots
+            .iter()
+            .any(|s| s.slot_id == "providers.editor.sections"));
+        assert!(preview
+            .contribution_impact
+            .commands
+            .iter()
+            .any(|c| c.command == "acme.openrouter.refreshModels"));
+    }
+
+    #[test]
+    fn contribution_impact_update_diff_reports_removed_and_added_contributions() {
+        let ctx = plugin_test_context();
+        install_extension_manifest(&ctx.db, "acme.debug", vec!["logs.detail.tabs"]);
+        let package =
+            write_extension_package_with_slots(&ctx, "acme.debug", vec!["settings.sections"]);
+
+        let diff = preview_plugin_update_from_local_package(
+            &ctx.db,
+            &package,
+            &ctx.cache_dir,
+            "0.62.0",
+            LocalPackageInstallPolicy {
+                allow_unsigned: true,
+                developer_mode: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(diff
+            .contribution_changes
+            .iter()
+            .any(|c| c.name == "logs.detail.tabs" && c.change == "removed"));
+        assert!(diff
+            .contribution_changes
+            .iter()
+            .any(|c| c.name == "settings.sections" && c.change == "added"));
     }
 
     #[test]

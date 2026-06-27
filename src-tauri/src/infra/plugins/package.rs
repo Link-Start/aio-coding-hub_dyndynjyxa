@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
+const EXTENSION_MAIN_MAX_BYTES: u64 = 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub(crate) struct PluginPackageLimits {
     pub(crate) max_package_bytes: u64,
@@ -253,6 +255,7 @@ fn extract_zip_bytes(
             format!("failed to parse plugin package manifest: {error}"),
         )
     })?;
+    validate_extension_main(&root_dir, &manifest)?;
     if validate_manifest_for_host {
         crate::domain::plugins::validate_manifest(&manifest, env!("CARGO_PKG_VERSION"))?;
     }
@@ -263,6 +266,103 @@ fn extract_zip_bytes(
         checksum,
         package_bytes: bytes,
     })
+}
+
+fn validate_extension_main(root_dir: &Path, manifest: &PluginManifest) -> AppResult<()> {
+    if !matches!(
+        manifest.runtime,
+        crate::domain::plugins::PluginRuntime::ExtensionHost { .. }
+    ) {
+        return Ok(());
+    }
+
+    let main = manifest.main.as_deref().ok_or_else(|| {
+        AppError::new(
+            "PLUGIN_EXTENSION_MAIN_MISSING",
+            "extensionHost runtime requires main",
+        )
+    })?;
+    let relative_path = extension_main_relative_path(main)?;
+    let extension = relative_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if extension != "js" && extension != "cjs" {
+        return Err(AppError::new(
+            "PLUGIN_EXTENSION_MAIN_INVALID",
+            "extensionHost main must point to a .js or .cjs file",
+        ));
+    }
+
+    let main_path = root_dir.join(&relative_path);
+    let metadata = std::fs::metadata(&main_path).map_err(|_| {
+        AppError::new(
+            "PLUGIN_EXTENSION_MAIN_MISSING",
+            format!("extensionHost main file does not exist: {main}"),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(AppError::new(
+            "PLUGIN_EXTENSION_MAIN_MISSING",
+            format!("extensionHost main is not a file: {main}"),
+        ));
+    }
+    if metadata.len() > EXTENSION_MAIN_MAX_BYTES {
+        return Err(AppError::new(
+            "PLUGIN_EXTENSION_MAIN_TOO_LARGE",
+            format!("extensionHost main exceeds {EXTENSION_MAIN_MAX_BYTES} bytes: {main}"),
+        ));
+    }
+
+    Ok(())
+}
+
+fn extension_main_relative_path(raw_main: &str) -> AppResult<PathBuf> {
+    let trimmed = raw_main.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::new(
+            "PLUGIN_EXTENSION_MAIN_MISSING",
+            "extensionHost runtime requires main",
+        ));
+    }
+    let normalized = trimmed.replace('\\', "/");
+    let path = Path::new(&normalized);
+    if path.is_absolute() || normalized.starts_with('/') {
+        return Err(AppError::new(
+            "PLUGIN_EXTENSION_MAIN_INVALID",
+            "extensionHost main must be a relative path inside the package",
+        ));
+    }
+
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => {
+                let segment = value.to_string_lossy();
+                if segment.is_empty() || segment == "." || segment == ".." {
+                    return Err(AppError::new(
+                        "PLUGIN_EXTENSION_MAIN_INVALID",
+                        "extensionHost main must be a relative path inside the package",
+                    ));
+                }
+                out.push(value);
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(AppError::new(
+                    "PLUGIN_EXTENSION_MAIN_INVALID",
+                    "extensionHost main must be a relative path inside the package",
+                ));
+            }
+        }
+    }
+    if out.as_os_str().is_empty() {
+        return Err(AppError::new(
+            "PLUGIN_EXTENSION_MAIN_MISSING",
+            "extensionHost runtime requires main",
+        ));
+    }
+    Ok(out)
 }
 
 fn safe_zip_entry_path(raw_name: &str) -> AppResult<PathBuf> {
@@ -376,6 +476,28 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    fn extension_manifest_json(plugin_id: &str, main: Option<&str>) -> String {
+        let mut manifest = serde_json::json!({
+            "id": plugin_id,
+            "name": "Extension Test Plugin",
+            "version": "1.0.0",
+            "apiVersion": "1.0.0",
+            "runtime": {
+                "kind": "extensionHost",
+                "language": "typescript"
+            },
+            "hostCompatibility": {
+                "app": ">=0.62.0 <1.0.0",
+                "pluginApi": "^1.0.0",
+                "platforms": ["macos", "windows", "linux"]
+            }
+        });
+        if let Some(main) = main {
+            manifest["main"] = serde_json::json!(main);
+        }
+        manifest.to_string()
     }
 
     fn write_package(path: &Path, entries: &[(&str, &[u8])]) {
@@ -602,5 +724,114 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().starts_with("PLUGIN_PACKAGE_INVALID_PATH:"));
+    }
+
+    #[test]
+    fn contribution_impact_extension_main_validation_rejects_missing_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_path = dir.path().join("extension-missing-main.aio-plugin");
+        write_package(
+            &package_path,
+            &[(
+                "plugin.json",
+                extension_manifest_json("local.extension-missing", None).as_bytes(),
+            )],
+        );
+
+        let err = extract_plugin_package(
+            &package_path,
+            &dir.path().join("staging"),
+            PluginPackageLimits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code(), "PLUGIN_EXTENSION_MAIN_MISSING");
+        assert!(err
+            .to_string()
+            .contains("extensionHost runtime requires main"));
+    }
+
+    #[test]
+    fn contribution_impact_extension_main_validation_rejects_invalid_main_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_path = dir.path().join("extension-invalid-main.aio-plugin");
+        write_package(
+            &package_path,
+            &[(
+                "plugin.json",
+                extension_manifest_json("local.extension-invalid", Some("../extension.js"))
+                    .as_bytes(),
+            )],
+        );
+
+        let err = extract_plugin_package(
+            &package_path,
+            &dir.path().join("staging"),
+            PluginPackageLimits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code(), "PLUGIN_EXTENSION_MAIN_INVALID");
+        assert!(err.to_string().contains("relative path inside the package"));
+    }
+
+    #[test]
+    fn contribution_impact_extension_main_validation_rejects_invalid_main_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_path = dir
+            .path()
+            .join("extension-invalid-main-extension.aio-plugin");
+        write_package(
+            &package_path,
+            &[
+                (
+                    "plugin.json",
+                    extension_manifest_json(
+                        "local.extension-invalid-extension",
+                        Some("dist/main.txt"),
+                    )
+                    .as_bytes(),
+                ),
+                ("dist/main.txt", b"export default {};"),
+            ],
+        );
+
+        let err = extract_plugin_package(
+            &package_path,
+            &dir.path().join("staging"),
+            PluginPackageLimits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code(), "PLUGIN_EXTENSION_MAIN_INVALID");
+        assert!(err.to_string().contains(".js or .cjs"));
+    }
+
+    #[test]
+    fn contribution_impact_extension_main_validation_rejects_too_large_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_path = dir.path().join("extension-large-main.aio-plugin");
+        let large_main = vec![b' '; 1024 * 1024 + 1];
+        write_package(
+            &package_path,
+            &[
+                (
+                    "plugin.json",
+                    extension_manifest_json("local.extension-large", Some("dist/extension.cjs"))
+                        .as_bytes(),
+                ),
+                ("dist/extension.cjs", large_main.as_slice()),
+            ],
+        );
+
+        let err = extract_plugin_package(
+            &package_path,
+            &dir.path().join("staging"),
+            PluginPackageLimits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code(), "PLUGIN_EXTENSION_MAIN_TOO_LARGE");
+        assert!(err.to_string().contains("exceeds 1048576 bytes"));
     }
 }

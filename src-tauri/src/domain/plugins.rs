@@ -404,6 +404,41 @@ pub struct PluginTrustSummary {
     pub developer_mode: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginContributionImpact {
+    pub providers: Vec<PluginContributionImpactItem>,
+    pub protocols: Vec<PluginContributionImpactItem>,
+    pub protocol_bridges: Vec<PluginContributionImpactItem>,
+    pub ui_slots: Vec<PluginUiSlotImpact>,
+    pub commands: Vec<PluginCommandImpact>,
+    pub gateway: Vec<PluginContributionImpactItem>,
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginContributionImpactItem {
+    pub id: String,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUiSlotImpact {
+    pub slot_id: String,
+    pub contribution_id: String,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCommandImpact {
+    pub command: String,
+    pub title: String,
+    pub category: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginInstallPreview {
@@ -420,6 +455,7 @@ pub struct PluginInstallPreview {
     pub runtime: PluginRuntimeLifecycleSummary,
     pub hooks: Vec<PluginHookLifecycleSummary>,
     pub permissions: Vec<PluginPermissionLifecycleSummary>,
+    pub contribution_impact: PluginContributionImpact,
     pub compatibility: PluginCompatibilitySummary,
     pub trust: PluginTrustSummary,
     pub existing_status: Option<PluginStatus>,
@@ -445,6 +481,15 @@ pub struct PluginPermissionLifecycleChange {
     pub change: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginContributionChange {
+    pub name: String,
+    pub change: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginUpdateDiff {
@@ -455,6 +500,7 @@ pub struct PluginUpdateDiff {
     pub runtime_change: Option<PluginLifecycleChange>,
     pub hook_changes: Vec<PluginLifecycleChange>,
     pub permission_changes: Vec<PluginPermissionLifecycleChange>,
+    pub contribution_changes: Vec<PluginContributionChange>,
     pub config_version_change: Option<String>,
     pub compatibility: PluginCompatibilitySummary,
     pub trust: PluginTrustSummary,

@@ -2826,6 +2826,7 @@ export type PluginAuditLog = {
   details: JsonValue;
   created_at: number;
 };
+export type PluginCommandImpact = { command: string; title: string; category: string | null };
 export type PluginCompatibilitySummary = {
   compatible: boolean;
   hostVersion: string;
@@ -2843,6 +2844,22 @@ export type PluginContributes = {
   gatewayRules?: GatewayRuleContribution[];
   ui?: Partial<{ [key in string]: UiContribution[] }>;
 };
+export type PluginContributionChange = {
+  name: string;
+  change: string;
+  before: string | null;
+  after: string | null;
+};
+export type PluginContributionImpact = {
+  providers: PluginContributionImpactItem[];
+  protocols: PluginContributionImpactItem[];
+  protocolBridges: PluginContributionImpactItem[];
+  uiSlots: PluginUiSlotImpact[];
+  commands: PluginCommandImpact[];
+  gateway: PluginContributionImpactItem[];
+  capabilities: string[];
+};
+export type PluginContributionImpactItem = { id: string; label: string | null };
 export type PluginDetail = {
   summary: PluginSummary;
   manifest: PluginManifest;
@@ -2904,6 +2921,7 @@ export type PluginInstallPreview = {
   runtime: PluginRuntimeLifecycleSummary;
   hooks: PluginHookLifecycleSummary[];
   permissions: PluginPermissionLifecycleSummary[];
+  contributionImpact: PluginContributionImpact;
   compatibility: PluginCompatibilitySummary;
   trust: PluginTrustSummary;
   existingStatus: PluginStatus | null;
@@ -3103,6 +3121,7 @@ export type PluginTrustSummary = {
   unsigned: boolean;
   developerMode: boolean;
 };
+export type PluginUiSlotImpact = { slotId: string; contributionId: string; title: string | null };
 export type PluginUpdateDiff = {
   pluginId: string;
   fromVersion: string;
@@ -3111,6 +3130,7 @@ export type PluginUpdateDiff = {
   runtimeChange: PluginLifecycleChange | null;
   hookChanges: PluginLifecycleChange[];
   permissionChanges: PluginPermissionLifecycleChange[];
+  contributionChanges: PluginContributionChange[];
   configVersionChange: string | null;
   compatibility: PluginCompatibilitySummary;
   trust: PluginTrustSummary;

@@ -178,6 +178,27 @@ function installPreview(overrides: Partial<PluginInstallPreview> = {}): PluginIn
     },
     hooks: [{ name: "gateway.request.afterBodyRead", priority: 100, failurePolicy: "fail-open" }],
     permissions: [{ permission: "request.body.read", risk: "high", granted: false, pending: true }],
+    contributionImpact: {
+      providers: [{ id: "openrouter", label: "OpenRouter" }],
+      protocols: [],
+      protocolBridges: [],
+      uiSlots: [
+        {
+          slotId: "providers.editor.sections",
+          contributionId: "openrouter-routing",
+          title: "OpenRouter 路由",
+        },
+      ],
+      commands: [
+        {
+          command: "acme.openrouter.refreshModels",
+          title: "刷新模型",
+          category: null,
+        },
+      ],
+      gateway: [],
+      capabilities: ["provider.extensionValues"],
+    },
     compatibility: {
       compatible: true,
       hostVersion: "0.62.2",
@@ -222,6 +243,20 @@ function updateDiff(overrides: Partial<PluginUpdateDiff> = {}): PluginUpdateDiff
         permission: "request.body.write",
         risk: "critical",
         change: "added_pending",
+      },
+    ],
+    contributionChanges: [
+      {
+        name: "logs.detail.tabs",
+        change: "removed",
+        before: "ui:logs.detail.tabs",
+        after: null,
+      },
+      {
+        name: "settings.sections",
+        change: "added",
+        before: null,
+        after: "ui:settings.sections",
       },
     ],
     configVersionChange: "1 -> 2",
@@ -1227,6 +1262,11 @@ describe("pages/PluginsPage", () => {
     expect(within(previewDialog).getByText("Community Prompt Helper")).toBeInTheDocument();
     expect(within(previewDialog).getByText("sha256-install")).toBeInTheDocument();
     expect(within(previewDialog).getByText("gateway.request.afterBodyRead")).toBeInTheDocument();
+    expect(within(previewDialog).getByText("扩展范围")).toBeInTheDocument();
+    expect(within(previewDialog).getByText("OpenRouter")).toBeInTheDocument();
+    expect(within(previewDialog).getByText("providers.editor.sections")).toBeInTheDocument();
+    expect(within(previewDialog).getByText("刷新模型")).toBeInTheDocument();
+    expect(within(previewDialog).getByText("provider.extensionValues")).toBeInTheDocument();
     expect(
       within(previewDialog).getByText("预检只是解释层，最终安装仍会重新校验。")
     ).toBeInTheDocument();
@@ -1554,6 +1594,9 @@ describe("pages/PluginsPage", () => {
     expect(within(updateDialog).getByText("1.0.0 -> 1.1.0")).toBeInTheDocument();
     expect(within(updateDialog).getByText("gateway.response.beforeSend")).toBeInTheDocument();
     expect(within(updateDialog).getByText("新增，待授权")).toBeInTheDocument();
+    expect(within(updateDialog).getByText("扩展范围变化")).toBeInTheDocument();
+    expect(within(updateDialog).getByText("logs.detail.tabs")).toBeInTheDocument();
+    expect(within(updateDialog).getByText("settings.sections")).toBeInTheDocument();
     expect(within(updateDialog).getByText("隔离与撤销")).toBeInTheDocument();
     expect(within(updateDialog).getByText("Plugin revoked by market index")).toBeInTheDocument();
     expect(updateMutation.mutateAsync).not.toHaveBeenCalled();

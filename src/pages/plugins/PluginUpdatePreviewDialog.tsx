@@ -18,6 +18,7 @@ type PluginUpdatePreviewDialogProps = {
 type PluginLifecycleChange = PluginUpdateDiff["hookChanges"][number];
 type PluginLifecycleNotice = PluginUpdateDiff["warnings"][number];
 type PluginPermissionLifecycleChange = PluginUpdateDiff["permissionChanges"][number];
+type PluginContributionChange = PluginUpdateDiff["contributionChanges"][number];
 type NoticeVariant = "warning" | "destructive";
 
 const LIFECYCLE_NOTICE_CODES = new Set([
@@ -145,6 +146,37 @@ function PermissionChanges({ changes }: { changes: readonly PluginPermissionLife
   );
 }
 
+function ContributionChanges({ changes }: { changes: readonly PluginContributionChange[] }) {
+  if (changes.length === 0) {
+    return (
+      <div className="rounded-md border border-dashed border-border px-3 py-3 text-sm text-muted-foreground">
+        没有扩展范围变化
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-2">
+      {changes.map((change) => (
+        <div
+          key={`${change.name}:${change.change}`}
+          className="rounded-md border border-border px-3 py-2 text-sm"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="break-all font-mono text-foreground">{change.name}</span>
+            <span className="rounded-md border border-border px-2 py-0.5 text-xs">
+              {changeLabel(change.change)}
+            </span>
+          </div>
+          <div className="mt-1 break-words text-xs text-muted-foreground">
+            {change.before ?? "-"} -&gt; {change.after ?? "-"}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function PluginUpdatePreviewDialog({
   diff,
   filePath,
@@ -250,6 +282,11 @@ export function PluginUpdatePreviewDialog({
           <div className="space-y-2">
             <div className="text-sm font-semibold text-foreground">权限变化</div>
             <PermissionChanges changes={diff.permissionChanges} />
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-sm font-semibold text-foreground">扩展范围变化</div>
+            <ContributionChanges changes={diff.contributionChanges} />
           </div>
 
           {diff.configVersionChange ? (

@@ -17,6 +17,7 @@ type PluginInstallPreviewDialogProps = {
 
 type PluginLifecycleNotice = PluginInstallPreview["warnings"][number];
 type PluginHookLifecycleSummary = PluginInstallPreview["hooks"][number];
+type PluginContributionImpact = PluginInstallPreview["contributionImpact"];
 type NoticeVariant = "warning" | "destructive";
 
 function sourceLabel(source: string) {
@@ -74,6 +75,66 @@ function HookList({ hooks }: { hooks: readonly PluginHookLifecycleSummary[] }) {
           <div className="mt-1 text-xs text-muted-foreground">
             priority {hook.priority}
             {hook.failurePolicy ? ` / ${hook.failurePolicy}` : ""}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ContributionImpactList({ impact }: { impact: PluginContributionImpact }) {
+  const groups = [
+    {
+      label: "Provider",
+      values: impact.providers.map((provider) => provider.label ?? provider.id),
+    },
+    {
+      label: "页面区域",
+      values: impact.uiSlots.map((slot) => slot.slotId),
+    },
+    {
+      label: "协议/转译",
+      values: [
+        ...impact.protocols.map((protocol) => protocol.label ?? protocol.id),
+        ...impact.protocolBridges.map((bridge) => bridge.label ?? bridge.id),
+      ],
+    },
+    {
+      label: "命令",
+      values: impact.commands.map((command) => command.title ?? command.command),
+    },
+    {
+      label: "网关",
+      values: impact.gateway.map((gateway) => gateway.label ?? gateway.id),
+    },
+    {
+      label: "能力",
+      values: impact.capabilities,
+    },
+  ].filter((group) => group.values.length > 0);
+
+  if (groups.length === 0) {
+    return (
+      <div className="rounded-md border border-dashed border-border px-3 py-3 text-sm text-muted-foreground">
+        插件未声明扩展范围
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      {groups.map((group) => (
+        <div key={group.label} className="rounded-md border border-border px-3 py-2 text-sm">
+          <div className="text-xs text-muted-foreground">{group.label}</div>
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {group.values.map((value) => (
+              <span
+                key={`${group.label}:${value}`}
+                className="break-all rounded-md border border-border px-2 py-0.5 font-mono text-[11px] text-foreground"
+              >
+                {value}
+              </span>
+            ))}
           </div>
         </div>
       ))}
@@ -207,6 +268,11 @@ export function PluginInstallPreviewDialog({
           <div className="space-y-2">
             <div className="text-sm font-semibold text-foreground">Hooks</div>
             <HookList hooks={preview.hooks} />
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-sm font-semibold text-foreground">扩展范围</div>
+            <ContributionImpactList impact={preview.contributionImpact} />
           </div>
 
           {preview.warnings.length > 0 ? (
