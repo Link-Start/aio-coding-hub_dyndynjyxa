@@ -468,7 +468,10 @@ function validateActivationEvents(activationEvents: unknown): ValidationResult |
 }
 
 function validateContributes(contributes: PluginContributes): ValidationResult | null {
-  const raw = contributes as Record<string, unknown>;
+  const raw = asRecord(contributes);
+  if (!raw) {
+    return invalid("PLUGIN_INVALID_CONTRIBUTES", "contributes must be an object");
+  }
   const providerError = validateProviderContributions(raw.providers);
   if (providerError) return providerError;
   const protocolError = validateProtocolContributions(raw.protocols);
@@ -616,6 +619,31 @@ function validateGatewayRuleContributions(gatewayRules: unknown): ValidationResu
         "PLUGIN_INVALID_GATEWAY_RULE_CONTRIBUTION",
         "gateway rule contribution requires non-empty rules"
       );
+    }
+    if (record.hooks !== undefined) {
+      if (!Array.isArray(record.hooks)) {
+        return invalid(
+          "PLUGIN_INVALID_GATEWAY_RULE_CONTRIBUTION",
+          "gateway rule hooks must be an array"
+        );
+      }
+      for (const hook of record.hooks) {
+        if (typeof hook !== "string") {
+          return invalid(
+            "PLUGIN_INVALID_GATEWAY_RULE_CONTRIBUTION",
+            "gateway rule hooks must be strings"
+          );
+        }
+        if (RESERVED_HOOKS.has(hook as GatewayHookName)) {
+          return invalid(
+            "PLUGIN_RESERVED_HOOK",
+            `hook is reserved for a future host integration and is not active in plugin API v1: ${hook}`
+          );
+        }
+        if (!KNOWN_HOOKS.has(hook as GatewayHookName)) {
+          return invalid("PLUGIN_UNKNOWN_HOOK", `unknown hook: ${hook}`);
+        }
+      }
     }
   }
   return null;

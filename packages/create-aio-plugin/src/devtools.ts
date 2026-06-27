@@ -13,7 +13,7 @@ import { validateManifest } from "@aio-coding-hub/plugin-sdk";
 import { createPluginScaffold, type ScaffoldFiles, type ScaffoldTemplate } from "./scaffold";
 
 type ActivePermission = Exclude<
-  PluginManifest["permissions"][number],
+  NonNullable<PluginManifest["permissions"]>[number],
   "plugin.storage" | "network.fetch" | "file.read" | "file.write" | "secret.read"
 >;
 type DeclarativeRuleMutationField = "requestBody" | "responseBody" | "streamChunk" | "logMessage";
@@ -1542,6 +1542,8 @@ export function publishCheckPluginBytes(
 ): PublishCheckResult {
   const manifest = JSON.parse(input.manifest) as PluginManifest;
   const validation = validateManifest(manifest);
+  const permissions = manifest.permissions ?? [];
+  const hooks = manifest.hooks ?? [];
   const checksum = sha256(bytes);
   const checksumVerified = checksum === input.checksum;
   const signatureVerified =
@@ -1561,8 +1563,8 @@ export function publishCheckPluginBytes(
     name: manifest.name,
     version: manifest.version,
     runtime: manifest.runtime.kind,
-    permissions: [...manifest.permissions],
-    hooks: manifest.hooks.map((hook) => hook.name),
+    permissions: [...permissions],
+    hooks: hooks.map((hook) => hook.name),
     hostCompatibility: manifest.hostCompatibility,
     sizeBytes: bytes.length,
   };

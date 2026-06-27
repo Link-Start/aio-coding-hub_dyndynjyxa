@@ -147,6 +147,18 @@ describe("validateManifest", () => {
     });
   });
 
+  test("rejects non-object contributes", () => {
+    const manifest = {
+      ...openRouterManifest,
+      contributes: [],
+    };
+
+    expect(validateManifest(manifest as unknown as PluginManifest)).toMatchObject({
+      ok: false,
+      error: { code: "PLUGIN_INVALID_CONTRIBUTES" },
+    });
+  });
+
   test("rejects malformed protocol bridge contribution", () => {
     const manifest = {
       ...openRouterManifest,
@@ -201,6 +213,30 @@ describe("validateManifest", () => {
     expect(validateManifest(manifest as PluginManifest)).toMatchObject({
       ok: false,
       error: { code: "PLUGIN_INVALID_ACTIVATION_EVENT" },
+    });
+  });
+
+  test("rejects gatewayRules hooks with reserved or unknown hook", () => {
+    const reservedHookManifest = {
+      ...openRouterManifest,
+      contributes: {
+        gatewayRules: [{ rules: ["rules/main.json"], hooks: ["gateway.request.received"] }],
+      },
+    };
+    expect(validateManifest(reservedHookManifest as PluginManifest)).toMatchObject({
+      ok: false,
+      error: { code: "PLUGIN_RESERVED_HOOK" },
+    });
+
+    const unknownHookManifest = {
+      ...openRouterManifest,
+      contributes: {
+        gatewayRules: [{ rules: ["rules/main.json"], hooks: ["gateway.request.missing"] }],
+      },
+    };
+    expect(validateManifest(unknownHookManifest as unknown as PluginManifest)).toMatchObject({
+      ok: false,
+      error: { code: "PLUGIN_UNKNOWN_HOOK" },
     });
   });
 
