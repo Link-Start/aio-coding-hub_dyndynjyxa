@@ -1,3 +1,4 @@
+use crate::app::plugins::contribution_registry::ActiveContributionSnapshot;
 use crate::domain::plugins::{
     permission_risk, validate_manifest, PluginCompatibilitySummary, PluginDetail,
     PluginHookLifecycleSummary, PluginInstallPreview, PluginInstallSource, PluginLifecycleChange,
@@ -19,6 +20,19 @@ pub(crate) fn list_plugins(db: &crate::db::Db) -> AppResult<Vec<crate::plugins::
 
 pub(crate) fn get_plugin_detail(db: &crate::db::Db, plugin_id: &str) -> AppResult<PluginDetail> {
     detail_with_config_defaults_for_db(db, repository::get_plugin(db, plugin_id)?)
+}
+
+pub(crate) fn active_plugin_contributions(
+    db: &crate::db::Db,
+) -> AppResult<ActiveContributionSnapshot> {
+    let mut details = Vec::new();
+    for summary in repository::list_plugins(db)? {
+        details.push(detail_with_config_defaults_for_db(
+            db,
+            repository::get_plugin(db, &summary.plugin_id)?,
+        )?);
+    }
+    ActiveContributionSnapshot::from_plugin_details(&details)
 }
 
 pub(crate) fn enabled_plugins_for_gateway(db: &crate::db::Db) -> AppResult<Vec<PluginDetail>> {

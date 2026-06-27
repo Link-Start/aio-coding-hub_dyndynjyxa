@@ -1,6 +1,7 @@
 //! Usage: Community plugin management related Tauri commands.
 
 use crate::app::plugin_service;
+use crate::app::plugins::contribution_registry::ActiveContributionSnapshot;
 use crate::app_state::{ensure_db_ready, DbInitState};
 use crate::domain::plugins::{
     PluginAuditLog, PluginDetail, PluginHookExecutionReport, PluginInstallPreview,
@@ -169,6 +170,20 @@ pub(crate) async fn plugin_get(
     let db = ensure_db_ready(app.clone(), db_state.inner()).await?;
     blocking::run("plugin_get", move || {
         plugin_service::get_plugin_detail(&db, &input.plugin_id)
+    })
+    .await
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn plugin_active_contributions(
+    app: tauri::AppHandle,
+    db_state: tauri::State<'_, DbInitState>,
+) -> Result<ActiveContributionSnapshot, String> {
+    let db = ensure_db_ready(app.clone(), db_state.inner()).await?;
+    blocking::run("plugin_active_contributions", move || {
+        plugin_service::active_plugin_contributions(&db)
     })
     .await
     .map_err(Into::into)

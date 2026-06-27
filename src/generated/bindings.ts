@@ -1428,6 +1428,14 @@ export const commands = {
       else return { status: "error", error: e as any };
     }
   },
+  async pluginActiveContributions(): Promise<Result<ActiveContributionSnapshot, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("plugin_active_contributions") };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
   async pluginPreviewFromFile(
     input: PluginPreviewFromFileInput
   ): Promise<Result<PluginInstallPreview, string>> {
@@ -2025,6 +2033,60 @@ export const commands = {
 
 /** user-defined types **/
 
+export type ActiveCommandContribution = {
+  pluginId: string;
+  command: string;
+  title: string;
+  category: string | null;
+};
+export type ActiveContributionSnapshot = {
+  ui: ActiveUiContribution[];
+  providers: ActiveProviderContribution[];
+  protocols: ActiveProtocolContribution[];
+  protocolBridges: ActiveProtocolBridgeContribution[];
+  commands: ActiveCommandContribution[];
+  gatewayHooks: ActiveGatewayHookContribution[];
+  gatewayRules: ActiveGatewayRuleContribution[];
+};
+export type ActiveGatewayHookContribution = {
+  pluginId: string;
+  name: string;
+  priority: number;
+  failurePolicy: string | null;
+};
+export type ActiveGatewayRuleContribution = {
+  pluginId: string;
+  contributionId: string;
+  rules: string[];
+  hooks: string[];
+};
+export type ActiveProtocolBridgeContribution = {
+  pluginId: string;
+  bridgeType: string;
+  inboundProtocol: string;
+  outboundProtocol: string;
+  supportsStreaming: boolean | null;
+};
+export type ActiveProtocolContribution = {
+  pluginId: string;
+  protocolId: string;
+  direction: ProtocolDirection;
+};
+export type ActiveProviderContribution = {
+  pluginId: string;
+  providerType: string;
+  displayName: string;
+  targetCliKeys: TargetCliKey[];
+  extensionNamespace: string;
+};
+export type ActiveUiContribution = {
+  pluginId: string;
+  contributionId: string;
+  slotId: string;
+  title: string | null;
+  order: number;
+  schema: JsonValue;
+};
 export type AppAboutInfo = {
   os: string;
   arch: string;

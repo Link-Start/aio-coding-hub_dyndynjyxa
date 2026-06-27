@@ -26,13 +26,23 @@ import {
   type PluginDetail,
   type PluginSummary,
 } from "../services/plugins";
-import { pluginKeys } from "./keys";
+import { pluginActiveContributions } from "../services/pluginContributions";
+import { pluginContributionKeys, pluginKeys } from "./keys";
 
 type QueryClientLike = ReturnType<typeof useQueryClient>;
 
 function refreshPluginQueries(queryClient: QueryClientLike, pluginId: string) {
   queryClient.invalidateQueries({ queryKey: pluginKeys.list() });
   queryClient.invalidateQueries({ queryKey: pluginKeys.detail(pluginId) });
+}
+
+function refreshPluginContributionQueries(queryClient: QueryClientLike) {
+  queryClient.invalidateQueries({ queryKey: pluginContributionKeys.active() });
+}
+
+function refreshPluginMutationQueries(queryClient: QueryClientLike, pluginId: string) {
+  refreshPluginQueries(queryClient, pluginId);
+  refreshPluginContributionQueries(queryClient);
 }
 
 function upsertPluginSummary(
@@ -114,6 +124,15 @@ export function usePluginRuntimeReportsQuery(
   });
 }
 
+export function usePluginActiveContributionsQuery(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: pluginContributionKeys.active(),
+    queryFn: () => pluginActiveContributions(),
+    enabled: options?.enabled ?? true,
+    placeholderData: keepPreviousData,
+  });
+}
+
 export function usePluginExportReplayFixtureMutation() {
   const queryClient = useQueryClient();
 
@@ -141,7 +160,7 @@ export function usePluginInstallFromFileMutation() {
         upsertPluginSummary(current, next)
       );
       queryClient.setQueryData(pluginKeys.detail(next.summary.plugin_id), next);
-      refreshPluginQueries(queryClient, next.summary.plugin_id);
+      refreshPluginMutationQueries(queryClient, next.summary.plugin_id);
     },
   });
 }
@@ -176,9 +195,10 @@ export function usePluginUpdateFromFileMutation() {
     onSuccess: (next) => {
       if (next) {
         queryClient.setQueryData(pluginKeys.detail(next.summary.plugin_id), next);
-        refreshPluginQueries(queryClient, next.summary.plugin_id);
+        refreshPluginMutationQueries(queryClient, next.summary.plugin_id);
       } else {
         queryClient.invalidateQueries({ queryKey: pluginKeys.list() });
+        refreshPluginContributionQueries(queryClient);
       }
     },
   });
@@ -195,7 +215,7 @@ export function usePluginInstallRemoteMutation() {
         upsertPluginSummary(current, next)
       );
       queryClient.setQueryData(pluginKeys.detail(next.summary.plugin_id), next);
-      refreshPluginQueries(queryClient, next.summary.plugin_id);
+      refreshPluginMutationQueries(queryClient, next.summary.plugin_id);
     },
   });
 }
@@ -211,7 +231,7 @@ export function usePluginRollbackMutation() {
       if (next) {
         queryClient.setQueryData(pluginKeys.detail(normalizedPluginId), next);
       }
-      refreshPluginQueries(queryClient, normalizedPluginId);
+      refreshPluginMutationQueries(queryClient, normalizedPluginId);
     },
   });
 }
@@ -226,7 +246,7 @@ export function usePluginQuarantineRevokedMutation() {
       if (next) {
         queryClient.setQueryData(pluginKeys.detail(normalizedPluginId), next);
       }
-      refreshPluginQueries(queryClient, normalizedPluginId);
+      refreshPluginMutationQueries(queryClient, normalizedPluginId);
     },
   });
 }
@@ -244,7 +264,7 @@ export function usePluginInstallOfficialMutation() {
         );
         queryClient.setQueryData(pluginKeys.detail(normalizedPluginId), next);
       }
-      refreshPluginQueries(queryClient, normalizedPluginId);
+      refreshPluginMutationQueries(queryClient, normalizedPluginId);
     },
   });
 }
@@ -259,7 +279,7 @@ export function usePluginEnableMutation() {
       if (next) {
         queryClient.setQueryData(pluginKeys.detail(normalizedPluginId), next);
       }
-      refreshPluginQueries(queryClient, normalizedPluginId);
+      refreshPluginMutationQueries(queryClient, normalizedPluginId);
     },
   });
 }
@@ -274,7 +294,7 @@ export function usePluginDisableMutation() {
       if (next) {
         queryClient.setQueryData(pluginKeys.detail(normalizedPluginId), next);
       }
-      refreshPluginQueries(queryClient, normalizedPluginId);
+      refreshPluginMutationQueries(queryClient, normalizedPluginId);
     },
   });
 }
@@ -289,7 +309,7 @@ export function usePluginUninstallMutation() {
       if (next) {
         queryClient.setQueryData(pluginKeys.detail(normalizedPluginId), next);
       }
-      refreshPluginQueries(queryClient, normalizedPluginId);
+      refreshPluginMutationQueries(queryClient, normalizedPluginId);
     },
   });
 }

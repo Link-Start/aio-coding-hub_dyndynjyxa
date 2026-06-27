@@ -1,10 +1,13 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { ActiveContributionSnapshot } from "../../services/pluginContributions";
+import { pluginActiveContributions } from "../../services/pluginContributions";
 import type { PluginDetail, PluginSummary } from "../../services/plugins";
 import {
   pluginDisable,
   pluginEnable,
   pluginGet,
+  pluginInstallFromFile,
   pluginInstallRemote,
   pluginInstallOfficial,
   pluginList,
@@ -18,10 +21,12 @@ import {
   pluginUpdateFromFile,
 } from "../../services/plugins";
 import { createQueryWrapper, createTestQueryClient } from "../../test/utils/reactQuery";
-import { pluginKeys } from "../keys";
+import { pluginContributionKeys, pluginKeys } from "../keys";
 import {
+  usePluginActiveContributionsQuery,
   usePluginDisableMutation,
   usePluginEnableMutation,
+  usePluginInstallFromFileMutation,
   usePluginInstallOfficialMutation,
   usePluginInstallRemoteMutation,
   usePluginQuery,
@@ -44,6 +49,7 @@ vi.mock("../../services/plugins", async () => {
     pluginList: vi.fn(),
     pluginGet: vi.fn(),
     pluginEnable: vi.fn(),
+    pluginInstallFromFile: vi.fn(),
     pluginInstallRemote: vi.fn(),
     pluginInstallOfficial: vi.fn(),
     pluginListRuntimeReports: vi.fn(),
@@ -57,6 +63,10 @@ vi.mock("../../services/plugins", async () => {
     pluginRevokePermission: vi.fn(),
   };
 });
+
+vi.mock("../../services/pluginContributions", () => ({
+  pluginActiveContributions: vi.fn(),
+}));
 
 function summary(overrides: Partial<PluginSummary> = {}): PluginSummary {
   return {
@@ -124,6 +134,21 @@ function officialPrivacyFilterDetail(): PluginDetail {
     install_source: "official",
     granted_permissions: ["request.body.read", "request.body.write", "log.redact"],
   });
+}
+
+function activeContributions(
+  overrides: Partial<ActiveContributionSnapshot> = {}
+): ActiveContributionSnapshot {
+  return {
+    ui: [],
+    providers: [],
+    protocols: [],
+    protocolBridges: [],
+    commands: [],
+    gatewayHooks: [],
+    gatewayRules: [],
+    ...overrides,
+  };
 }
 
 describe("query/plugins", () => {
@@ -260,9 +285,35 @@ describe("query/plugins", () => {
     ).toMatchObject({ traceId: "trace-replay-1" });
   });
 
+  it("queries active plugin contributions with a stable key", async () => {
+    vi.mocked(pluginActiveContributions).mockResolvedValue(
+      activeContributions({
+        commands: [
+          {
+            pluginId: "community.prompt-helper",
+            command: "community.prompt-helper.open",
+            title: "Open",
+            category: null,
+          },
+        ],
+      })
+    );
+    const client = createTestQueryClient();
+    const wrapper = createQueryWrapper(client);
+
+    renderHook(() => usePluginActiveContributionsQuery(), { wrapper });
+
+    await waitFor(() => {
+      expect(pluginActiveContributions).toHaveBeenCalled();
+    });
+
+    expect(client.getQueryState(pluginContributionKeys.active())).toBeTruthy();
+  });
+
   it("invalidates list and detail queries after mutations", async () => {
     const next = detail({ summary: summary({ status: "enabled" }) });
     vi.mocked(pluginEnable).mockResolvedValue(next);
+    vi.mocked(pluginInstallFromFile).mockResolvedValue(next);
     vi.mocked(pluginInstallRemote).mockResolvedValue(next);
     vi.mocked(pluginInstallOfficial).mockResolvedValue(officialPrivacyFilterDetail());
     vi.mocked(pluginQuarantineRevoked).mockResolvedValue(next);
@@ -278,6 +329,9 @@ describe("query/plugins", () => {
     const wrapper = createQueryWrapper(client);
 
     const { result: enableResult } = renderHook(() => usePluginEnableMutation(), { wrapper });
+    const { result: installFromFileResult } = renderHook(() => usePluginInstallFromFileMutation(), {
+      wrapper,
+    });
     const { result: installOfficialResult } = renderHook(() => usePluginInstallOfficialMutation(), {
       wrapper,
     });
@@ -308,6 +362,7 @@ describe("query/plugins", () => {
 
     await act(async () => {
       await enableResult.current.mutateAsync("community.prompt-helper");
+      await installFromFileResult.current.mutateAsync("/tmp/plugin.aio-plugin");
       await installRemoteResult.current.mutateAsync({
         pluginId: "community.prompt-helper",
         downloadUrl: "https://github.com/acme/plugin/releases/download/v1/plugin.aio-plugin",
@@ -338,6 +393,9 @@ describe("query/plugins", () => {
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: pluginKeys.detail("official.privacy-filter"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: pluginContributionKeys.active(),
     });
   });
 });

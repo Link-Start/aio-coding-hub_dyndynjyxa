@@ -256,6 +256,12 @@ export const pluginKeys = {
     [...pluginsAllKey, "replayFixture", traceId, hookName, pluginId] as const,
 };
 
+const pluginContributionsAllKey = ["pluginContributions"] as const;
+export const pluginContributionKeys = {
+  all: pluginContributionsAllKey,
+  active: () => [...pluginContributionsAllKey, "active"] as const,
+};
+
 const settingsAllKey = ["settings"] as const;
 export const settingsKeys = {
   all: settingsAllKey,

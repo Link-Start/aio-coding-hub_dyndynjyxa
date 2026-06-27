@@ -1,0 +1,523 @@
+use std::collections::BTreeMap;
+
+use serde::Serialize;
+
+use crate::domain::plugin_contributions::is_known_ui_slot;
+use crate::plugins::PluginStatus;
+use crate::shared::error::AppError;
+use crate::shared::error::AppResult;
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveUiContribution {
+    pub plugin_id: String,
+    pub contribution_id: String,
+    pub slot_id: String,
+    pub title: Option<String>,
+    pub order: i32,
+    pub schema: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveProviderContribution {
+    pub plugin_id: String,
+    pub provider_type: String,
+    pub display_name: String,
+    pub target_cli_keys: Vec<crate::domain::plugin_contributions::TargetCliKey>,
+    pub extension_namespace: String,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveProtocolContribution {
+    pub plugin_id: String,
+    pub protocol_id: String,
+    pub direction: crate::domain::plugin_contributions::ProtocolDirection,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveProtocolBridgeContribution {
+    pub plugin_id: String,
+    pub bridge_type: String,
+    pub inbound_protocol: String,
+    pub outbound_protocol: String,
+    pub supports_streaming: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveCommandContribution {
+    pub plugin_id: String,
+    pub command: String,
+    pub title: String,
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveGatewayHookContribution {
+    pub plugin_id: String,
+    pub name: String,
+    pub priority: i32,
+    pub failure_policy: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveGatewayRuleContribution {
+    pub plugin_id: String,
+    pub contribution_id: String,
+    pub rules: Vec<String>,
+    pub hooks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveContributionSnapshot {
+    pub ui: Vec<ActiveUiContribution>,
+    pub providers: Vec<ActiveProviderContribution>,
+    pub protocols: Vec<ActiveProtocolContribution>,
+    pub protocol_bridges: Vec<ActiveProtocolBridgeContribution>,
+    pub commands: Vec<ActiveCommandContribution>,
+    pub gateway_hooks: Vec<ActiveGatewayHookContribution>,
+    pub gateway_rules: Vec<ActiveGatewayRuleContribution>,
+}
+
+impl ActiveContributionSnapshot {
+    pub fn from_plugin_details(plugins: &[crate::plugins::PluginDetail]) -> AppResult<Self> {
+        let mut snapshot = Self::default();
+        let mut command_owners = BTreeMap::<String, String>::new();
+
+        for plugin in plugins {
+            if plugin.summary.status != PluginStatus::Enabled {
+                continue;
+            }
+
+            let plugin_id = plugin.manifest.id.as_str();
+            let Some(contributes) = plugin.manifest.contributes.as_ref() else {
+                continue;
+            };
+
+            for provider in &contributes.providers {
+                ensure_contribution_id(&provider.provider_type, "provider")?;
+                ensure_namespaced(plugin_id, &provider.provider_type, "provider")?;
+                snapshot.providers.push(ActiveProviderContribution {
+                    plugin_id: plugin_id.to_string(),
+                    provider_type: provider.provider_type.clone(),
+                    display_name: provider.display_name.clone(),
+                    target_cli_keys: provider.target_cli_keys.clone(),
+                    extension_namespace: provider.extension_namespace.clone(),
+                });
+            }
+
+            for protocol in &contributes.protocols {
+                ensure_contribution_id(&protocol.protocol_id, "protocol")?;
+                snapshot.protocols.push(ActiveProtocolContribution {
+                    plugin_id: plugin_id.to_string(),
+                    protocol_id: protocol.protocol_id.clone(),
+                    direction: protocol.direction.clone(),
+                });
+            }
+
+            for bridge in &contributes.protocol_bridges {
+                ensure_contribution_id(&bridge.bridge_type, "protocol bridge")?;
+                ensure_namespaced(plugin_id, &bridge.bridge_type, "protocol bridge")?;
+                snapshot
+                    .protocol_bridges
+                    .push(ActiveProtocolBridgeContribution {
+                        plugin_id: plugin_id.to_string(),
+                        bridge_type: bridge.bridge_type.clone(),
+                        inbound_protocol: bridge.inbound_protocol.clone(),
+                        outbound_protocol: bridge.outbound_protocol.clone(),
+                        supports_streaming: bridge.supports_streaming,
+                    });
+            }
+
+            for command in &contributes.commands {
+                ensure_contribution_id(&command.command, "command")?;
+                if let Some(owner) =
+                    command_owners.insert(command.command.clone(), plugin_id.to_string())
+                {
+                    return Err(AppError::new(
+                        "PLUGIN_DUPLICATE_COMMAND",
+                        format!(
+                            "command {} is declared by both {} and {}",
+                            command.command, owner, plugin_id
+                        ),
+                    ));
+                }
+                snapshot.commands.push(ActiveCommandContribution {
+                    plugin_id: plugin_id.to_string(),
+                    command: command.command.clone(),
+                    title: command.title.clone(),
+                    category: command.category.clone(),
+                });
+            }
+
+            for hook in &contributes.gateway_hooks {
+                ensure_contribution_id(&hook.name, "gateway hook")?;
+                snapshot.gateway_hooks.push(ActiveGatewayHookContribution {
+                    plugin_id: plugin_id.to_string(),
+                    name: hook.name.clone(),
+                    priority: hook.priority,
+                    failure_policy: hook.failure_policy.clone(),
+                });
+            }
+
+            for (index, rule) in contributes.gateway_rules.iter().enumerate() {
+                let contribution_id = match rule.id.as_deref() {
+                    Some(id) => {
+                        ensure_contribution_id(id, "gateway rule")?;
+                        id.to_string()
+                    }
+                    None => format!("{plugin_id}.gatewayRule.{index}"),
+                };
+                snapshot.gateway_rules.push(ActiveGatewayRuleContribution {
+                    plugin_id: plugin_id.to_string(),
+                    contribution_id,
+                    rules: rule.rules.clone(),
+                    hooks: rule.hooks.clone(),
+                });
+            }
+
+            for (slot_id, contributions) in &contributes.ui {
+                if !is_known_ui_slot(slot_id) {
+                    return Err(AppError::new(
+                        "PLUGIN_UNKNOWN_UI_SLOT",
+                        format!("unknown UI contribution slot: {slot_id}"),
+                    ));
+                }
+
+                for contribution in contributions {
+                    ensure_contribution_id(&contribution.id, "UI")?;
+                    snapshot.ui.push(ActiveUiContribution {
+                        plugin_id: plugin_id.to_string(),
+                        contribution_id: contribution.id.clone(),
+                        slot_id: slot_id.clone(),
+                        title: contribution.title.clone(),
+                        order: contribution.order.unwrap_or(0),
+                        schema: serde_json::to_value(&contribution.schema).map_err(|error| {
+                            AppError::new(
+                                "PLUGIN_INVALID_UI_CONTRIBUTION",
+                                format!("failed to serialize UI contribution schema: {error}"),
+                            )
+                        })?,
+                    });
+                }
+            }
+        }
+
+        snapshot.ui.sort_by(|left, right| {
+            left.order
+                .cmp(&right.order)
+                .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+                .then_with(|| left.contribution_id.cmp(&right.contribution_id))
+        });
+
+        Ok(snapshot)
+    }
+
+    #[cfg(test)]
+    pub fn ui_for_slot(&self, slot_id: &str) -> Vec<&ActiveUiContribution> {
+        self.ui
+            .iter()
+            .filter(|item| item.slot_id == slot_id)
+            .collect()
+    }
+}
+
+fn ensure_contribution_id(value: &str, contribution_kind: &str) -> AppResult<()> {
+    if value.trim().is_empty() {
+        return Err(AppError::new(
+            "PLUGIN_INVALID_CONTRIBUTION_ID",
+            format!("{contribution_kind} contribution id must be non-empty"),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_namespaced(plugin_id: &str, value: &str, contribution_kind: &str) -> AppResult<()> {
+    if is_plugin_namespaced(plugin_id, value) {
+        return Ok(());
+    }
+
+    Err(AppError::new(
+        "PLUGIN_CONTRIBUTION_NAMESPACE_MISMATCH",
+        format!(
+            "{contribution_kind} contribution id {value} must be namespaced by plugin {plugin_id}"
+        ),
+    ))
+}
+
+fn is_plugin_namespaced(plugin_id: &str, value: &str) -> bool {
+    if value == plugin_id {
+        return true;
+    }
+    value
+        .strip_prefix(plugin_id)
+        .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with('/'))
+}
+
+#[cfg(test)]
+mod contribution_registry_tests {
+    use std::collections::BTreeMap;
+
+    use crate::domain::plugin_contributions::{
+        CommandContribution, HostRenderedSchema, PluginContributes, ProtocolBridgeContribution,
+        ProviderContribution, TargetCliKey, UiContribution,
+    };
+    use crate::plugins::{
+        PluginAuditLog, PluginDetail, PluginHostCompatibility, PluginInstallSource, PluginManifest,
+        PluginPermissionRisk, PluginRuntime, PluginRuntimeFailure, PluginStatus, PluginSummary,
+    };
+
+    use super::ActiveContributionSnapshot;
+
+    #[test]
+    fn contribution_registry_filters_enabled_plugins_and_orders_ui_slots() {
+        let enabled = plugin_detail_with_ui(
+            "acme.settings",
+            crate::plugins::PluginStatus::Enabled,
+            "settings.sections",
+            "settings-a",
+            20,
+        );
+        let disabled = plugin_detail_with_ui(
+            "acme.disabled",
+            crate::plugins::PluginStatus::Disabled,
+            "settings.sections",
+            "settings-hidden",
+            10,
+        );
+        let earlier = plugin_detail_with_ui(
+            "acme.settings-earlier",
+            crate::plugins::PluginStatus::Enabled,
+            "settings.sections",
+            "settings-b",
+            5,
+        );
+
+        let snapshot =
+            ActiveContributionSnapshot::from_plugin_details(&[enabled, disabled, earlier])
+                .expect("snapshot");
+
+        let ids: Vec<_> = snapshot
+            .ui_for_slot("settings.sections")
+            .iter()
+            .map(|item| item.contribution_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["settings-b", "settings-a"]);
+    }
+
+    #[test]
+    fn contribution_registry_rejects_unknown_slots() {
+        let plugin = plugin_detail_with_raw_ui_slot("acme.bad", "settings.unknown");
+        let err = ActiveContributionSnapshot::from_plugin_details(&[plugin]).unwrap_err();
+        assert_eq!(err.code(), "PLUGIN_UNKNOWN_UI_SLOT");
+    }
+
+    #[test]
+    fn contribution_registry_rejects_duplicate_command_ids() {
+        let first = plugin_detail_with_command("acme.one", "acme.command.open");
+        let second = plugin_detail_with_command("acme.two", "acme.command.open");
+
+        let err = ActiveContributionSnapshot::from_plugin_details(&[first, second]).unwrap_err();
+
+        assert_eq!(err.code(), "PLUGIN_DUPLICATE_COMMAND");
+    }
+
+    #[test]
+    fn contribution_registry_rejects_provider_namespace_mismatch() {
+        let plugin = plugin_detail_with_provider("acme.provider", "other.provider");
+
+        let err = ActiveContributionSnapshot::from_plugin_details(&[plugin]).unwrap_err();
+
+        assert_eq!(err.code(), "PLUGIN_CONTRIBUTION_NAMESPACE_MISMATCH");
+    }
+
+    #[test]
+    fn contribution_registry_rejects_protocol_bridge_namespace_mismatch() {
+        let plugin = plugin_detail_with_protocol_bridge("acme.bridge", "other.bridge");
+
+        let err = ActiveContributionSnapshot::from_plugin_details(&[plugin]).unwrap_err();
+
+        assert_eq!(err.code(), "PLUGIN_CONTRIBUTION_NAMESPACE_MISMATCH");
+    }
+
+    #[test]
+    fn contribution_registry_rejects_empty_contribution_id() {
+        let plugin = plugin_detail_with_raw_ui_slot_and_id("acme.empty", "settings.sections", " ");
+
+        let err = ActiveContributionSnapshot::from_plugin_details(&[plugin]).unwrap_err();
+
+        assert_eq!(err.code(), "PLUGIN_INVALID_CONTRIBUTION_ID");
+    }
+
+    fn plugin_detail_with_ui(
+        plugin_id: &str,
+        status: PluginStatus,
+        slot_id: &str,
+        contribution_id: &str,
+        order: i32,
+    ) -> PluginDetail {
+        plugin_detail_with_ui_contribution(
+            plugin_id,
+            status,
+            slot_id,
+            ui_contribution(contribution_id, order),
+        )
+    }
+
+    fn plugin_detail_with_raw_ui_slot(plugin_id: &str, slot_id: &str) -> PluginDetail {
+        plugin_detail_with_raw_ui_slot_and_id(plugin_id, slot_id, "settings-a")
+    }
+
+    fn plugin_detail_with_raw_ui_slot_and_id(
+        plugin_id: &str,
+        slot_id: &str,
+        contribution_id: &str,
+    ) -> PluginDetail {
+        plugin_detail_with_ui_contribution(
+            plugin_id,
+            PluginStatus::Enabled,
+            slot_id,
+            ui_contribution(contribution_id, 0),
+        )
+    }
+
+    fn plugin_detail_with_command(plugin_id: &str, command: &str) -> PluginDetail {
+        let mut detail = plugin_detail(plugin_id, PluginStatus::Enabled);
+        detail.manifest.contributes = Some(PluginContributes {
+            commands: vec![CommandContribution {
+                command: command.to_string(),
+                title: "Open".to_string(),
+                category: None,
+            }],
+            ..empty_contributes()
+        });
+        detail
+    }
+
+    fn plugin_detail_with_provider(plugin_id: &str, provider_type: &str) -> PluginDetail {
+        let mut detail = plugin_detail(plugin_id, PluginStatus::Enabled);
+        detail.manifest.contributes = Some(PluginContributes {
+            providers: vec![ProviderContribution {
+                provider_type: provider_type.to_string(),
+                display_name: "Provider".to_string(),
+                target_cli_keys: vec![TargetCliKey::Codex],
+                extension_namespace: plugin_id.to_string(),
+            }],
+            ..empty_contributes()
+        });
+        detail
+    }
+
+    fn plugin_detail_with_protocol_bridge(plugin_id: &str, bridge_type: &str) -> PluginDetail {
+        let mut detail = plugin_detail(plugin_id, PluginStatus::Enabled);
+        detail.manifest.contributes = Some(PluginContributes {
+            protocol_bridges: vec![ProtocolBridgeContribution {
+                bridge_type: bridge_type.to_string(),
+                inbound_protocol: "claude".to_string(),
+                outbound_protocol: "codex".to_string(),
+                supports_streaming: Some(true),
+            }],
+            ..empty_contributes()
+        });
+        detail
+    }
+
+    fn plugin_detail_with_ui_contribution(
+        plugin_id: &str,
+        status: PluginStatus,
+        slot_id: &str,
+        contribution: UiContribution,
+    ) -> PluginDetail {
+        let mut detail = plugin_detail(plugin_id, status);
+        detail.manifest.contributes = Some(PluginContributes {
+            ui: BTreeMap::from([(slot_id.to_string(), vec![contribution])]),
+            ..empty_contributes()
+        });
+        detail
+    }
+
+    fn ui_contribution(contribution_id: &str, order: i32) -> UiContribution {
+        UiContribution {
+            id: contribution_id.to_string(),
+            title: Some("Settings".to_string()),
+            order: Some(order),
+            schema: HostRenderedSchema::Panel { fields: Vec::new() },
+            when: None,
+        }
+    }
+
+    fn empty_contributes() -> PluginContributes {
+        PluginContributes {
+            providers: Vec::new(),
+            protocols: Vec::new(),
+            protocol_bridges: Vec::new(),
+            commands: Vec::new(),
+            gateway_hooks: Vec::new(),
+            gateway_rules: Vec::new(),
+            ui: BTreeMap::new(),
+        }
+    }
+
+    fn plugin_detail(plugin_id: &str, status: PluginStatus) -> PluginDetail {
+        PluginDetail {
+            summary: PluginSummary {
+                id: 1,
+                plugin_id: plugin_id.to_string(),
+                name: "Plugin".to_string(),
+                current_version: Some("1.0.0".to_string()),
+                status,
+                runtime: "extensionHost".to_string(),
+                permission_risk: PluginPermissionRisk::Low,
+                update_available: false,
+                last_error: None,
+                created_at: 10,
+                updated_at: 20,
+            },
+            manifest: PluginManifest {
+                id: plugin_id.to_string(),
+                name: "Plugin".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0.0".to_string(),
+                runtime: PluginRuntime::ExtensionHost {
+                    language: "javascript".to_string(),
+                },
+                hooks: Vec::new(),
+                permissions: Vec::new(),
+                main: None,
+                activation_events: Vec::new(),
+                contributes: None,
+                capabilities: Vec::new(),
+                host_compatibility: PluginHostCompatibility {
+                    app: ">=0.56.0 <1.0.0".to_string(),
+                    plugin_api: "^1.0.0".to_string(),
+                    platforms: Vec::new(),
+                },
+                entry: None,
+                config_schema: None,
+                config_version: None,
+                description: None,
+                author: None,
+                homepage: None,
+                repository: None,
+                license: None,
+                checksum: None,
+                signature: None,
+                category: None,
+            },
+            install_source: PluginInstallSource::Local,
+            installed_dir: None,
+            config: serde_json::json!({}),
+            granted_permissions: Vec::new(),
+            pending_permissions: Vec::new(),
+            audit_logs: Vec::<PluginAuditLog>::new(),
+            runtime_failures: Vec::<PluginRuntimeFailure>::new(),
+            rollback_versions: Vec::new(),
+        }
+    }
+}
