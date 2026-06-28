@@ -25,6 +25,7 @@ import {
   type ProviderOAuthStatusResult,
   type ProviderSummary,
 } from "../../../services/providers/providers";
+import { usePluginActiveContributionsQuery } from "../../../query/plugins";
 import { createTestQueryClient } from "../../../test/utils/reactQuery";
 import type { ProviderEditorInitialValues } from "../providerDuplicate";
 
@@ -32,6 +33,13 @@ vi.mock("sonner", () => ({ toast: vi.fn() }));
 vi.mock("../../../services/consoleLog", () => ({ logToConsole: vi.fn() }));
 vi.mock("../../../services/clipboard", () => ({ copyText: vi.fn() }));
 vi.mock("../../../services/desktop/opener", () => ({ openDesktopUrl: vi.fn() }));
+vi.mock("../../../query/plugins", () => ({
+  usePluginActiveContributionsQuery: vi.fn(() => ({
+    data: { ui: [] },
+    isLoading: false,
+    error: null,
+  })),
+}));
 
 vi.mock("../../../services/providers/providers", async () => {
   const actual = await vi.importActual<typeof import("../../../services/providers/providers")>(
@@ -195,6 +203,11 @@ describe("pages/providers/ProviderEditorDialog", () => {
     vi.mocked(openDesktopUrl).mockReset();
     vi.mocked(logToConsole).mockReset();
     vi.mocked(toast).mockReset();
+    vi.mocked(usePluginActiveContributionsQuery).mockReturnValue({
+      data: { ui: [] },
+      isLoading: false,
+      error: null,
+    } as any);
   });
 
   it("validates create form and saves provider", async () => {
@@ -355,6 +368,79 @@ describe("pages/providers/ProviderEditorDialog", () => {
         })
       )
     );
+  });
+
+  it("saves provider extension values from active editor contributions", async () => {
+    vi.mocked(usePluginActiveContributionsQuery).mockReturnValue({
+      data: {
+        ui: [
+          {
+            pluginId: "acme.openrouter",
+            contributionId: "openrouter-routing",
+            slotId: "providers.editor.sections",
+            title: "OpenRouter 路由",
+            order: 10,
+            schema: {
+              type: "section",
+              fields: [
+                {
+                  type: "text",
+                  key: "route",
+                  label: "路由策略",
+                  placeholder: "quality",
+                },
+              ],
+            },
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+    } as any);
+    vi.mocked(providerUpsert).mockResolvedValue(
+      makeProvider({
+        id: 4,
+        cli_key: "claude",
+        name: "OpenRouter",
+        extension_values: [
+          {
+            pluginId: "acme.openrouter",
+            namespace: "openrouter",
+            values: { route: "quality" },
+            updatedAt: 0,
+          },
+        ],
+      })
+    );
+
+    render(
+      <ProviderEditorDialog
+        mode="create"
+        open={true}
+        cliKey="claude"
+        onSaved={vi.fn()}
+        onOpenChange={vi.fn()}
+      />
+    );
+
+    const dialog = within(screen.getByRole("dialog"));
+    fireEvent.change(dialog.getByPlaceholderText("default"), {
+      target: { value: "OpenRouter" },
+    });
+    fireEvent.change(dialog.getByPlaceholderText("sk-…"), { target: { value: "sk-test" } });
+    fireEvent.change(dialog.getByPlaceholderText(/中转 endpoint/), {
+      target: { value: "https://example.com/v1" },
+    });
+    fireEvent.change(dialog.getByLabelText("路由策略"), { target: { value: "quality" } });
+
+    fireEvent.click(dialog.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(vi.mocked(providerUpsert)).toHaveBeenCalledTimes(1));
+    const allCalls = vi.mocked(providerUpsert).mock.calls;
+    const lastCall = allCalls[allCalls.length - 1]?.[0];
+    expect(lastCall?.extensionValues).toEqual([
+      { pluginId: "acme.openrouter", namespace: "openrouter", values: { route: "quality" } },
+    ]);
   });
 
   it("clears existing stream idle timeout override when input is emptied", async () => {
