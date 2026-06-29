@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::plugins::PluginHook;
 
@@ -56,9 +56,30 @@ pub struct PluginContributes {
     #[serde(rename = "gatewayRules")]
     #[serde(default, skip_serializing)]
     #[specta(skip)]
-    pub(crate) unsupported_gateway_rules: Option<serde_json::Value>,
+    pub(crate) unsupported_gateway_rules: UnsupportedGatewayRulesPresence,
     #[serde(default)]
     pub ui: BTreeMap<String, Vec<UiContribution>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct UnsupportedGatewayRulesPresence {
+    present: bool,
+}
+
+impl UnsupportedGatewayRulesPresence {
+    pub(crate) fn is_present(&self) -> bool {
+        self.present
+    }
+}
+
+impl<'de> Deserialize<'de> for UnsupportedGatewayRulesPresence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let _ = serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(Self { present: true })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq, Eq)]

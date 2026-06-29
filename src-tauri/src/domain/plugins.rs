@@ -733,7 +733,7 @@ fn validate_contributes(
         return Ok(());
     };
 
-    if contributes.unsupported_gateway_rules.is_some() {
+    if contributes.unsupported_gateway_rules.is_present() {
         return Err(PluginValidationError::new(
             "PLUGIN_INVALID_CONTRIBUTION",
             "gatewayRules are no longer supported; use gatewayHooks",
@@ -1394,6 +1394,7 @@ mod tests {
             serde_json::json!([]),
             serde_json::json!({}),
             serde_json::json!("bad"),
+            serde_json::json!(null),
         ] {
             let mut raw = valid_extension_host_manifest();
             raw["contributes"] = serde_json::json!({ "gatewayRules": gateway_rules });
