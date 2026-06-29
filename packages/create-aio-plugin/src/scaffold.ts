@@ -1,8 +1,8 @@
-import type { PluginManifest } from "@aio-coding-hub/plugin-sdk";
+import type { GatewayHookName, PluginManifest } from "@aio-coding-hub/plugin-sdk";
 
 export type ScaffoldTemplate =
+  | "command"
   | "rule"
-  | "wasm"
   | "example:prompt-helper"
   | "example:redactor"
   | "example:response-guard";
@@ -20,87 +20,53 @@ export function createPluginScaffold(input: ScaffoldInput): ScaffoldFiles {
   const name = normalizeName(input.name);
 
   switch (input.template) {
-    case "wasm":
-      return wasmTemplate(id, name);
     case "example:prompt-helper":
       return promptHelperExampleTemplate(id, name);
     case "example:redactor":
       return redactorExampleTemplate(id, name);
     case "example:response-guard":
       return responseGuardExampleTemplate(id, name);
+    case "command":
     case "rule":
     default:
-      return ruleTemplate(id, name);
+      return commandTemplate(id, name);
   }
 }
 
-function ruleTemplate(id: string, name: string): ScaffoldFiles {
-  const manifest: PluginManifest = {
-    id,
-    name,
-    version: "0.1.0",
-    apiVersion: "1.0.0",
-    runtime: { kind: "declarativeRules", rules: ["rules/main.json"] },
-    hooks: [{ name: "gateway.request.afterBodyRead", priority: 100 }],
-    permissions: ["request.body.read", "request.body.write"],
-    hostCompatibility: { app: ">=0.56.0 <1.0.0", pluginApi: "^1.0.0" },
-    description: "Declarative rule plugin scaffold.",
-  };
-
-  return {
-    "plugin.json": `${JSON.stringify(manifest, null, 2)}\n`,
-    "rules/main.json": `${JSON.stringify(
+function commandTemplate(id: string, name: string): ScaffoldFiles {
+  const command = `${id}.hello`;
+  const manifest = baseManifest(id, name, "Extension Host command plugin scaffold.");
+  manifest.activationEvents = [`onCommand:${command}`];
+  manifest.contributes = {
+    commands: [
       {
-        rules: [
-          {
-            id: "redact-placeholder",
-            hook: "gateway.request.afterBodyRead",
-            target: { field: "request.body", jsonPath: "$.messages[*].content" },
-            match: { regex: "SECRET_[A-Za-z0-9_]+", caseSensitive: true },
-            action: { kind: "replace", replacement: "[REDACTED]" },
-          },
-        ],
+        command,
+        title: `Hello from ${name}`,
       },
-      null,
-      2
-    )}\n`,
-    "README.md": `# ${name}\n\nPlugin ID: \`${id}\`.\n\nThis scaffold uses declarative rules and does not execute JavaScript in the host.\n`,
+    ],
   };
-}
-
-function wasmTemplate(id: string, name: string): ScaffoldFiles {
-  const manifest: PluginManifest = {
-    id,
-    name,
-    version: "0.1.0",
-    apiVersion: "1.0.0",
-    runtime: { kind: "wasm", abiVersion: "1.0.0", memoryLimitBytes: 16 * 1024 * 1024 },
-    hooks: [{ name: "gateway.request.afterBodyRead", priority: 100 }],
-    permissions: ["request.meta.read"],
-    hostCompatibility: { app: ">=0.56.0 <1.0.0", pluginApi: "^1.0.0" },
-    entry: "plugin.wasm",
-    description: "Experimental WASM plugin scaffold.",
-  };
+  manifest.capabilities = ["commands.execute"];
 
   return {
-    "plugin.json": `${JSON.stringify(manifest, null, 2)}\n`,
-    "src/lib.rs": `#[no_mangle]\npub extern "C" fn aio_plugin_handle(_ptr: i32, _len: i32) -> i64 {\n    0\n}\n`,
-    "README.md": `# ${name}\n\nPlugin ID: \`${id}\`.\n\nThis template packages a WASM artifact and validates the ABI, but gateway execution remains policy-gated. The host rejects enablement with PLUGIN_RUNTIME_DISABLED until WASM execution is enabled by host policy.\n`,
+    "plugin.json": jsonFile(manifest),
+    "dist/extension.js": commandExtensionSource(command, name),
+    "README.md": readme(
+      name,
+      id,
+      "This scaffold registers one Extension Host command.",
+      ["create-aio-plugin validate --strict .", "create-aio-plugin pack ."]
+    ),
   };
 }
 
 function promptHelperExampleTemplate(id: string, name: string): ScaffoldFiles {
-  const manifest: PluginManifest = {
+  const hook: GatewayHookName = "gateway.request.afterBodyRead";
+  const manifest = gatewayHookManifest(
     id,
     name,
-    version: "0.1.0",
-    apiVersion: "1.0.0",
-    runtime: { kind: "declarativeRules", rules: ["rules/main.json"] },
-    hooks: [{ name: "gateway.request.afterBodyRead", priority: 100 }],
-    permissions: ["request.body.read", "request.body.write"],
-    hostCompatibility: { app: ">=0.56.0 <1.0.0", pluginApi: "^1.0.0" },
-    description: "Prompt helper example for request body policy hints.",
-  };
+    "Prompt helper example for request body policy hints.",
+    [hook]
+  );
   const claudeRequestBody = JSON.stringify(
     {
       model: "claude-3-5-sonnet",
@@ -130,31 +96,25 @@ function promptHelperExampleTemplate(id: string, name: string): ScaffoldFiles {
 
   return {
     "plugin.json": jsonFile(manifest),
-    "rules/main.json": jsonFile({
-      rules: [
-        {
-          id: "prompt-helper-claude",
-          hook: "gateway.request.afterBodyRead",
-          target: { field: "request.body" },
-          match: { regex: "claude-[A-Za-z0-9.-]+", caseSensitive: false },
-          action: {
-            kind: "appendMessage",
-            role: "system",
-            content: "Keep answers concise and call out assumptions explicitly.",
-          },
-        },
-        {
-          id: "prompt-helper-codex",
-          hook: "gateway.request.afterBodyRead",
-          target: { field: "request.body", jsonPath: "$.input[*].content[*].text" },
-          match: { regex: "CODEX_PROMPT_HELPER" },
-          action: {
-            kind: "replace",
-            replacement: "Keep answers concise",
-          },
-        },
-      ],
-    }),
+    "dist/extension.js": `module.exports.activate = function(api) {
+  api.gateway.registerHook("${hook}", function(context) {
+    const body = String(context && context.request && context.request.body || "");
+    if (body.includes("CODEX_PROMPT_HELPER")) {
+      return {
+        action: "replace",
+        requestBody: body.replace(/CODEX_PROMPT_HELPER:?\\s*/g, "Keep answers concise. ")
+      };
+    }
+    if (/claude-[A-Za-z0-9.-]+/i.test(body)) {
+      return {
+        action: "warn",
+        message: "Prompt helper matched a Claude request."
+      };
+    }
+    return { action: "continue" };
+  });
+};
+`,
     "fixtures/claude-request.json": jsonFile({
       request: { body: claudeRequestBody },
     }),
@@ -164,54 +124,45 @@ function promptHelperExampleTemplate(id: string, name: string): ScaffoldFiles {
     "README.md": exampleReadme(
       name,
       id,
-      "Adds lightweight prompt guidance to supported request bodies before the gateway sends them upstream.",
-      [
-        "create-aio-plugin validate --strict .",
-        "create-aio-plugin replay --explain . fixtures/claude-request.json gateway.request.afterBodyRead",
-        "create-aio-plugin replay --explain . fixtures/codex-request.json gateway.request.afterBodyRead",
-        "create-aio-plugin pack .",
-        "create-aio-plugin publish-check .",
-      ]
+      "Adds lightweight prompt guidance to supported request bodies before the gateway sends them upstream."
     ),
   };
 }
 
 function redactorExampleTemplate(id: string, name: string): ScaffoldFiles {
-  const manifest: PluginManifest = {
+  const requestHook: GatewayHookName = "gateway.request.beforeSend";
+  const logHook: GatewayHookName = "log.beforePersist";
+  const manifest = gatewayHookManifest(
     id,
     name,
-    version: "0.1.0",
-    apiVersion: "1.0.0",
-    runtime: { kind: "declarativeRules", rules: ["rules/main.json"] },
-    hooks: [
-      { name: "gateway.request.beforeSend", priority: 100 },
-      { name: "log.beforePersist", priority: 100 },
-    ],
-    permissions: ["request.body.read", "request.body.write", "log.redact"],
-    hostCompatibility: { app: ">=0.56.0 <1.0.0", pluginApi: "^1.0.0" },
-    description: "Redactor example for request bodies and log messages.",
-  };
+    "Redactor example for request bodies and log messages.",
+    [requestHook, logHook]
+  );
 
   return {
     "plugin.json": jsonFile(manifest),
-    "rules/main.json": jsonFile({
-      rules: [
-        {
-          id: "redact-request-secrets",
-          hook: "gateway.request.beforeSend",
-          target: { field: "request.body" },
-          match: { regex: "(api_key|token|password)=[A-Za-z0-9_-]+", caseSensitive: false },
-          action: { kind: "replace", replacement: "[REDACTED]" },
-        },
-        {
-          id: "redact-log-secrets",
-          hook: "log.beforePersist",
-          target: { field: "log.message" },
-          match: { regex: "(api_key|token|password)=[A-Za-z0-9_-]+", caseSensitive: false },
-          action: { kind: "replace", replacement: "[REDACTED]" },
-        },
-      ],
-    }),
+    "dist/extension.js": `const secretPattern = /(api_key|token|password)=[A-Za-z0-9_-]+/gi;
+
+module.exports.activate = function(api) {
+  api.gateway.registerHook("${requestHook}", function(context) {
+    const body = String(context && context.request && context.request.body || "");
+    const redacted = body.replace(secretPattern, "[REDACTED]");
+    if (redacted !== body) {
+      return { action: "replace", requestBody: redacted };
+    }
+    return { action: "continue" };
+  });
+
+  api.gateway.registerHook("${logHook}", function(context) {
+    const message = String(context && context.log && context.log.message || "");
+    const redacted = message.replace(secretPattern, "[REDACTED]");
+    if (redacted !== message) {
+      return { action: "replace", logMessage: redacted };
+    }
+    return { action: "continue" };
+  });
+};
+`,
     "fixtures/request-hit.json": jsonFile({
       request: { body: "POST /v1/chat api_key=sk_live_12345 payload=hello" },
     }),
@@ -224,47 +175,37 @@ function redactorExampleTemplate(id: string, name: string): ScaffoldFiles {
     "README.md": exampleReadme(
       name,
       id,
-      "Redacts simple secret-shaped values from request bodies and log messages with Plugin API v1 declarative rules.",
-      [
-        "create-aio-plugin validate --strict .",
-        "create-aio-plugin replay --explain . fixtures/request-hit.json gateway.request.beforeSend",
-        "create-aio-plugin replay --explain . fixtures/log-redact.json log.beforePersist",
-        "create-aio-plugin pack .",
-        "create-aio-plugin publish-check .",
-      ]
+      "Redacts simple secret-shaped values from request bodies and log messages."
     ),
   };
 }
 
 function responseGuardExampleTemplate(id: string, name: string): ScaffoldFiles {
-  const manifest: PluginManifest = {
+  const hook: GatewayHookName = "gateway.response.after";
+  const manifest = gatewayHookManifest(
     id,
     name,
-    version: "0.1.0",
-    apiVersion: "1.0.0",
-    runtime: { kind: "declarativeRules", rules: ["rules/main.json"] },
-    hooks: [{ name: "gateway.response.after", priority: 100 }],
-    permissions: ["response.body.read", "response.body.write"],
-    hostCompatibility: { app: ">=0.56.0 <1.0.0", pluginApi: "^1.0.0" },
-    description: "Response guard example for review markers in provider output.",
-  };
+    "Response guard example for review markers in provider output.",
+    [hook]
+  );
 
   return {
     "plugin.json": jsonFile(manifest),
-    "rules/main.json": jsonFile({
-      rules: [
-        {
-          id: "response-guard-review-marker",
-          hook: "gateway.response.after",
-          target: { field: "response.body" },
-          match: { regex: "(delete production|rm -rf|drop database)", caseSensitive: false },
-          action: {
-            kind: "replace",
-            replacement: "[REVIEW_REQUIRED]",
-          },
-        },
-      ],
-    }),
+    "dist/extension.js": `const riskyPattern = /(delete production|rm -rf|drop database)/i;
+
+module.exports.activate = function(api) {
+  api.gateway.registerHook("${hook}", function(context) {
+    const body = String(context && context.response && context.response.body || "");
+    if (riskyPattern.test(body)) {
+      return {
+        action: "replace",
+        responseBody: body.replace(riskyPattern, "[REVIEW_REQUIRED]")
+      };
+    }
+    return { action: "continue" };
+  });
+};
+`,
     "fixtures/response-warn.json": jsonFile({
       response: { body: "The suggested next step is to run rm -rf /tmp/cache." },
     }),
@@ -274,23 +215,67 @@ function responseGuardExampleTemplate(id: string, name: string): ScaffoldFiles {
     "README.md": exampleReadme(
       name,
       id,
-      "Marks risky response text for review after the gateway receives the provider response.",
-      [
-        "create-aio-plugin validate --strict .",
-        "create-aio-plugin replay --explain . fixtures/response-warn.json gateway.response.after",
-        "create-aio-plugin replay --explain . fixtures/response-pass.json gateway.response.after",
-        "create-aio-plugin pack .",
-        "create-aio-plugin publish-check .",
-      ]
+      "Marks risky response text for review after the gateway receives the provider response."
     ),
   };
+}
+
+function baseManifest(id: string, name: string, description: string): PluginManifest {
+  return {
+    id,
+    name,
+    version: "0.1.0",
+    apiVersion: "1.0.0",
+    main: "dist/extension.js",
+    runtime: { kind: "extensionHost", language: "typescript" },
+    capabilities: [],
+    hostCompatibility: { app: ">=0.62.0 <1.0.0", pluginApi: "^1.0.0" },
+    description,
+  };
+}
+
+function gatewayHookManifest(
+  id: string,
+  name: string,
+  description: string,
+  hooks: readonly GatewayHookName[]
+): PluginManifest {
+  return {
+    ...baseManifest(id, name, description),
+    activationEvents: hooks.map((hook) => `onGatewayHook:${hook}` as const),
+    contributes: {
+      gatewayHooks: hooks.map((hook) => ({ name: hook, priority: 100 })),
+    },
+    capabilities: ["gateway.hooks"],
+  };
+}
+
+function commandExtensionSource(command: string, name: string): string {
+  return `module.exports.activate = function(api) {
+  api.commands.registerCommand("${command}", function(args) {
+    return {
+      ok: true,
+      message: "Hello from ${escapeJavaScriptString(name)}",
+      args: args || null
+    };
+  });
+};
+`;
 }
 
 function jsonFile(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
-function exampleReadme(
+function exampleReadme(name: string, id: string, summary: string): string {
+  return readme(name, id, summary, [
+    "create-aio-plugin validate --strict .",
+    "create-aio-plugin pack .",
+    "create-aio-plugin publish-check .",
+  ]);
+}
+
+function readme(
   name: string,
   id: string,
   summary: string,
@@ -303,9 +288,7 @@ Plugin ID: \`${id}\`.
 
 ${summary}
 
-This example is a development template, not a default installable marketplace package.
-
-It uses Plugin API v1 declarative rules only and does not need JavaScript, WebView, file, network, secret, or plugin storage permissions.
+This scaffold is a development template, not a default installable marketplace package.
 
 ## Try it
 
@@ -327,4 +310,8 @@ function normalizeName(value: string): string {
     throw new Error("PLUGIN_INVALID_NAME: plugin name is required");
   }
   return name;
+}
+
+function escapeJavaScriptString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }

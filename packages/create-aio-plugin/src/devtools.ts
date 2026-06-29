@@ -12,13 +12,6 @@ import type { GatewayHookName, PluginManifest, ValidationResult } from "@aio-cod
 import { validateManifest } from "@aio-coding-hub/plugin-sdk";
 import { createPluginScaffold, type ScaffoldFiles, type ScaffoldTemplate } from "./scaffold";
 
-type ActivePermission = Exclude<
-  NonNullable<PluginManifest["permissions"]>[number],
-  "plugin.storage" | "network.fetch" | "file.read" | "file.write" | "secret.read"
->;
-type DeclarativeRuleMutationField = "requestBody" | "responseBody" | "streamChunk" | "logMessage";
-type ActiveMutationField = DeclarativeRuleMutationField | "headers";
-
 export type PackedPlugin = {
   bytes: Uint8Array;
   checksum: string;
@@ -61,35 +54,7 @@ export type StrictValidationResult =
   | { ok: true; diagnostics: PluginDiagnostic[] }
   | { ok: false; error: { code: string; message: string }; diagnostics: PluginDiagnostic[] };
 
-export type ReplayMutationSummary =
-  | { changed: false }
-  | {
-      changed: true;
-      field: DeclarativeRuleMutationField;
-      targetField: string;
-      jsonPath?: string;
-    };
-
-export type ReplayExplainResult = {
-  pluginId: string;
-  runtime: PluginManifest["runtime"]["kind"];
-  hook: GatewayHookName;
-  evaluatedRuleCount: number;
-  matchedRuleIds: string[];
-  actionKind: ReplayRuleResult["action"];
-  outputKind: ReplayRuleResult["action"];
-  mutationSummary: ReplayMutationSummary;
-  warnings: PluginDiagnostic[];
-  result: ReplayRuleResult;
-};
-
-export type ReplayRuleTrace = {
-  ruleId?: string;
-  result: ReplayRuleResult;
-  targetField?: string;
-  jsonPath?: string;
-  warning?: PluginDiagnostic;
-};
+export type ReplayExplainResult = never;
 
 export type PublishCheckResult = {
   ok: boolean;
@@ -102,7 +67,7 @@ export type PublishCheckResult = {
   name: string;
   version: string;
   runtime: PluginManifest["runtime"]["kind"];
-  permissions: string[];
+  capabilities: string[];
   hooks: string[];
   hostCompatibility: PluginManifest["hostCompatibility"];
   sizeBytes: number;
@@ -112,60 +77,17 @@ type DoctorOptions = {
   strict?: boolean;
 };
 
-const PLUGIN_API_V1_ACTIVE_PERMISSIONS: readonly ActivePermission[] = [
-  "request.meta.read",
-  "request.header.read",
-  "request.header.readSensitive",
-  "request.header.write",
-  "request.body.read",
-  "request.body.write",
-  "response.header.read",
-  "response.header.write",
-  "response.body.read",
-  "response.body.write",
-  "stream.inspect",
-  "stream.modify",
-  "log.redact",
+const SUPPORTED_TEMPLATES: readonly ScaffoldTemplate[] = [
+  "command",
+  "rule",
+  "example:prompt-helper",
+  "example:redactor",
+  "example:response-guard",
 ];
-const PLUGIN_API_V1_ACTIVE_MUTATION_FIELDS: readonly ActiveMutationField[] = [
-  "requestBody",
-  "responseBody",
-  "streamChunk",
-  "logMessage",
-  "headers",
-];
-const PLUGIN_API_V1_ACTIVE_PERMISSION_SET = new Set<ActivePermission>(
-  PLUGIN_API_V1_ACTIVE_PERMISSIONS
-);
-const PLUGIN_API_V1_ACTIVE_MUTATION_FIELD_SET = new Set<ActiveMutationField>(
-  PLUGIN_API_V1_ACTIVE_MUTATION_FIELDS
-);
-const DECLARATIVE_RULE_TARGETS = declarativeRuleTargets({
-  "request.body": {
-    mutationField: "requestBody",
-    read: "request.body.read",
-    write: "request.body.write",
-  },
-  "response.body": {
-    mutationField: "responseBody",
-    read: "response.body.read",
-    write: "response.body.write",
-  },
-  "stream.chunk": {
-    mutationField: "streamChunk",
-    read: "stream.inspect",
-    write: "stream.modify",
-  },
-  "log.message": {
-    mutationField: "logMessage",
-    read: "log.redact",
-  },
-} as const);
-type DeclarativeRuleTargetField = keyof typeof DECLARATIVE_RULE_TARGETS;
-
+const UNSUPPORTED_PUBLIC_TEMPLATES = new Set(["wasm", "process", "native"]);
 const USAGE = [
   "Usage:",
-  "  create-aio-plugin <publisher.plugin-name> [rule|wasm]",
+  "  create-aio-plugin <publisher.plugin-name> [command|example:prompt-helper|example:redactor|example:response-guard]",
   "  create-aio-plugin doctor <plugin-dir>",
   "  create-aio-plugin validate [--strict] <plugin-dir>",
   "  create-aio-plugin replay [--explain] <plugin-dir> <fixture.json> <hook>",
@@ -212,8 +134,14 @@ export function runCreateAioPluginCli(args: string[], cwd: string, io: CliIo = c
         io.error(text);
         return 1;
       }
-      io.log(JSON.stringify(validatePluginDirectory(root)));
-      return 0;
+      const result = validatePluginDirectory(root);
+      const text = JSON.stringify(result);
+      if (result.ok) {
+        io.log(text);
+        return 0;
+      }
+      io.error(text);
+      return 1;
     } catch (error) {
       io.error(`failed to validate plugin directory: ${errorMessage(error)}`);
       return 1;
@@ -231,14 +159,12 @@ export function runCreateAioPluginCli(args: string[], cwd: string, io: CliIo = c
     }
     try {
       const files = readPluginDirectory(resolve(cwd, pluginDir));
-      const fixture = JSON.parse(readFileSync(resolve(cwd, fixturePath), "utf8")) as unknown;
-      io.log(
-        JSON.stringify(
-          explain
-            ? replayHookExplain(files, hookName as GatewayHookName, fixture)
-            : replayHook(files, hookName as GatewayHookName, fixture)
-        )
-      );
+      JSON.parse(readFileSync(resolve(cwd, fixturePath), "utf8")) as unknown;
+      if (explain) {
+        replayHookExplain(files, hookName as GatewayHookName, {});
+      } else {
+        replayHook(files, hookName as GatewayHookName, {});
+      }
       return 0;
     } catch (error) {
       io.error(`failed to replay plugin hook: ${errorMessage(error)}`);
@@ -250,9 +176,7 @@ export function runCreateAioPluginCli(args: string[], cwd: string, io: CliIo = c
     try {
       const root = resolve(cwd, firstArg ?? ".");
       const files = readPluginDirectoryBytes(root);
-      const manifest = JSON.parse(
-        textFromBytes(files["plugin.json"]) ?? "{}"
-      ) as Partial<PluginManifest>;
+      const manifest = parseManifestText(textFromBytes(files["plugin.json"]) ?? "{}");
       const packed = packPluginBytes(files);
       const outputPath = join(cwd, `${manifest.id ?? firstArg ?? "plugin"}.aio-plugin`);
       writeFileSync(outputPath, packed.bytes);
@@ -275,7 +199,7 @@ export function runCreateAioPluginCli(args: string[], cwd: string, io: CliIo = c
       const root = resolve(cwd, firstArg ?? ".");
       const files = readPluginDirectoryBytes(root);
       const manifestText = textFromBytes(files["plugin.json"]) ?? "{}";
-      const manifest = JSON.parse(manifestText) as Partial<PluginManifest>;
+      const manifest = parseManifestText(manifestText);
       const packed = packPluginBytes(files);
       io.log(
         JSON.stringify({
@@ -312,12 +236,23 @@ export function runCreateAioPluginCli(args: string[], cwd: string, io: CliIo = c
     return 0;
   }
 
+  const templateArg = firstArg ?? "command";
+  if (UNSUPPORTED_PUBLIC_TEMPLATES.has(templateArg)) {
+    io.error(
+      `PLUGIN_TEMPLATE_UNSUPPORTED: ${templateArg} templates are not supported. Use the Extension Host command template or an Extension Host example.`
+    );
+    return 1;
+  }
+  if (!isScaffoldTemplate(templateArg)) {
+    io.error(`PLUGIN_TEMPLATE_UNKNOWN: unknown Extension Host template: ${templateArg}\n${USAGE}`);
+    return 1;
+  }
+
   const idArg = commandOrId;
-  const template = (firstArg ?? "rule") as ScaffoldTemplate;
   const files = createPluginScaffold({
     id: idArg,
     name: titleFromId(idArg),
-    template,
+    template: templateArg,
   });
 
   for (const [path, content] of Object.entries(files)) {
@@ -386,7 +321,7 @@ export function doctorPluginDirectory(root: string, options: DoctorOptions = {})
   return doctorPluginFiles(readPluginDirectory(root), options);
 }
 
-export function doctorPluginFiles(files: ScaffoldFiles, options: DoctorOptions = {}): DoctorResult {
+export function doctorPluginFiles(files: ScaffoldFiles, _options: DoctorOptions = {}): DoctorResult {
   const diagnostics: PluginDiagnostic[] = [];
   const manifestText = files["plugin.json"];
 
@@ -396,12 +331,12 @@ export function doctorPluginFiles(files: ScaffoldFiles, options: DoctorOptions =
       code: "PLUGIN_MISSING_MANIFEST",
       message: "missing plugin.json",
       path: "plugin.json",
-      hint: "Run create-aio-plugin <publisher.plugin-name> rule or add a Plugin API v1 manifest.",
+      hint: "Run create-aio-plugin <publisher.plugin-name> or add an Extension Host manifest.",
     });
     return { ok: false, diagnostics };
   }
 
-  let manifest: PluginManifest;
+  let manifest: Partial<PluginManifest>;
   try {
     const parsed = JSON.parse(manifestText) as unknown;
     if (!asRecord(parsed)) {
@@ -414,98 +349,48 @@ export function doctorPluginFiles(files: ScaffoldFiles, options: DoctorOptions =
       });
       return { ok: false, diagnostics };
     }
-    manifest = parsed as PluginManifest;
+    manifest = parsed as Partial<PluginManifest>;
   } catch (error) {
     diagnostics.push({
       severity: "error",
       code: "PLUGIN_INVALID_MANIFEST_JSON",
       message: `plugin.json is not valid JSON: ${errorMessage(error)}`,
       path: "plugin.json",
-      hint: "Fix plugin.json before running validate, replay, or pack.",
+      hint: "Fix plugin.json before running validate, pack, or publish-check.",
     });
     return { ok: false, diagnostics };
   }
 
-  diagnostics.push(...manifestShapeDiagnostics(manifest));
-
-  let validation: ValidationResult;
-  try {
-    validation = validateManifest(manifest);
-  } catch (error) {
-    validation = {
-      ok: false,
-      error: {
-        code: "PLUGIN_INVALID_MANIFEST",
-        message: errorMessage(error),
-      },
-    };
+  const legacyRuntime = unsupportedLegacyRuntimeDiagnostic(manifest);
+  if (legacyRuntime) {
+    diagnostics.push(legacyRuntime);
+    return { ok: false, diagnostics };
   }
+
+  const validation = safelyValidateManifest(manifest);
   if (!validation.ok) {
     diagnostics.push({
       severity: "error",
       code: validation.error.code,
       message: validation.error.message,
       path: "plugin.json",
-      hint: "Update the manifest so it matches Plugin API v1.",
+      hint: "Update the manifest so it matches Plugin API v1 Extension Host shape.",
     });
   }
 
-  const runtimeKind = manifestRuntimeKind(manifest);
-  const runtime = manifest.runtime;
-  if (!runtimeKind) {
-    diagnostics.push(runtimeShapeDiagnostic(manifest));
-  }
-
-  if (runtimeKind === "declarativeRules" && runtime.kind === "declarativeRules") {
-    for (const rulePath of runtime.rules) {
-      if (!hasPluginFile(files, rulePath)) {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_RULE_FILE_MISSING",
-          message: `declarative rule file is missing: ${rulePath}`,
-          path: rulePath,
-          hint: "Add the rule file or remove it from runtime.rules.",
-        });
-      }
-    }
-  }
-
-  if (runtimeKind === "wasm") {
-    const entry = typeof manifest.entry === "string" ? manifest.entry : "plugin.wasm";
-    if (!hasPluginFile(files, entry)) {
-      diagnostics.push({
-        severity: "error",
-        code: "PLUGIN_WASM_ENTRY_MISSING",
-        message: `wasm entry file is missing: ${entry}`,
-        path: entry,
-        hint: "Build the WASM artifact before packing the plugin.",
-      });
-    }
-    diagnostics.push({
-      severity: "warn",
-      code: "PLUGIN_WASM_POLICY_GATED",
-      message: "WASM runtime remains policy-gated by the host.",
-      hint: "Do not rely on marketplace WASM execution unless host policy enables it.",
-    });
-  }
-
-  if (runtimeKind === "extensionHost" && typeof manifest.main === "string") {
+  if (isExtensionHostManifest(manifest) && typeof manifest.main === "string") {
     if (!hasPluginFile(files, manifest.main)) {
       diagnostics.push({
         severity: "error",
         code: "PLUGIN_MAIN_FILE_MISSING",
         message: `extension host main file is missing: ${manifest.main}`,
         path: manifest.main,
-        hint: "Build the extension host entry before packing the plugin.",
+        hint: "Build or include dist/extension.js before packing the plugin.",
       });
     }
   }
 
-  if (options.strict) {
-    diagnostics.push(...strictRuleDiagnostics(files, manifest));
-  }
-
-  const manifestSummary = doctorManifestSummary(manifest, runtimeKind);
+  const manifestSummary = doctorManifestSummary(manifest, manifestRuntimeKind(manifest));
 
   return {
     ok: !hasErrorDiagnostics(diagnostics),
@@ -518,979 +403,24 @@ export function packPluginDirectory(root: string): PackedPlugin {
   return packPluginBytes(readPluginDirectoryBytes(root));
 }
 
-function hasErrorDiagnostics(diagnostics: readonly PluginDiagnostic[]): boolean {
-  return diagnostics.some((diagnostic) => diagnostic.severity === "error");
-}
-
-function hasPluginFile(files: ScaffoldFiles, path: string): boolean {
-  return Object.prototype.hasOwnProperty.call(files, path);
-}
-
-const RULE_TARGET_FIELDS_BY_HOOK: Record<string, readonly DeclarativeRuleTargetField[]> = {
-  "gateway.request.afterBodyRead": ["request.body"],
-  "gateway.request.beforeSend": ["request.body"],
-  "gateway.response.after": ["response.body"],
-  "gateway.response.chunk": ["stream.chunk"],
-  "gateway.error": ["response.body"],
-  "log.beforePersist": ["log.message"],
-};
-const MAX_RULES_PER_RUNTIME = 256;
-const MAX_RULE_REGEX_PATTERN_BYTES = 4 * 1024;
-
-function strictRuleDiagnostics(files: ScaffoldFiles, manifest: PluginManifest): PluginDiagnostic[] {
-  const runtime = asRecord(manifest.runtime);
-  if (
-    runtime?.kind !== "declarativeRules" ||
-    !Array.isArray(runtime.rules) ||
-    !runtime.rules.every((rulePath) => typeof rulePath === "string")
-  ) {
-    return [];
-  }
-
-  const diagnostics: PluginDiagnostic[] = [];
-  const declaredHooks = new Set<string>(
-    Array.isArray(manifest.hooks)
-      ? manifest.hooks
-          .map((hook) => asRecord(hook)?.name)
-          .filter((name): name is string => typeof name === "string")
-      : []
-  );
-  const grantedPermissions = new Set<string>(
-    Array.isArray(manifest.permissions)
-      ? manifest.permissions.flatMap((permission) =>
-          typeof permission === "string" ? [permission] : []
-        )
-      : []
-  );
-  const ruleDocuments: Array<{ rulePath: string; rules: unknown[] }> = [];
-  let totalRules = 0;
-
-  for (const rulePath of runtime.rules) {
-    if (!hasPluginFile(files, rulePath)) continue;
-    const text = files[rulePath] ?? "";
-
-    let document: Record<string, unknown> | null;
-    try {
-      document = asRecord(JSON.parse(text) as unknown);
-    } catch (error) {
-      diagnostics.push({
-        severity: "error",
-        code: "PLUGIN_RULE_FILE_INVALID_JSON",
-        message: `rule file is not valid JSON: ${errorMessage(error)}`,
-        path: rulePath,
-        hint: "Fix the rule JSON before replaying or packing the plugin.",
-      });
-      continue;
-    }
-
-    if (!document || !Array.isArray(document.rules)) {
-      diagnostics.push({
-        severity: "error",
-        code: "PLUGIN_RULES_MISSING_ARRAY",
-        message: "rule document must contain a rules array",
-        path: `${rulePath}#/rules`,
-        hint: 'Use { "rules": [...] } as the rule document shape.',
-      });
-      continue;
-    }
-
-    totalRules += document.rules.length;
-    if (document.rules.length > MAX_RULES_PER_RUNTIME) {
-      diagnostics.push({
-        severity: "error",
-        code: "PLUGIN_RULE_TOO_MANY_RULES",
-        message: `rule document has more than ${MAX_RULES_PER_RUNTIME} rules`,
-        path: `${rulePath}#/rules`,
-        hint: `Split this rule document or keep it at ${MAX_RULES_PER_RUNTIME} rules or fewer.`,
-      });
-      continue;
-    }
-
-    ruleDocuments.push({ rulePath, rules: document.rules });
-  }
-
-  if (totalRules > MAX_RULES_PER_RUNTIME) {
-    diagnostics.push({
-      severity: "error",
-      code: "PLUGIN_RULE_TOO_MANY_RULES",
-      message: `merged rule documents have more than ${MAX_RULES_PER_RUNTIME} rules`,
-      path: "plugin.json#/runtime/rules",
-      hint: `Keep the combined declarative rule count at ${MAX_RULES_PER_RUNTIME} rules or fewer.`,
-    });
-  }
-
-  for (const { rulePath, rules } of ruleDocuments) {
-    rules.forEach((rawRule, index) => {
-      const rule = asRecord(rawRule);
-      if (!rule) {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_RULE_INVALID",
-          message: "rule entry must be an object",
-          path: `${rulePath}#/rules/${index}`,
-          hint: "Replace the entry with an object containing hook, target, match, and action.",
-        });
-        return;
-      }
-
-      if (typeof rule.id !== "string" || rule.id.length === 0) {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_RULE_ID_MISSING",
-          message: "rule id is required",
-          path: `${rulePath}#/rules/${index}/id`,
-          hint: "Set id to a stable string so host diagnostics can identify this rule.",
-        });
-      }
-
-      const hook = typeof rule.hook === "string" ? rule.hook : "";
-      if (!hook) {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_RULE_HOOK_MISSING",
-          message: "rule hook is required",
-          path: `${rulePath}#/rules/${index}/hook`,
-          hint: "Set hook to one of the hooks declared in plugin.json.",
-        });
-      } else if (!declaredHooks.has(hook)) {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_RULE_HOOK_NOT_DECLARED",
-          message: `rule hook is not declared in plugin.json: ${hook}`,
-          path: `${rulePath}#/rules/${index}/hook`,
-          hint: "Add the hook to manifest.hooks or change the rule hook.",
-        });
-      }
-
-      const target = asRecord(rule.target);
-      if (!target) {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_RULE_TARGET_MISSING",
-          message: "rule target must be an object",
-          path: `${rulePath}#/rules/${index}/target`,
-          hint: "Set target.field to the hook-visible field the rule should inspect.",
-        });
-      }
-      const matcher = asRecord(rule.match);
-      if (!matcher) {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_RULE_MATCHER_MISSING",
-          message: "rule match must be an object",
-          path: `${rulePath}#/rules/${index}/match`,
-          hint: "Set match.regex to the pattern the rule should evaluate.",
-        });
-      } else if (typeof matcher.regex !== "string") {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_RULE_MATCHER_INVALID",
-          message: "rule match.regex must be a string",
-          path: `${rulePath}#/rules/${index}/match/regex`,
-          hint: "Use a Rust regex-compatible string.",
-        });
-      } else {
-        diagnostics.push(...ruleMatcherDiagnostics(matcher, matcher.regex, rulePath, index));
-      }
-      diagnostics.push(...ruleWhenDiagnostics(rule.when, rulePath, index));
-      const action = asRecord(rule.action);
-      if (!action) {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_RULE_ACTION_MISSING",
-          message: "rule action must be an object",
-          path: `${rulePath}#/rules/${index}/action`,
-          hint: "Set action.kind and its required payload.",
-        });
-      }
-      const targetField = typeof target?.field === "string" ? target.field : "";
-      if (target && !targetField) {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_RULE_TARGET_INVALID",
-          message: "rule target.field must be a string",
-          path: `${rulePath}#/rules/${index}/target/field`,
-          hint: "Use a hook-visible target field such as request.body.",
-        });
-      }
-      if (target && typeof target.jsonPath === "string") {
-        diagnostics.push(...ruleJsonPathDiagnostics(target.jsonPath, rulePath, index));
-      } else if (target && "jsonPath" in target) {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_RULE_TARGET_INVALID",
-          message: "rule target.jsonPath must be a string",
-          path: `${rulePath}#/rules/${index}/target/jsonPath`,
-          hint: "Use the host JSONPath subset, for example $.messages[*].content.",
-        });
-      }
-      const actionKind = typeof action?.kind === "string" ? action.kind : "";
-      const actionDiagnostics = ruleActionDiagnostics(action, actionKind, rulePath, index);
-      diagnostics.push(...actionDiagnostics);
-      const allowedFields = RULE_TARGET_FIELDS_BY_HOOK[hook] ?? [];
-      let targetCompatible = true;
-      if (
-        hook &&
-        targetField &&
-        allowedFields.length > 0 &&
-        !allowedFields.some((field) => field === targetField)
-      ) {
-        targetCompatible = false;
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_RULE_TARGET_INCOMPATIBLE_WITH_HOOK",
-          message: `target field ${targetField} is not compatible with hook ${hook}`,
-          path: `${rulePath}#/rules/${index}/target/field`,
-          hint: `Use one of: ${allowedFields.join(", ")}.`,
-        });
-      }
-
-      if (!targetCompatible || !targetField || !action || actionDiagnostics.length > 0) return;
-
-      for (const permission of permissionsForRuleTarget(targetField, actionKind)) {
-        if (!grantedPermissions.has(permission)) {
-          diagnostics.push({
-            severity: "error",
-            code: "PLUGIN_RULE_PERMISSION_MISMATCH",
-            message: `rule targeting ${targetField} with action ${
-              actionKind || "unknown"
-            } requires ${permission}`,
-            path: `${rulePath}#/rules/${index}`,
-            hint: `Add ${permission} to manifest.permissions or change the rule target/action.`,
-          });
-        }
-      }
-    });
-  }
-
-  return diagnostics;
-}
-
-function permissionsForRuleTarget(field: string, actionKind: string): string[] {
-  const mutates = actionKind === "replace" || actionKind === "appendMessage";
-  const target = declarativeRuleTarget(field);
-  if (mutates && "write" in target) return [target.read, target.write];
-  return [target.read];
-}
-
-function declarativeRuleTargets<
-  const Targets extends Record<
-    string,
-    { mutationField: ActiveMutationField; read: ActivePermission; write?: ActivePermission }
-  >,
->(targets: Targets): Targets {
-  for (const [field, target] of Object.entries(targets)) {
-    const writePermission = target.write;
-    if (
-      !PLUGIN_API_V1_ACTIVE_MUTATION_FIELD_SET.has(target.mutationField) ||
-      !PLUGIN_API_V1_ACTIVE_PERMISSION_SET.has(target.read) ||
-      (writePermission !== undefined && !PLUGIN_API_V1_ACTIVE_PERMISSION_SET.has(writePermission))
-    ) {
-      throw new Error(`declarative rule target is not aligned with Plugin API v1: ${field}`);
-    }
-  }
-  return targets;
-}
-
-function declarativeRuleTarget(field: string) {
-  return (
-    DECLARATIVE_RULE_TARGETS[field as DeclarativeRuleTargetField] ??
-    DECLARATIVE_RULE_TARGETS["request.body"]
-  );
-}
-
-function ruleMatcherDiagnostics(
-  matcher: Record<string, unknown>,
-  regex: string,
-  rulePath: string,
-  index: number
-): PluginDiagnostic[] {
-  const diagnostics: PluginDiagnostic[] = [];
-  const path = `${rulePath}#/rules/${index}/match/regex`;
-  if ("caseSensitive" in matcher && typeof matcher.caseSensitive !== "boolean") {
-    diagnostics.push({
-      severity: "error",
-      code: "PLUGIN_RULE_MATCHER_INVALID",
-      message: "rule match.caseSensitive must be a boolean",
-      path: `${rulePath}#/rules/${index}/match/caseSensitive`,
-      hint: "Set caseSensitive to true or false, or omit it.",
-    });
-  }
-  if (new TextEncoder().encode(regex).length > MAX_RULE_REGEX_PATTERN_BYTES) {
-    diagnostics.push({
-      severity: "error",
-      code: "PLUGIN_RULE_MATCHER_INVALID",
-      message: "rule match.regex is too large for the host runtime",
-      path,
-      hint: `Keep regex patterns at ${MAX_RULE_REGEX_PATTERN_BYTES} bytes or fewer.`,
-    });
-    return diagnostics;
-  }
-  if (usesUnsupportedRustRegexSyntax(regex) || hasMalformedRegexSyntax(regex)) {
-    diagnostics.push({
-      severity: "error",
-      code: "PLUGIN_RULE_MATCHER_INVALID",
-      message: "rule match.regex uses unsupported Rust regex syntax",
-      path,
-      hint: "Avoid look-around and backreferences; Plugin API v1 declarative rules use Rust regex syntax.",
-    });
-    return diagnostics;
-  }
-  return diagnostics;
-}
-
-function usesUnsupportedRustRegexSyntax(regex: string): boolean {
-  return (
-    /\\[1-9]/.test(regex) ||
-    /\\k(?:<[^>]+>|'[^']+')/.test(regex) ||
-    /\(\?(?:[=!]|<[=!])/.test(regex)
-  );
-}
-
-function hasMalformedRegexSyntax(regex: string): boolean {
-  let escaped = false;
-  let characterClassOpen = false;
-  let groupDepth = 0;
-  let hasPreviousAtom = false;
-  let previousChar = "";
-
-  for (const char of regex) {
-    if (escaped) {
-      escaped = false;
-      hasPreviousAtom = true;
-      previousChar = char;
-      continue;
-    }
-    if (char === "\\") {
-      escaped = true;
-      previousChar = char;
-      continue;
-    }
-    if (characterClassOpen) {
-      if (char === "]") {
-        characterClassOpen = false;
-        hasPreviousAtom = true;
-      }
-      previousChar = char;
-      continue;
-    }
-    if (char === "[") {
-      characterClassOpen = true;
-      previousChar = char;
-      continue;
-    }
-    if (char === "(") {
-      groupDepth += 1;
-      hasPreviousAtom = false;
-      previousChar = char;
-      continue;
-    }
-    if (char === ")") {
-      if (groupDepth === 0) return true;
-      groupDepth -= 1;
-      hasPreviousAtom = true;
-      previousChar = char;
-      continue;
-    }
-    if (
-      (char === "*" || char === "+" || char === "?") &&
-      !hasPreviousAtom &&
-      (char !== "?" || previousChar !== "(")
-    ) {
-      return true;
-    }
-    if (char === "|") {
-      hasPreviousAtom = false;
-      previousChar = char;
-      continue;
-    }
-    if (char !== "^" && char !== "$" && char !== "|") {
-      hasPreviousAtom = true;
-    }
-    previousChar = char;
-  }
-
-  return escaped || characterClassOpen || groupDepth > 0;
-}
-
-function ruleJsonPathDiagnostics(
-  jsonPath: string,
-  rulePath: string,
-  index: number
-): PluginDiagnostic[] {
-  const path = `${rulePath}#/rules/${index}/target/jsonPath`;
-  if (!jsonPath.startsWith("$")) {
-    return [
-      {
-        severity: "error",
-        code: "PLUGIN_RULE_TARGET_INVALID",
-        message: `JSON path must start with $: ${jsonPath}`,
-        path,
-        hint: "Use the host JSONPath subset, for example $.messages[*].content.",
-      },
-    ];
-  }
-
-  let cursor = 1;
-  while (cursor < jsonPath.length) {
-    const char = jsonPath[cursor];
-    if (char === ".") {
-      const start = cursor + 1;
-      cursor = start;
-      while (cursor < jsonPath.length && jsonPath[cursor] !== "." && jsonPath[cursor] !== "[") {
-        cursor += 1;
-      }
-      if (start === cursor) {
-        return [
-          {
-            severity: "error",
-            code: "PLUGIN_RULE_TARGET_INVALID",
-            message: `empty JSON path segment: ${jsonPath}`,
-            path,
-            hint: "Use non-empty key segments such as $.messages[*].content.",
-          },
-        ];
-      }
-      const key = jsonPath.slice(start, cursor);
-      if (key.includes('"') || key.includes("'")) {
-        return [
-          {
-            severity: "error",
-            code: "PLUGIN_RULE_TARGET_INVALID",
-            message: `quoted JSON path keys are not supported: ${jsonPath}`,
-            path,
-            hint: "Use dot-separated bare keys such as $.messages.",
-          },
-        ];
-      }
-      continue;
-    }
-    if (char === "[") {
-      if (jsonPath.slice(cursor, cursor + 3) !== "[*]") {
-        return [
-          {
-            severity: "error",
-            code: "PLUGIN_RULE_TARGET_INVALID",
-            message: `only [*] array wildcards are supported: ${jsonPath}`,
-            path,
-            hint: "Use [*] instead of numeric indexes or filters.",
-          },
-        ];
-      }
-      cursor += 3;
-      continue;
-    }
-    return [
-      {
-        severity: "error",
-        code: "PLUGIN_RULE_TARGET_INVALID",
-        message: `unsupported JSON path syntax: ${jsonPath}`,
-        path,
-        hint: "Use dot keys and [*] array wildcards only.",
-      },
-    ];
-  }
-
-  return [];
-}
-
-function ruleWhenDiagnostics(when: unknown, rulePath: string, index: number): PluginDiagnostic[] {
-  if (when == null) return [];
-  const path = `${rulePath}#/rules/${index}/when`;
-  const record = asRecord(when);
-  if (!record) {
-    return [
-      {
-        severity: "error",
-        code: "PLUGIN_RULE_WHEN_INVALID",
-        message: "rule when must be an object",
-        path,
-        hint: "Use when.cliKeys, when.models, or when.configEquals.",
-      },
-    ];
-  }
-
-  const diagnostics: PluginDiagnostic[] = [];
-  for (const field of ["cliKeys", "models"] as const) {
-    const value = record[field];
-    if (value == null) continue;
-    if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
-      diagnostics.push({
-        severity: "error",
-        code: "PLUGIN_RULE_WHEN_INVALID",
-        message: `rule when.${field} must be an array of strings`,
-        path: `${path}/${field}`,
-        hint: `Use ${field}: ["value"].`,
-      });
-    }
-  }
-  if (record.configEquals != null && !asRecord(record.configEquals)) {
-    diagnostics.push({
-      severity: "error",
-      code: "PLUGIN_RULE_WHEN_INVALID",
-      message: "rule when.configEquals must be an object",
-      path: `${path}/configEquals`,
-      hint: "Use key-value pairs that should match plugin config.",
-    });
-  }
-  return diagnostics;
-}
-
-function ruleActionDiagnostics(
-  action: Record<string, unknown> | null,
-  actionKind: string,
-  rulePath: string,
-  index: number
-): PluginDiagnostic[] {
-  if (!action) return [];
-  const path = `${rulePath}#/rules/${index}/action`;
-  if (!actionKind) {
-    return [
-      {
-        severity: "error",
-        code: "PLUGIN_RULE_ACTION_INVALID",
-        message: "rule action.kind must be a string",
-        path: `${path}/kind`,
-        hint: "Use replace, block, warn, or appendMessage.",
-      },
-    ];
-  }
-  if (!["replace", "block", "warn", "appendMessage"].includes(actionKind)) {
-    return [
-      {
-        severity: "error",
-        code: "PLUGIN_RULE_ACTION_INVALID",
-        message: `unsupported rule action kind: ${actionKind}`,
-        path: `${path}/kind`,
-        hint: "Use replace, block, warn, or appendMessage.",
-      },
-    ];
-  }
-  if (actionKind === "replace" && typeof action.replacement !== "string") {
-    return [
-      {
-        severity: "error",
-        code: "PLUGIN_RULE_ACTION_INVALID",
-        message: "replace action requires a string replacement",
-        path: `${path}/replacement`,
-        hint: "Set action.replacement to the replacement text.",
-      },
-    ];
-  }
-  if (actionKind === "block" && typeof action.reason !== "string") {
-    return [
-      {
-        severity: "error",
-        code: "PLUGIN_RULE_ACTION_INVALID",
-        message: "block action requires a string reason",
-        path: `${path}/reason`,
-        hint: "Set action.reason to the block reason.",
-      },
-    ];
-  }
-  if (actionKind === "warn" && typeof action.message !== "string") {
-    return [
-      {
-        severity: "error",
-        code: "PLUGIN_RULE_ACTION_INVALID",
-        message: "warn action requires a string message",
-        path: `${path}/message`,
-        hint: "Set action.message to the warning message.",
-      },
-    ];
-  }
-  if (
-    actionKind === "appendMessage" &&
-    (typeof action.role !== "string" || typeof action.content !== "string")
-  ) {
-    return [
-      {
-        severity: "error",
-        code: "PLUGIN_RULE_ACTION_INVALID",
-        message: "appendMessage action requires string role and content",
-        path,
-        hint: "Set action.role and action.content.",
-      },
-    ];
-  }
-  if (actionKind === "appendMessage") {
-    if (action.role !== "system" && action.role !== "developer") {
-      return [
-        {
-          severity: "error",
-          code: "PLUGIN_RULE_ACTION_INVALID",
-          message: "appendMessage role must be system or developer",
-          path: `${path}/role`,
-          hint: "Set action.role to system or developer.",
-        },
-      ];
-    }
-    if (typeof action.content === "string" && action.content.trim().length === 0) {
-      return [
-        {
-          severity: "error",
-          code: "PLUGIN_RULE_ACTION_INVALID",
-          message: "appendMessage content must not be empty",
-          path: `${path}/content`,
-          hint: "Set action.content to a non-empty message.",
-        },
-      ];
-    }
-  }
-  return [];
-}
-
-function manifestRuntimeKind(
-  manifest: Partial<PluginManifest>
-): PluginManifest["runtime"]["kind"] | null {
-  const runtime = asRecord(manifest.runtime);
-  if (
-    runtime?.kind === "declarativeRules" &&
-    Array.isArray(runtime.rules) &&
-    runtime.rules.every((rulePath) => typeof rulePath === "string" && rulePath.length > 0)
-  ) {
-    return "declarativeRules";
-  }
-  if (runtime?.kind === "wasm" && typeof runtime.abiVersion === "string") {
-    return "wasm";
-  }
-  if (runtime?.kind === "extensionHost" && runtime.language === "typescript") {
-    return "extensionHost";
-  }
-  return null;
-}
-
-function manifestShapeDiagnostics(manifest: Partial<PluginManifest>): PluginDiagnostic[] {
-  const diagnostics: PluginDiagnostic[] = [];
-  for (const field of ["id", "name", "version", "apiVersion"] as const) {
-    if (typeof manifest[field] !== "string") {
-      diagnostics.push({
-        severity: "error",
-        code: "PLUGIN_INVALID_MANIFEST",
-        message: `${field} must be a string`,
-        path: `plugin.json#/${field}`,
-        hint: "Use the Plugin API v1 manifest field types.",
-      });
-    }
-  }
-  const runtime = asRecord(manifest.runtime);
-  const isExtensionHost = runtime?.kind === "extensionHost";
-  if (!Array.isArray(manifest.hooks)) {
-    if (manifest.hooks !== undefined || !isExtensionHost) {
-      diagnostics.push({
-        severity: "error",
-        code: "PLUGIN_INVALID_MANIFEST",
-        message: "hooks must be an array",
-        path: "plugin.json#/hooks",
-        hint: "Declare hooks as Plugin API v1 hook objects.",
-      });
-    }
-  } else {
-    manifest.hooks.forEach((hook, index) => {
-      const hookRecord = asRecord(hook);
-      if (!hookRecord) {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_INVALID_MANIFEST",
-          message: "hook entries must be objects",
-          path: `plugin.json#/hooks/${index}`,
-          hint: "Declare hooks as Plugin API v1 hook objects.",
-        });
-        return;
-      }
-      if (typeof hookRecord.name !== "string") {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_INVALID_MANIFEST",
-          message: "hook name must be a string",
-          path: `plugin.json#/hooks/${index}/name`,
-          hint: "Use a Plugin API v1 hook name.",
-        });
-      }
-      if (hookRecord.priority != null && typeof hookRecord.priority !== "number") {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_INVALID_MANIFEST",
-          message: "hook priority must be a number when present",
-          path: `plugin.json#/hooks/${index}/priority`,
-          hint: "Use a numeric hook priority.",
-        });
-      }
-      if (
-        hookRecord.failurePolicy != null &&
-        hookRecord.failurePolicy !== "fail-open" &&
-        hookRecord.failurePolicy !== "fail-closed"
-      ) {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_INVALID_MANIFEST",
-          message: "hook failurePolicy must be fail-open or fail-closed when present",
-          path: `plugin.json#/hooks/${index}/failurePolicy`,
-          hint: "Use fail-open or fail-closed.",
-        });
-      }
-    });
-  }
-  if (!Array.isArray(manifest.permissions)) {
-    if (manifest.permissions !== undefined || !isExtensionHost) {
-      diagnostics.push({
-        severity: "error",
-        code: "PLUGIN_INVALID_MANIFEST",
-        message: "permissions must be an array",
-        path: "plugin.json#/permissions",
-        hint: "Declare Plugin API v1 permissions as strings.",
-      });
-    }
-  }
-  const compatibility = asRecord(manifest.hostCompatibility);
-  if (!compatibility) {
-    diagnostics.push({
-      severity: "error",
-      code: "PLUGIN_INVALID_MANIFEST",
-      message: "hostCompatibility must be an object",
-      path: "plugin.json#/hostCompatibility",
-      hint: "Set hostCompatibility.app and hostCompatibility.pluginApi.",
-    });
-  } else {
-    for (const field of ["app", "pluginApi"] as const) {
-      if (typeof compatibility[field] !== "string") {
-        diagnostics.push({
-          severity: "error",
-          code: "PLUGIN_INVALID_MANIFEST",
-          message: `hostCompatibility.${field} must be a string`,
-          path: `plugin.json#/hostCompatibility/${field}`,
-          hint: "Use Plugin API v1 compatibility range strings.",
-        });
-      }
-    }
-    if (
-      compatibility.platforms != null &&
-      (!Array.isArray(compatibility.platforms) ||
-        !compatibility.platforms.every((platform) => typeof platform === "string"))
-    ) {
-      diagnostics.push({
-        severity: "error",
-        code: "PLUGIN_INVALID_MANIFEST",
-        message: "hostCompatibility.platforms must be an array of strings when present",
-        path: "plugin.json#/hostCompatibility/platforms",
-        hint: "Use platform names as strings.",
-      });
-    }
-  }
-  if (manifest.entry != null && typeof manifest.entry !== "string") {
-    diagnostics.push({
-      severity: "error",
-      code: "PLUGIN_INVALID_MANIFEST",
-      message: "entry must be a string when present",
-      path: "plugin.json#/entry",
-      hint: "Use a package-relative entry path.",
-    });
-  }
-  if (runtime?.kind === "wasm" && typeof runtime.abiVersion !== "string") {
-    diagnostics.push({
-      severity: "error",
-      code: "PLUGIN_INVALID_RUNTIME",
-      message: "wasm runtime requires a string abiVersion",
-      path: "plugin.json#/runtime/abiVersion",
-      hint: 'Use runtime: { kind: "wasm", abiVersion: "1.0.0" }.',
-    });
-  }
-  if (
-    runtime?.kind === "wasm" &&
-    runtime.memoryLimitBytes != null &&
-    typeof runtime.memoryLimitBytes !== "number"
-  ) {
-    diagnostics.push({
-      severity: "error",
-      code: "PLUGIN_INVALID_RUNTIME",
-      message: "wasm memoryLimitBytes must be a number when present",
-      path: "plugin.json#/runtime/memoryLimitBytes",
-      hint: "Use a byte count number.",
-    });
-  }
-  if (runtime?.kind === "extensionHost" && runtime.language !== "typescript") {
-    diagnostics.push({
-      severity: "error",
-      code: "PLUGIN_INVALID_RUNTIME",
-      message: "extensionHost runtime requires typescript language",
-      path: "plugin.json#/runtime/language",
-      hint: 'Use runtime: { kind: "extensionHost", language: "typescript" }.',
-    });
-  }
-  return diagnostics;
-}
-
-function runtimeShapeDiagnostic(manifest: Partial<PluginManifest>): PluginDiagnostic {
-  const runtime = asRecord(manifest.runtime);
-  if (!runtime) {
-    return {
-      severity: "error",
-      code: "PLUGIN_INVALID_RUNTIME",
-      message: "plugin runtime must be an object",
-      path: "plugin.json#/runtime",
-      hint: "Set runtime to a Plugin API v1 runtime object.",
-    };
-  }
-  if (runtime.kind === "declarativeRules") {
-    return {
-      severity: "error",
-      code: "PLUGIN_INVALID_RUNTIME",
-      message: "declarativeRules runtime requires a rules array",
-      path: "plugin.json#/runtime",
-      hint: 'Use runtime: { kind: "declarativeRules", rules: ["rules/main.json"] }.',
-    };
-  }
-  if (runtime.kind === "extensionHost") {
-    return {
-      severity: "error",
-      code: "PLUGIN_INVALID_RUNTIME",
-      message: "extensionHost runtime requires typescript language",
-      path: "plugin.json#/runtime",
-      hint: 'Use runtime: { kind: "extensionHost", language: "typescript" }.',
-    };
-  }
-  return {
-    severity: "error",
-    code: "PLUGIN_INVALID_RUNTIME",
-    message: "plugin runtime kind is not supported by create-aio-plugin doctor",
-    path: "plugin.json#/runtime",
-    hint: "Use a supported Plugin API v1 runtime shape.",
-  };
-}
-
-function doctorManifestSummary(
-  manifest: Partial<PluginManifest>,
-  runtimeKind: PluginManifest["runtime"]["kind"] | null
-): DoctorResult["manifest"] | undefined {
-  if (
-    typeof manifest.id !== "string" ||
-    typeof manifest.name !== "string" ||
-    typeof manifest.version !== "string" ||
-    !runtimeKind
-  ) {
-    return undefined;
-  }
-  return {
-    id: manifest.id,
-    name: manifest.name,
-    version: manifest.version,
-    runtime: runtimeKind,
-  };
-}
-
-function walkPluginDirectory(root: string, dir: string, files: ScaffoldFiles): void {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name === "node_modules" || entry.name === ".git") continue;
-    const fullPath = join(dir, entry.name);
-    const relativePath = relative(root, fullPath).replace(/\\/g, "/");
-    if (entry.isDirectory()) {
-      walkPluginDirectory(root, fullPath, files);
-    } else if (entry.isFile()) {
-      files[relativePath] = readFileSync(fullPath, "utf8");
-    }
-  }
-}
-
-function walkPluginDirectoryBytes(root: string, dir: string, files: PluginFileBytes): void {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name === "node_modules" || entry.name === ".git") continue;
-    const fullPath = join(dir, entry.name);
-    const relativePath = relative(root, fullPath).replace(/\\/g, "/");
-    if (entry.isDirectory()) {
-      walkPluginDirectoryBytes(root, fullPath, files);
-    } else if (entry.isFile()) {
-      files[relativePath] = new Uint8Array(readFileSync(fullPath));
-    }
-  }
-}
-
-export function replayHook(files: ScaffoldFiles, hook: GatewayHookName, context: unknown): unknown {
-  const validation = validatePluginFiles(files);
-  if (!validation.ok) {
-    throw new Error(`${validation.error.code}: ${validation.error.message}`);
-  }
-  const manifest = JSON.parse(files["plugin.json"] ?? "{}") as PluginManifest;
-  if (manifest.runtime.kind !== "declarativeRules") {
-    return { action: "pass" };
-  }
-  for (const rulePath of manifest.runtime.rules) {
-    const document = JSON.parse(files[rulePath] ?? '{"rules":[]}') as { rules?: unknown[] };
-    for (const rule of document.rules ?? []) {
-      const result = replayDeclarativeRule(rule, hook, context);
-      if (result.action !== "pass") return result;
-    }
-  }
-  return { action: "pass" };
+export function replayHook(
+  _files: ScaffoldFiles,
+  _hook: GatewayHookName,
+  _context: unknown
+): never {
+  throw replayUnsupportedError();
 }
 
 export function replayHookExplain(
-  files: ScaffoldFiles,
-  hook: GatewayHookName,
-  context: unknown
+  _files: ScaffoldFiles,
+  _hook: GatewayHookName,
+  _context: unknown
 ): ReplayExplainResult {
-  const validation = validatePluginFilesStrict(files);
-  if (!validation.ok) {
-    throw new Error(`${validation.error.code}: ${validation.error.message}`);
-  }
-  const manifest = JSON.parse(files["plugin.json"] ?? "{}") as PluginManifest;
-  const warnings: PluginDiagnostic[] = [];
-  const passResult: ReplayRuleResult = { action: "pass" };
-
-  if (manifest.runtime.kind !== "declarativeRules") {
-    warnings.push({
-      severity: "warn",
-      code: "PLUGIN_REPLAY_UNSUPPORTED_RUNTIME",
-      message: "replay explain is only supported for declarative rule plugins",
-    });
-    return {
-      pluginId: manifest.id,
-      runtime: manifest.runtime.kind,
-      hook,
-      evaluatedRuleCount: 0,
-      matchedRuleIds: [],
-      actionKind: passResult.action,
-      outputKind: passResult.action,
-      mutationSummary: { changed: false },
-      warnings,
-      result: passResult,
-    };
-  }
-
-  let evaluatedRuleCount = 0;
-  const matchedRuleIds: string[] = [];
-  let result: ReplayRuleResult = passResult;
-  let mutationSummary: ReplayMutationSummary = { changed: false };
-
-  for (const rulePath of manifest.runtime.rules) {
-    const document = JSON.parse(files[rulePath] ?? '{"rules":[]}') as { rules?: unknown[] };
-    for (const rule of document.rules ?? []) {
-      evaluatedRuleCount += 1;
-      const trace = replayDeclarativeRuleWithTrace(rule, hook, context);
-      if (trace.warning) warnings.push(trace.warning);
-      if (trace.result.action === "pass") continue;
-      if (trace.ruleId) matchedRuleIds.push(trace.ruleId);
-      result = trace.result;
-      mutationSummary = mutationSummaryFromReplayResult(trace);
-      break;
-    }
-    if (result.action !== "pass") break;
-  }
-
-  return {
-    pluginId: manifest.id,
-    runtime: manifest.runtime.kind,
-    hook,
-    evaluatedRuleCount,
-    matchedRuleIds,
-    actionKind: result.action,
-    outputKind: result.action,
-    mutationSummary,
-    warnings,
-    result,
-  };
+  throw replayUnsupportedError();
 }
 
 export function packPlugin(files: ScaffoldFiles): PackedPlugin {
+  assertPackageShape(files);
   const bytes = createStoredZipBytes(textFilesToBytes(files));
   return {
     bytes,
@@ -1499,6 +429,7 @@ export function packPlugin(files: ScaffoldFiles): PackedPlugin {
 }
 
 export function packPluginBytes(files: PluginFileBytes): PackedPlugin {
+  assertPackageShape(textFilesFromBytes(files));
   const bytes = createStoredZipBytes(
     Object.entries(files)
       .sort(([a], [b]) => a.localeCompare(b))
@@ -1508,16 +439,6 @@ export function packPluginBytes(files: PluginFileBytes): PackedPlugin {
     bytes,
     checksum: sha256(bytes),
   };
-}
-
-function textFilesToBytes(files: ScaffoldFiles): readonly (readonly [string, Uint8Array])[] {
-  return Object.entries(files)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([path, content]) => [path, new TextEncoder().encode(content)] as const);
-}
-
-function textFromBytes(bytes: Uint8Array | undefined): string | undefined {
-  return bytes == null ? undefined : new TextDecoder().decode(bytes);
 }
 
 export function generateSigningKeyPair(): SigningKeyPair {
@@ -1578,10 +499,9 @@ export function publishCheckPluginBytes(
     manifest: string;
   }
 ): PublishCheckResult {
-  const manifest = JSON.parse(input.manifest) as PluginManifest;
-  const validation = validateManifest(manifest);
-  const permissions = manifest.permissions ?? [];
-  const hooks = manifest.hooks ?? [];
+  const manifest = parseManifestText(input.manifest);
+  const validation = safelyValidateManifest(manifest);
+  const entryNames = storedZipEntryNames(bytes);
   const checksum = sha256(bytes);
   const checksumVerified = checksum === input.checksum;
   const signatureVerified =
@@ -1589,23 +509,152 @@ export function publishCheckPluginBytes(
       ? verifyPackage(bytes, input.signature, input.publicKey).ok
       : false;
   const unsigned = !input.signature || !input.publicKey;
+  const hasPackageShape =
+    entryNames.has("plugin.json") &&
+    typeof manifest.main === "string" &&
+    manifest.main.length > 0 &&
+    entryNames.has(manifest.main);
 
   return {
-    ok: validation.ok && checksumVerified && (unsigned || signatureVerified),
+    ok: validation.ok && hasPackageShape && checksumVerified && (unsigned || signatureVerified),
     checksum,
     expectedChecksum: input.checksum,
     checksumVerified,
     signatureVerified,
     unsigned,
-    manifestId: manifest.id,
-    name: manifest.name,
-    version: manifest.version,
-    runtime: manifest.runtime.kind,
-    permissions: [...permissions],
-    hooks: hooks.map((hook) => hook.name),
-    hostCompatibility: manifest.hostCompatibility,
+    manifestId: typeof manifest.id === "string" ? manifest.id : "",
+    name: typeof manifest.name === "string" ? manifest.name : "",
+    version: typeof manifest.version === "string" ? manifest.version : "",
+    runtime: "extensionHost",
+    capabilities: Array.isArray(manifest.capabilities) ? [...manifest.capabilities] : [],
+    hooks: manifest.contributes?.gatewayHooks?.map((hook) => hook.name) ?? [],
+    hostCompatibility: manifest.hostCompatibility ?? { app: "", pluginApi: "" },
     sizeBytes: bytes.length,
   };
+}
+
+function safelyValidateManifest(manifest: Partial<PluginManifest>): ValidationResult {
+  try {
+    return validateManifest(manifest as PluginManifest);
+  } catch (error) {
+    return {
+      ok: false,
+      error: { code: "PLUGIN_INVALID_MANIFEST", message: errorMessage(error) },
+    };
+  }
+}
+
+function assertPackageShape(files: ScaffoldFiles): void {
+  const result = validatePluginFilesStrict(files);
+  if (result.ok) return;
+  throw new Error(`${result.error.code}: ${result.error.message}`);
+}
+
+function hasErrorDiagnostics(diagnostics: readonly PluginDiagnostic[]): boolean {
+  return diagnostics.some((diagnostic) => diagnostic.severity === "error");
+}
+
+function hasPluginFile(files: ScaffoldFiles, path: string): boolean {
+  return Object.prototype.hasOwnProperty.call(files, path);
+}
+
+function unsupportedLegacyRuntimeDiagnostic(
+  manifest: Partial<PluginManifest>
+): PluginDiagnostic | null {
+  const runtime = asRecord(manifest.runtime);
+  const kind = typeof runtime?.kind === "string" ? runtime.kind : "";
+  if (!UNSUPPORTED_PUBLIC_TEMPLATES.has(kind) && kind !== "declarativeRules") {
+    return null;
+  }
+  return {
+    severity: "error",
+    code: "PLUGIN_UNSUPPORTED_LEGACY_RUNTIME",
+    message: `runtime ${kind} is no longer supported for community plugins; use Extension Host with main: "dist/extension.js".`,
+    path: "plugin.json#/runtime",
+    hint: 'Set runtime to { "kind": "extensionHost", "language": "typescript" } and move hook behavior into contributes.gatewayHooks.',
+  };
+}
+
+function manifestRuntimeKind(
+  manifest: Partial<PluginManifest>
+): PluginManifest["runtime"]["kind"] | null {
+  const runtime = asRecord(manifest.runtime);
+  return runtime?.kind === "extensionHost" && runtime.language === "typescript"
+    ? "extensionHost"
+    : null;
+}
+
+function isExtensionHostManifest(manifest: Partial<PluginManifest>): manifest is PluginManifest {
+  return manifestRuntimeKind(manifest) === "extensionHost";
+}
+
+function doctorManifestSummary(
+  manifest: Partial<PluginManifest>,
+  runtimeKind: PluginManifest["runtime"]["kind"] | null
+): DoctorResult["manifest"] | undefined {
+  if (
+    typeof manifest.id !== "string" ||
+    typeof manifest.name !== "string" ||
+    typeof manifest.version !== "string" ||
+    !runtimeKind
+  ) {
+    return undefined;
+  }
+  return {
+    id: manifest.id,
+    name: manifest.name,
+    version: manifest.version,
+    runtime: runtimeKind,
+  };
+}
+
+function walkPluginDirectory(root: string, dir: string, files: ScaffoldFiles): void {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === ".git") continue;
+    const fullPath = join(dir, entry.name);
+    const relativePath = relative(root, fullPath).replace(/\\/g, "/");
+    if (entry.isDirectory()) {
+      walkPluginDirectory(root, fullPath, files);
+    } else if (entry.isFile()) {
+      files[relativePath] = readFileSync(fullPath, "utf8");
+    }
+  }
+}
+
+function walkPluginDirectoryBytes(root: string, dir: string, files: PluginFileBytes): void {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === ".git") continue;
+    const fullPath = join(dir, entry.name);
+    const relativePath = relative(root, fullPath).replace(/\\/g, "/");
+    if (entry.isDirectory()) {
+      walkPluginDirectoryBytes(root, fullPath, files);
+    } else if (entry.isFile()) {
+      files[relativePath] = new Uint8Array(readFileSync(fullPath));
+    }
+  }
+}
+
+function textFilesToBytes(files: ScaffoldFiles): readonly (readonly [string, Uint8Array])[] {
+  return Object.entries(files)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([path, content]) => [path, new TextEncoder().encode(content)] as const);
+}
+
+function textFilesFromBytes(files: PluginFileBytes): ScaffoldFiles {
+  const textFiles: ScaffoldFiles = {};
+  for (const path of Object.keys(files)) {
+    textFiles[path] = textFromBytes(files[path]) ?? "";
+  }
+  return textFiles;
+}
+
+function textFromBytes(bytes: Uint8Array | undefined): string | undefined {
+  return bytes == null ? undefined : new TextDecoder().decode(bytes);
+}
+
+function parseManifestText(text: string): Partial<PluginManifest> {
+  const parsed = JSON.parse(text) as unknown;
+  return asRecord(parsed) ? (parsed as Partial<PluginManifest>) : {};
 }
 
 function createPublicKeyFromPrivateKey(privateKey: string): string {
@@ -1621,482 +670,14 @@ function titleFromId(id: string): string {
     .join(" ");
 }
 
-function replayDeclarativeRule(
-  rawRule: unknown,
-  hook: GatewayHookName,
-  context: unknown
-): ReplayRuleResult {
-  const rule = asRecord(rawRule);
-  if (rule?.hook !== hook) return { action: "pass" };
-  const target = asRecord(rule.target);
-  const matcher = asRecord(rule.matcher) ?? asRecord(rule.match);
-  const action = asRecord(rule.action);
-  if (!target || !matcher || !action) return { action: "pass" };
-  if (typeof matcher.regex !== "string") return { action: "pass" };
-
-  let regex: RegExp;
-  try {
-    regex = new RegExp(matcher.regex, matcher.caseSensitive === false ? "gi" : "g");
-  } catch {
-    return { action: "pass" };
-  }
-
-  const targetField = typeof target.field === "string" ? target.field : "request.body";
-  const text = textFromFixture(context, targetField);
-  if (!text) return { action: "pass" };
-
-  const path =
-    typeof target.jsonPath === "string"
-      ? target.jsonPath
-      : target.kind === "jsonPath" && typeof target.path === "string"
-        ? target.path
-        : undefined;
-  if (
-    !path ||
-    (target.field && target.field !== "request.body" && target.field !== "response.body")
-  ) {
-    return replayTextAction(text, regex, action, targetField);
-  }
-  return replayJsonPathAction(text, path, regex, action, targetField);
+function isScaffoldTemplate(value: string): value is ScaffoldTemplate {
+  return SUPPORTED_TEMPLATES.some((template) => template === value);
 }
 
-function replayDeclarativeRuleWithTrace(
-  rawRule: unknown,
-  hook: GatewayHookName,
-  context: unknown
-): ReplayRuleTrace {
-  const rule = asRecord(rawRule);
-  const ruleId = typeof rule?.id === "string" ? rule.id : undefined;
-  const pass = (): ReplayRuleTrace => ({ ruleId, result: { action: "pass" } });
-  if (rule?.hook !== hook) return pass();
-  const target = asRecord(rule.target);
-  const matcher = asRecord(rule.matcher) ?? asRecord(rule.match);
-  const action = asRecord(rule.action);
-  if (!target || !matcher || !action) return pass();
-  const compiled = compileReplayRegex(matcher);
-  if (!compiled.ok) return { ...pass(), warning: compiled.warning };
-  const regex = compiled.regex;
-
-  const targetField = typeof target.field === "string" ? target.field : "request.body";
-  const text = textFromFixture(context, targetField);
-  if (!text) return pass();
-
-  const path =
-    typeof target.jsonPath === "string"
-      ? target.jsonPath
-      : target.kind === "jsonPath" && typeof target.path === "string"
-        ? target.path
-        : undefined;
-  if (
-    !path ||
-    (target.field && target.field !== "request.body" && target.field !== "response.body")
-  ) {
-    return {
-      ruleId,
-      result: replayTextAction(text, regex, action, targetField),
-      targetField,
-    };
-  }
-  return {
-    ruleId,
-    result: replayJsonPathAction(text, path, regex, action, targetField),
-    targetField,
-    jsonPath: path,
-  };
-}
-
-type ReplayRuleResult =
-  | { action: "pass" }
-  | { action: "replace"; requestBody: string }
-  | { action: "replace"; responseBody: string }
-  | { action: "replace"; streamChunk: string }
-  | { action: "replace"; logMessage: string }
-  | { action: "block"; reason: string }
-  | { action: "warn"; message: string };
-
-type JsonPathSegment = { kind: "key"; key: string } | { kind: "wildcardArray" };
-
-type ReplayRegexCompileResult =
-  | { ok: true; regex: RegExp }
-  | { ok: false; warning?: PluginDiagnostic };
-
-function compileReplayRegex(matcher: Record<string, unknown>): ReplayRegexCompileResult {
-  if (typeof matcher.regex !== "string") return { ok: false };
-  const parsed = parseReplayRegexPattern(matcher.regex);
-  if (parsed.warning) return { ok: false, warning: parsed.warning };
-  try {
-    return { ok: true, regex: new RegExp(parsed.pattern, replayRegexFlags(matcher, parsed)) };
-  } catch {
-    return {
-      ok: false,
-      warning: replayRegexUnsupportedDiagnostic("rule regex cannot be replayed by JavaScript"),
-    };
-  }
-}
-
-type ReplayRegexPattern = {
-  pattern: string;
-  enabledFlags: Set<string>;
-  disabledFlags: Set<string>;
-  warning?: PluginDiagnostic;
-};
-
-function parseReplayRegexPattern(regex: string): ReplayRegexPattern {
-  const enabledFlags = new Set<string>();
-  const disabledFlags = new Set<string>();
-  const match = regex.match(/^\(\?([imsux-]+)\)/);
-  if (!match) {
-    return {
-      pattern: regex,
-      enabledFlags,
-      disabledFlags,
-      warning: hasInlineFlagToggle(regex) ? replayRegexUnsupportedDiagnostic() : undefined,
-    };
-  }
-  let enabled = true;
-  for (const flag of match[1] ?? "") {
-    if (flag === "-") {
-      enabled = false;
-      continue;
-    }
-    if (enabled) {
-      enabledFlags.add(flag);
-      disabledFlags.delete(flag);
-    } else {
-      disabledFlags.add(flag);
-      enabledFlags.delete(flag);
-    }
-  }
-  const pattern = regex.slice(match[0].length);
-  const warning =
-    hasInlineFlagToggle(pattern) || hasUnsupportedExtendedReplayPattern(pattern, enabledFlags)
-      ? replayRegexUnsupportedDiagnostic()
-      : undefined;
-  return {
-    pattern: enabledFlags.has("x") ? stripReplayRegexExtendedWhitespace(pattern) : pattern,
-    enabledFlags,
-    disabledFlags,
-    ...(warning ? { warning } : {}),
-  };
-}
-
-function replayRegexFlags(matcher: Record<string, unknown>, parsed: ReplayRegexPattern): string {
-  const flags = new Set<string>(["g"]);
-  if (
-    parsed.enabledFlags.has("i") ||
-    (matcher.caseSensitive === false && !parsed.disabledFlags.has("i"))
-  ) {
-    flags.add("i");
-  }
-  if (parsed.enabledFlags.has("m")) flags.add("m");
-  if (parsed.enabledFlags.has("s")) flags.add("s");
-  if (parsed.enabledFlags.has("u") || usesUnicodePropertyEscape(parsed.pattern)) flags.add("u");
-  return Array.from(flags).join("");
-}
-
-function hasInlineFlagToggle(pattern: string): boolean {
-  return /\(\?[imsux-]+[:)]/.test(pattern);
-}
-
-function hasUnsupportedExtendedReplayPattern(pattern: string, enabledFlags: Set<string>): boolean {
-  return enabledFlags.has("x") && (pattern.includes("#") || /\[[^\]]*\s[^\]]*\]/.test(pattern));
-}
-
-function usesUnicodePropertyEscape(pattern: string): boolean {
-  return /\\[pP]\{[^}]+\}/.test(pattern);
-}
-
-function replayRegexUnsupportedDiagnostic(
-  message = "rule regex uses Rust regex syntax that replay cannot safely emulate"
-): PluginDiagnostic {
-  return {
-    severity: "warn",
-    code: "PLUGIN_REPLAY_REGEX_UNSUPPORTED",
-    message,
-    hint: "Use host runtime logs for exact Rust regex behavior.",
-  };
-}
-
-function stripReplayRegexExtendedWhitespace(pattern: string): string {
-  let stripped = "";
-  let escaped = false;
-  let characterClassOpen = false;
-  for (const char of pattern) {
-    if (escaped) {
-      stripped += char;
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      stripped += char;
-      escaped = true;
-      continue;
-    }
-    if (characterClassOpen) {
-      stripped += char;
-      if (char === "]") characterClassOpen = false;
-      continue;
-    }
-    if (char === "[") {
-      stripped += char;
-      characterClassOpen = true;
-      continue;
-    }
-    if (/\s/.test(char)) continue;
-    stripped += char;
-  }
-  return stripped;
-}
-
-function textFromFixture(context: unknown, field: string): string | undefined {
-  if (typeof context === "string") return context;
-  const contextRecord = asRecord(context);
-  if (field === "request.body") {
-    const direct = textFromFixtureValue(contextRecord?.body);
-    if (direct) return direct;
-    const request = asRecord(contextRecord?.request);
-    const body = textFromFixtureValue(request?.body);
-    if (body) return body;
-    return Array.isArray(request?.normalizedMessages)
-      ? JSON.stringify({ messages: request.normalizedMessages })
-      : undefined;
-  }
-  if (field === "response.body") {
-    const response = asRecord(contextRecord?.response);
-    return textFromFixtureValue(response?.body);
-  }
-  if (field === "stream.chunk") {
-    const stream = asRecord(contextRecord?.stream);
-    return textFromFixtureValue(stream?.chunk);
-  }
-  if (field === "log.message") {
-    const log = asRecord(contextRecord?.log);
-    return textFromFixtureValue(log?.message) ?? textFromFixtureValue(log?.body);
-  }
-  return undefined;
-}
-
-function textFromFixtureValue(value: unknown): string | undefined {
-  if (typeof value === "string") return value;
-  if (value == null) return undefined;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (typeof value === "object") return JSON.stringify(value);
-  return undefined;
-}
-
-function replayRegexMatches(regex: RegExp, value: string): boolean {
-  const matched = regex.test(value);
-  regex.lastIndex = 0;
-  return matched;
-}
-
-function replayTextAction(
-  body: string,
-  regex: RegExp,
-  action: Record<string, unknown>,
-  field: string
-): ReplayRuleResult {
-  if (!replayRegexMatches(regex, body)) return { action: "pass" };
-  if (action.kind === "replace" && typeof action.replacement === "string") {
-    return replaceResult(field, body.replace(regex, action.replacement));
-  }
-  if (action.kind === "block" && typeof action.reason === "string") {
-    return { action: "block", reason: action.reason };
-  }
-  if (action.kind === "warn" && typeof action.message === "string") {
-    return { action: "warn", message: action.message };
-  }
-  if (
-    action.kind === "appendMessage" &&
-    typeof action.role === "string" &&
-    typeof action.content === "string"
-  ) {
-    return appendMessageToBody(body, action.role, action.content);
-  }
-  return { action: "pass" };
-}
-
-function replayJsonPathAction(
-  body: string,
-  path: string,
-  regex: RegExp,
-  action: Record<string, unknown>,
-  field: string
-): ReplayRuleResult {
-  const segments = parseReplayJsonPath(path);
-  if (!segments) return { action: "pass" };
-  let root: unknown;
-  try {
-    root = JSON.parse(body) as unknown;
-  } catch {
-    return { action: "pass" };
-  }
-
-  let matched = false;
-  let changed = false;
-  applyToJsonStrings(root, segments, (candidate) => {
-    if (!replayRegexMatches(regex, candidate.value)) return;
-    matched = true;
-    if (action.kind === "replace" && typeof action.replacement === "string") {
-      const next = candidate.value.replace(regex, action.replacement);
-      if (next !== candidate.value) {
-        candidate.set(next);
-        changed = true;
-      }
-    }
-  });
-
-  if (!matched) return { action: "pass" };
-  if (action.kind === "replace") {
-    return changed ? replaceResult(field, JSON.stringify(root)) : { action: "pass" };
-  }
-  if (action.kind === "block" && typeof action.reason === "string") {
-    return { action: "block", reason: action.reason };
-  }
-  if (action.kind === "warn" && typeof action.message === "string") {
-    return { action: "warn", message: action.message };
-  }
-  if (
-    action.kind === "appendMessage" &&
-    typeof action.role === "string" &&
-    typeof action.content === "string"
-  ) {
-    return appendMessageToBody(body, action.role, action.content);
-  }
-  return { action: "pass" };
-}
-
-function mutationSummaryFromReplayResult(trace: ReplayRuleTrace): ReplayMutationSummary {
-  if (trace.result.action !== "replace") return { changed: false };
-  return summaryForReplacement(trace.result, trace.targetField, trace.jsonPath);
-}
-
-function summaryForReplacement(
-  result: Extract<ReplayRuleResult, { action: "replace" }>,
-  targetField: string | undefined,
-  jsonPath: string | undefined
-): ReplayMutationSummary {
-  if ("requestBody" in result) {
-    return {
-      changed: true,
-      field: "requestBody",
-      targetField: targetField ?? "request.body",
-      ...(jsonPath ? { jsonPath } : {}),
-    };
-  }
-  if ("responseBody" in result) {
-    return {
-      changed: true,
-      field: "responseBody",
-      targetField: targetField ?? "response.body",
-      ...(jsonPath ? { jsonPath } : {}),
-    };
-  }
-  if ("streamChunk" in result) {
-    return {
-      changed: true,
-      field: "streamChunk",
-      targetField: targetField ?? "stream.chunk",
-      ...(jsonPath ? { jsonPath } : {}),
-    };
-  }
-  return {
-    changed: true,
-    field: "logMessage",
-    targetField: targetField ?? "log.message",
-    ...(jsonPath ? { jsonPath } : {}),
-  };
-}
-
-function replaceResult(field: string, value: string): ReplayRuleResult {
-  switch (field) {
-    case "response.body":
-      return { action: "replace", responseBody: value };
-    case "stream.chunk":
-      return { action: "replace", streamChunk: value };
-    case "log.message":
-      return { action: "replace", logMessage: value };
-    case "request.body":
-    default:
-      return { action: "replace", requestBody: value };
-  }
-}
-
-function appendMessageToBody(body: string, role: string, content: string): ReplayRuleResult {
-  if (role !== "system" && role !== "developer") return { action: "pass" };
-  if (!content.trim()) return { action: "pass" };
-  let root: unknown;
-  try {
-    root = JSON.parse(body) as unknown;
-  } catch {
-    return { action: "pass" };
-  }
-  const record = asRecord(root);
-  const messages = Array.isArray(record?.messages) ? record.messages : null;
-  if (!messages) return { action: "pass" };
-  messages.push({ role, content });
-  return { action: "replace", requestBody: JSON.stringify(root) };
-}
-
-function parseReplayJsonPath(path: string): JsonPathSegment[] | null {
-  if (!path.startsWith("$")) return null;
-  const segments: JsonPathSegment[] = [];
-  let index = 1;
-  while (index < path.length) {
-    if (path[index] === ".") {
-      index += 1;
-      const start = index;
-      while (index < path.length && path[index] !== "." && path[index] !== "[") {
-        index += 1;
-      }
-      if (start === index) return null;
-      const key = path.slice(start, index);
-      if (key.includes('"') || key.includes("'")) return null;
-      segments.push({ kind: "key", key });
-      continue;
-    }
-    if (path.slice(index, index + 3) === "[*]") {
-      segments.push({ kind: "wildcardArray" });
-      index += 3;
-      continue;
-    }
-    return null;
-  }
-  return segments;
-}
-
-function applyToJsonStrings(
-  value: unknown,
-  path: JsonPathSegment[],
-  visit: (candidate: { value: string; set: (next: string) => void }) => void
-): void {
-  if (path.length === 0) return;
-  const [segment, ...rest] = path;
-  if (!segment) return;
-
-  if (segment.kind === "key") {
-    const record = asRecord(value);
-    if (!record || !(segment.key in record)) return;
-    if (rest.length === 0) {
-      const current = record[segment.key];
-      if (typeof current === "string") {
-        visit({
-          value: current,
-          set: (next) => {
-            record[segment.key] = next;
-          },
-        });
-      }
-      return;
-    }
-    applyToJsonStrings(record[segment.key], rest, visit);
-    return;
-  }
-
-  if (!Array.isArray(value)) return;
-  for (const item of value) {
-    applyToJsonStrings(item, rest, visit);
-  }
+function replayUnsupportedError(): Error {
+  return new Error(
+    "PLUGIN_REPLAY_UNSUPPORTED: Extension Host gateway hook replay is not executed locally by create-aio-plugin. Use validate, pack, publish-check, and host runtime traces for hook behavior."
+  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -2111,6 +692,23 @@ function errorMessage(error: unknown): string {
 
 function sha256(bytes: Uint8Array): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function storedZipEntryNames(bytes: Uint8Array): Set<string> {
+  const names = new Set<string>();
+  let offset = 0;
+  while (offset + 30 <= bytes.length) {
+    const signature = readU32(bytes, offset);
+    if (signature !== 0x04034b50) break;
+    const compressedSize = readU32(bytes, offset + 18);
+    const nameLength = readU16(bytes, offset + 26);
+    const extraLength = readU16(bytes, offset + 28);
+    const nameStart = offset + 30;
+    const dataStart = nameStart + nameLength + extraLength;
+    names.add(new TextDecoder().decode(bytes.subarray(nameStart, nameStart + nameLength)));
+    offset = dataStart + compressedSize;
+  }
+  return names;
 }
 
 function createStoredZipBytes(entries: readonly (readonly [string, Uint8Array])[]): Uint8Array {
@@ -2211,6 +809,20 @@ function u32(value: number): Uint8Array {
     (value >>> 16) & 0xff,
     (value >>> 24) & 0xff,
   ]);
+}
+
+function readU16(bytes: Uint8Array, offset: number): number {
+  return (bytes[offset] ?? 0) | ((bytes[offset + 1] ?? 0) << 8);
+}
+
+function readU32(bytes: Uint8Array, offset: number): number {
+  return (
+    ((bytes[offset] ?? 0) |
+      ((bytes[offset + 1] ?? 0) << 8) |
+      ((bytes[offset + 2] ?? 0) << 16) |
+      ((bytes[offset + 3] ?? 0) << 24)) >>>
+    0
+  );
 }
 
 function rawPublicKeyFromSpki(spki: Buffer): Buffer {
