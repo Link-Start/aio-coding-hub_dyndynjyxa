@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 const DEFAULT_MAX_WARM_INSTANCES: usize = 8;
 const DEFAULT_IDLE_RECYCLE: Duration = Duration::from_secs(120);
@@ -163,6 +163,7 @@ impl ManagedExtensionHostInstance {
 
 pub(crate) struct ExtensionHostInstanceRegistry {
     db: db::Db,
+    operation_gate: RwLock<()>,
     instances: Mutex<BTreeMap<ExtensionHostInstanceKey, Arc<ManagedExtensionHostInstance>>>,
     plugin_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     limits: ExtensionHostRegistryLimits,
@@ -186,6 +187,7 @@ impl ExtensionHostInstanceRegistry {
     ) -> Self {
         Self {
             db,
+            operation_gate: RwLock::new(()),
             instances: Mutex::new(BTreeMap::new()),
             plugin_locks: Mutex::new(BTreeMap::new()),
             limits,
@@ -211,6 +213,7 @@ impl ExtensionHostInstanceRegistry {
         args: Value,
         now: Instant,
     ) -> AppResult<ExtensionHostCommandOutput> {
+        let _operation_guard = self.operation_gate.read().await;
         let key = ExtensionHostInstanceKey::from_plugin_detail(&detail)?;
         let plugin_lock = self.plugin_lock_for(&key.plugin_id).await;
         let _plugin_guard = plugin_lock.lock().await;
@@ -261,6 +264,7 @@ impl ExtensionHostInstanceRegistry {
 
     #[allow(dead_code)]
     pub(crate) async fn dispose_plugin(&self, plugin_id: &str) {
+        let _operation_guard = self.operation_gate.read().await;
         let plugin_lock = self.plugin_lock_for(plugin_id).await;
         let plugin_guard = plugin_lock.lock().await;
         let disposals = {
@@ -282,6 +286,7 @@ impl ExtensionHostInstanceRegistry {
 
     #[allow(dead_code)]
     pub(crate) async fn dispose_idle(&self, now: Instant) {
+        let _operation_guard = self.operation_gate.read().await;
         let disposals = {
             let mut instances = self.instances.lock().await;
             remove_idle_locked(&mut instances, self.limits.idle_recycle, now)
@@ -290,6 +295,7 @@ impl ExtensionHostInstanceRegistry {
     }
 
     pub(crate) async fn dispose_all(&self) {
+        let _operation_guard = self.operation_gate.write().await;
         let instances = {
             let mut instances = self.instances.lock().await;
             std::mem::take(&mut *instances)
@@ -579,10 +585,17 @@ mod tests {
 
     #[derive(Default)]
     struct BlockingExtensionHostFactory {
+        slow_start: Arc<BlockingStartControl>,
         slow_command: Arc<BlockingCommandControl>,
         slow_dispose: Arc<BlockingDisposeControl>,
         starts: Arc<AtomicUsize>,
         disposals: Arc<AtomicUsize>,
+    }
+
+    #[derive(Default)]
+    struct BlockingStartControl {
+        started: Notify,
+        release: Notify,
     }
 
     #[derive(Default)]
@@ -688,6 +701,10 @@ mod tests {
         ) -> BoxFuture<'a, AppResult<Box<dyn ExtensionHostProcess>>> {
             Box::pin(async move {
                 self.starts.fetch_add(1, Ordering::SeqCst);
+                if detail.summary.plugin_id == "acme.start" {
+                    self.slow_start.started.notify_waiters();
+                    self.slow_start.release.notified().await;
+                }
                 Ok(Box::new(BlockingExtensionHostProcess {
                     plugin_id: detail.summary.plugin_id,
                     slow_command: self.slow_command.clone(),
@@ -1178,6 +1195,61 @@ mod tests {
         assert_eq!(factory.dispose_count(), 1);
         assert_eq!(registry.plugin_instance_count("acme.race").await, 1);
         assert_eq!(registry.instance_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn registry_dispose_all_waits_for_in_flight_cold_start_before_returning() {
+        let factory = Arc::new(BlockingExtensionHostFactory::default());
+        let registry = Arc::new(ExtensionHostInstanceRegistry::new_for_tests(
+            factory.clone(),
+            ExtensionHostRegistryLimits {
+                max_warm_instances: 8,
+                idle_recycle: Duration::from_secs(120),
+            },
+        ));
+        let command_registry = registry.clone();
+
+        let command_task = tokio::spawn(async move {
+            command_registry
+                .execute_command_with_now(
+                    plugin_detail("acme.start", "start"),
+                    "start",
+                    json!({}),
+                    Instant::now(),
+                )
+                .await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            factory.slow_start.started.notified(),
+        )
+        .await
+        .expect("cold start should begin");
+
+        let dispose_registry = registry.clone();
+        let dispose_task = tokio::spawn(async move {
+            dispose_registry.dispose_all().await;
+        });
+        let dispose_finished_before_start_released =
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while !dispose_task.is_finished() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+
+        factory.slow_start.release.notify_waiters();
+        command_task
+            .await
+            .expect("command task join")
+            .expect("command result");
+        dispose_task.await.expect("dispose_all task join");
+
+        assert!(
+            dispose_finished_before_start_released.is_err(),
+            "dispose_all should wait for in-flight cold start to finish"
+        );
+        assert_eq!(registry.instance_count().await, 0);
     }
 
     #[tokio::test]
