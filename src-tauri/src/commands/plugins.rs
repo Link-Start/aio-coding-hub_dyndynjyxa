@@ -212,10 +212,12 @@ pub(crate) async fn plugin_active_contributions(
 pub(crate) async fn plugin_execute_command(
     app: tauri::AppHandle,
     db_state: tauri::State<'_, DbInitState>,
+    registry_state: tauri::State<'_, ExtensionHostRuntimeState>,
     input: PluginExecuteCommandInput,
 ) -> Result<serde_json::Value, String> {
-    let db = ensure_db_ready(app, db_state.inner()).await?;
-    plugin_service::execute_plugin_command(&db, &input.command, input.args)
+    let db = ensure_db_ready(app.clone(), db_state.inner()).await?;
+    let registry = registry_state.registry(app, db_state.inner()).await?;
+    plugin_service::execute_plugin_command(&db, registry.as_ref(), &input.command, input.args)
         .await
         .map_err(Into::into)
 }

@@ -1,5 +1,5 @@
 use crate::app::plugins::contribution_registry::ActiveContributionSnapshot;
-use crate::app::plugins::extension_host::ExtensionHostInstance;
+use crate::app::plugins::extension_host_registry::ExtensionHostInstanceRegistry;
 use crate::domain::plugins::{
     permission_risk, validate_manifest, validate_manifest_for_official_plugin, PluginCommandImpact,
     PluginCompatibilitySummary, PluginContributionChange, PluginContributionImpact,
@@ -57,6 +57,7 @@ pub(crate) fn active_plugin_contributions(
 
 pub(crate) async fn execute_plugin_command(
     db: &crate::db::Db,
+    registry: &ExtensionHostInstanceRegistry,
     command: &str,
     args: serde_json::Value,
 ) -> AppResult<serde_json::Value> {
@@ -82,34 +83,19 @@ pub(crate) async fn execute_plugin_command(
             format!("plugin command {command} is not backed by an extension host runtime"),
         ));
     }
-    let plugin_root = detail.installed_dir.clone().ok_or_else(|| {
-        AppError::new(
-            "PLUGIN_EXTENSION_HOST_ROOT_UNAVAILABLE",
-            format!(
-                "plugin {} does not have an installed extension host directory",
-                detail.summary.plugin_id
-            ),
-        )
-    })?;
-
     let plugin_id = detail.summary.plugin_id.clone();
     let trace_id = args
         .get("traceId")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
     let started_at_ms = now_unix_millis();
-    let result = execute_extension_host_command_once(
-        db,
-        detail.manifest,
-        PathBuf::from(plugin_root),
-        &command,
-        args.clone(),
-    )
-    .await;
+    let result = registry
+        .execute_command(detail.clone(), &command, args.clone())
+        .await;
     let duration_ms = now_unix_millis().saturating_sub(started_at_ms);
 
     match result {
-        Ok(value) => {
+        Ok(output) => {
             if let Err(report_error) = record_command_execution_report(
                 db,
                 &plugin_id,
@@ -121,7 +107,8 @@ pub(crate) async fn execute_plugin_command(
                 None,
                 None,
                 &args,
-                Some(&value),
+                Some(output.cold_start),
+                Some(&output.value),
             ) {
                 tracing::warn!(
                     plugin_id,
@@ -130,7 +117,7 @@ pub(crate) async fn execute_plugin_command(
                     "failed to record successful plugin command execution report"
                 );
             }
-            Ok(value)
+            Ok(output.value)
         }
         Err(error) => {
             if let Err(report_error) = record_command_execution_report(
@@ -144,6 +131,7 @@ pub(crate) async fn execute_plugin_command(
                 Some("runtime"),
                 Some(error.code()),
                 &args,
+                None,
                 None,
             ) {
                 tracing::warn!(
@@ -196,20 +184,6 @@ fn find_declared_command_owner(
     Ok(None)
 }
 
-async fn execute_extension_host_command_once(
-    db: &crate::db::Db,
-    manifest: PluginManifest,
-    plugin_root: PathBuf,
-    command: &str,
-    args: serde_json::Value,
-) -> AppResult<serde_json::Value> {
-    let mut host =
-        ExtensionHostInstance::start_with_host_api(manifest, plugin_root, db.clone()).await?;
-    let result = host.execute_command(command, args).await;
-    host.dispose().await;
-    result
-}
-
 #[allow(clippy::too_many_arguments)]
 fn record_command_execution_report(
     db: &crate::db::Db,
@@ -222,6 +196,7 @@ fn record_command_execution_report(
     failure_kind: Option<&str>,
     error_code: Option<&str>,
     args: &serde_json::Value,
+    cold_start: Option<bool>,
     output: Option<&serde_json::Value>,
 ) -> AppResult<()> {
     record_extension_execution_report(
@@ -237,7 +212,7 @@ fn record_command_execution_report(
             duration_ms,
             failure_kind: failure_kind.map(str::to_string),
             error_code: error_code.map(str::to_string),
-            input_budget: json_budget(args),
+            input_budget: command_input_budget(args, cold_start),
             output_budget: output
                 .map(json_budget)
                 .unwrap_or_else(|| serde_json::json!({})),
@@ -246,6 +221,16 @@ fn record_command_execution_report(
         },
     )
     .map(|_| ())
+}
+
+fn command_input_budget(args: &serde_json::Value, cold_start: Option<bool>) -> serde_json::Value {
+    let mut budget = json_budget(args);
+    if let Some(cold_start) = cold_start {
+        if let Some(object) = budget.as_object_mut() {
+            object.insert("coldStart".to_string(), serde_json::Value::Bool(cold_start));
+        }
+    }
+    budget
 }
 
 fn json_budget(value: &serde_json::Value) -> serde_json::Value {
@@ -2652,7 +2637,7 @@ mod tests {
                     }
                 ]
             },
-            "capabilities": ["commands.execute"],
+            "capabilities": ["commands.execute", "storage.plugin"],
             "hostCompatibility": {
                 "app": ">=0.56.0 <1.0.0",
                 "pluginApi": "^1.0.0",
@@ -2706,6 +2691,61 @@ mod tests {
             .expect("enable extension");
     }
 
+    fn install_enabled_counting_extension_with_command(
+        db: &crate::db::Db,
+        root: &Path,
+        plugin_id: &str,
+        command: &str,
+    ) {
+        std::fs::create_dir_all(root.join("dist")).expect("create dist");
+        let manifest = extension_manifest(plugin_id, command);
+        std::fs::write(
+            root.join("plugin.json"),
+            serde_json::to_vec_pretty(&manifest).expect("manifest json"),
+        )
+        .expect("write manifest");
+        std::fs::write(
+            root.join("dist/extension.js"),
+            format!(
+                r#"
+                let executionCount = 0;
+                let startRecorded = false;
+                let currentStartCount = 0;
+
+                module.exports.activate = function(api) {{
+                  api.commands.registerCommand("{command}", function(args) {{
+                    if (!startRecorded) {{
+                      const startCount = (api.storage.get("startCount") || 0) + 1;
+                      api.storage.set("startCount", startCount);
+                      currentStartCount = startCount;
+                      startRecorded = true;
+                    }}
+                    executionCount += 1;
+                    return {{
+                      ok: true,
+                      traceId: args.traceId,
+                      startCount: currentStartCount,
+                      executionCount: executionCount
+                    }};
+                  }});
+                }};
+                "#
+            ),
+        )
+        .expect("write extension");
+
+        install_plugin_manifest(
+            db,
+            manifest,
+            PluginInstallSource::Local,
+            Some(root.to_string_lossy().to_string()),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("install extension");
+        repository::update_plugin_status(db, plugin_id, PluginStatus::Enabled, None)
+            .expect("enable extension");
+    }
+
     #[tokio::test]
     async fn plugin_command_execution_records_extension_report() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2717,9 +2757,11 @@ mod tests {
             "acme.debug",
             "acme.debug.exportTrace",
         );
+        let registry = ExtensionHostInstanceRegistry::new(db.clone());
 
         let value = execute_plugin_command(
             &db,
+            &registry,
             "acme.debug.exportTrace",
             serde_json::json!({ "traceId": "trace-1" }),
         )
@@ -2744,6 +2786,58 @@ mod tests {
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].contribution_type, "command");
         assert_eq!(reports[0].contribution_id, "acme.debug.exportTrace");
+        assert_eq!(reports[0].input_budget["coldStart"], true);
+    }
+
+    #[tokio::test]
+    async fn plugin_command_execution_reuses_registry_instance_between_calls() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::init_for_tests(&dir.path().join("plugins.db")).expect("db");
+        let plugin_root = dir.path().join("acme.counter");
+        install_enabled_counting_extension_with_command(
+            &db,
+            &plugin_root,
+            "acme.counter",
+            "acme.counter.run",
+        );
+        let registry = ExtensionHostInstanceRegistry::new(db.clone());
+
+        let first = execute_plugin_command(
+            &db,
+            &registry,
+            "acme.counter.run",
+            serde_json::json!({ "traceId": "trace-1" }),
+        )
+        .await
+        .expect("first command");
+        let second = execute_plugin_command(
+            &db,
+            &registry,
+            "acme.counter.run",
+            serde_json::json!({ "traceId": "trace-2" }),
+        )
+        .await
+        .expect("second command");
+
+        assert_eq!(first["startCount"], 1);
+        assert_eq!(first["executionCount"], 1);
+        assert_eq!(
+            second["startCount"], 1,
+            "same command should reuse one registry-started extension host"
+        );
+        assert_eq!(second["executionCount"], 2);
+        let reports = crate::infra::plugins::runtime_reports::list_extension_execution_reports(
+            &db,
+            Some("acme.counter"),
+            Some("command"),
+            Some("acme.counter.run"),
+            None,
+            20,
+        )
+        .expect("list reports");
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].input_budget["coldStart"], false);
+        assert_eq!(reports[1].input_budget["coldStart"], true);
     }
 
     #[test]
