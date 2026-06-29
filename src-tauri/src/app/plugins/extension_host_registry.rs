@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -119,19 +119,52 @@ impl ExtensionHostProcess for RealExtensionHostProcess {
 }
 
 struct ManagedExtensionHostInstance {
-    process: Box<dyn ExtensionHostProcess>,
-    last_used: Instant,
+    process: Mutex<Box<dyn ExtensionHostProcess>>,
+    last_used: StdMutex<Instant>,
 }
 
 impl ManagedExtensionHostInstance {
-    async fn dispose(mut self) {
-        self.process.dispose().await;
+    fn new(process: Box<dyn ExtensionHostProcess>, last_used: Instant) -> Self {
+        Self {
+            process: Mutex::new(process),
+            last_used: StdMutex::new(last_used),
+        }
+    }
+
+    async fn execute_if_running(
+        &self,
+        command: &str,
+        args: Value,
+        now: Instant,
+    ) -> AppResult<Option<Value>> {
+        let mut process = self.process.lock().await;
+        if !process.is_running() {
+            return Ok(None);
+        }
+        let value = process.execute_command(command, args).await?;
+        *self
+            .last_used
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = now;
+        Ok(Some(value))
+    }
+
+    async fn dispose(&self) {
+        self.process.lock().await.dispose().await;
+    }
+
+    fn last_used(&self) -> Instant {
+        *self
+            .last_used
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
 pub(crate) struct ExtensionHostInstanceRegistry {
     db: db::Db,
-    instances: Mutex<BTreeMap<ExtensionHostInstanceKey, ManagedExtensionHostInstance>>,
+    instances: Mutex<BTreeMap<ExtensionHostInstanceKey, Arc<ManagedExtensionHostInstance>>>,
+    start_locks: Mutex<BTreeMap<ExtensionHostInstanceKey, Arc<Mutex<()>>>>,
     limits: ExtensionHostRegistryLimits,
     factory: Arc<dyn ExtensionHostFactory>,
 }
@@ -154,6 +187,7 @@ impl ExtensionHostInstanceRegistry {
         Self {
             db,
             instances: Mutex::new(BTreeMap::new()),
+            start_locks: Mutex::new(BTreeMap::new()),
             limits,
             factory,
         }
@@ -178,25 +212,41 @@ impl ExtensionHostInstanceRegistry {
         now: Instant,
     ) -> AppResult<ExtensionHostCommandOutput> {
         let key = ExtensionHostInstanceKey::from_plugin_detail(&detail)?;
-        let mut instances = self.instances.lock().await;
 
-        if let Some(instance) = instances.get_mut(&key) {
-            if instance.process.is_running() {
-                let value = instance.process.execute_command(command, args).await?;
-                instance.last_used = now;
-                return Ok(ExtensionHostCommandOutput {
-                    value,
-                    cold_start: false,
-                });
-            }
+        if let Some(value) = self
+            .execute_warm_instance(&key, command, args.clone(), now)
+            .await?
+        {
+            return Ok(ExtensionHostCommandOutput {
+                value,
+                cold_start: false,
+            });
         }
 
-        if let Some(instance) = instances.remove(&key) {
-            instance.dispose().await;
+        let start_lock = self.start_lock_for(&key).await;
+        let _start_guard = start_lock.lock().await;
+
+        if let Some(value) = self
+            .execute_warm_instance(&key, command, args.clone(), now)
+            .await?
+        {
+            return Ok(ExtensionHostCommandOutput {
+                value,
+                cold_start: false,
+            });
         }
 
-        dispose_same_plugin_with_different_key(&mut instances, &key).await;
-        dispose_idle_locked(&mut instances, self.limits.idle_recycle, now).await;
+        let mut disposals = {
+            let mut instances = self.instances.lock().await;
+            let mut disposals = remove_same_plugin_with_different_key(&mut instances, &key);
+            disposals.extend(remove_idle_locked(
+                &mut instances,
+                self.limits.idle_recycle,
+                now,
+            ));
+            disposals
+        };
+        dispose_instances(disposals.drain(..)).await;
 
         let mut process = self.factory.start(detail, self.db.clone()).await?;
         let value = match process.execute_command(command, args).await {
@@ -206,14 +256,13 @@ impl ExtensionHostInstanceRegistry {
                 return Err(error);
             }
         };
-        instances.insert(
-            key,
-            ManagedExtensionHostInstance {
-                process,
-                last_used: now,
-            },
-        );
-        enforce_warm_limit_locked(&mut instances, self.limits.max_warm_instances).await;
+        let instance = Arc::new(ManagedExtensionHostInstance::new(process, now));
+        let disposals = {
+            let mut instances = self.instances.lock().await;
+            instances.insert(key, instance);
+            remove_lru_over_limit_locked(&mut instances, self.limits.max_warm_instances)
+        };
+        dispose_instances(disposals).await;
 
         Ok(ExtensionHostCommandOutput {
             value,
@@ -223,31 +272,37 @@ impl ExtensionHostInstanceRegistry {
 
     #[allow(dead_code)]
     pub(crate) async fn dispose_plugin(&self, plugin_id: &str) {
-        let mut instances = self.instances.lock().await;
-        let keys = instances
-            .keys()
-            .filter(|key| key.plugin_id == plugin_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in keys {
-            if let Some(instance) = instances.remove(&key) {
-                instance.dispose().await;
-            }
-        }
+        let disposals = {
+            let mut instances = self.instances.lock().await;
+            let keys = instances
+                .keys()
+                .filter(|key| key.plugin_id == plugin_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| instances.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        dispose_instances(disposals).await;
     }
 
     #[allow(dead_code)]
     pub(crate) async fn dispose_idle(&self, now: Instant) {
-        let mut instances = self.instances.lock().await;
-        dispose_idle_locked(&mut instances, self.limits.idle_recycle, now).await;
+        let disposals = {
+            let mut instances = self.instances.lock().await;
+            remove_idle_locked(&mut instances, self.limits.idle_recycle, now)
+        };
+        dispose_instances(disposals).await;
     }
 
     pub(crate) async fn dispose_all(&self) {
-        let mut instances = self.instances.lock().await;
-        let instances = std::mem::take(&mut *instances);
-        for (_, instance) in instances {
-            instance.dispose().await;
-        }
+        let instances = {
+            let mut instances = self.instances.lock().await;
+            std::mem::take(&mut *instances)
+                .into_values()
+                .collect::<Vec<_>>()
+        };
+        dispose_instances(instances).await;
     }
 
     #[cfg(test)]
@@ -263,6 +318,45 @@ impl ExtensionHostInstanceRegistry {
     #[cfg(test)]
     async fn instance_count(&self) -> usize {
         self.instances.lock().await.len()
+    }
+
+    async fn execute_warm_instance(
+        &self,
+        key: &ExtensionHostInstanceKey,
+        command: &str,
+        args: Value,
+        now: Instant,
+    ) -> AppResult<Option<Value>> {
+        let instance = { self.instances.lock().await.get(key).cloned() };
+        let Some(instance) = instance else {
+            return Ok(None);
+        };
+
+        match instance.execute_if_running(command, args, now).await? {
+            Some(value) => Ok(Some(value)),
+            None => {
+                let removed = {
+                    let mut instances = self.instances.lock().await;
+                    let should_remove = instances
+                        .get(key)
+                        .filter(|current| Arc::ptr_eq(current, &instance))
+                        .is_some();
+                    should_remove.then(|| instances.remove(key)).flatten()
+                };
+                if let Some(instance) = removed {
+                    instance.dispose().await;
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    async fn start_lock_for(&self, key: &ExtensionHostInstanceKey) -> Arc<Mutex<()>> {
+        let mut start_locks = self.start_locks.lock().await;
+        start_locks
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 }
 
@@ -315,11 +409,15 @@ impl ExtensionHostRuntimeState {
         app: tauri::AppHandle<R>,
         db_state: &DbInitState,
     ) -> AppResult<Arc<ExtensionHostInstanceRegistry>> {
+        if let Some(registry) = { self.registry.lock().await.clone() } {
+            return Ok(registry.clone());
+        }
+
+        let db = ensure_db_ready(app, db_state).await?;
         let mut guard = self.registry.lock().await;
         if let Some(registry) = guard.as_ref() {
             return Ok(registry.clone());
         }
-        let db = ensure_db_ready(app, db_state).await?;
         let registry = Arc::new(ExtensionHostInstanceRegistry::new(db));
         *guard = Some(registry.clone());
         Ok(registry)
@@ -345,57 +443,62 @@ impl ExtensionHostRuntimeState {
     }
 }
 
-async fn dispose_same_plugin_with_different_key(
-    instances: &mut BTreeMap<ExtensionHostInstanceKey, ManagedExtensionHostInstance>,
+fn remove_same_plugin_with_different_key(
+    instances: &mut BTreeMap<ExtensionHostInstanceKey, Arc<ManagedExtensionHostInstance>>,
     key: &ExtensionHostInstanceKey,
-) {
+) -> Vec<Arc<ManagedExtensionHostInstance>> {
     let keys = instances
         .keys()
         .filter(|existing| existing.plugin_id == key.plugin_id && *existing != key)
         .cloned()
         .collect::<Vec<_>>();
-    for key in keys {
-        if let Some(instance) = instances.remove(&key) {
-            instance.dispose().await;
-        }
-    }
+    keys.into_iter()
+        .filter_map(|key| instances.remove(&key))
+        .collect()
 }
 
-async fn dispose_idle_locked(
-    instances: &mut BTreeMap<ExtensionHostInstanceKey, ManagedExtensionHostInstance>,
+fn remove_idle_locked(
+    instances: &mut BTreeMap<ExtensionHostInstanceKey, Arc<ManagedExtensionHostInstance>>,
     idle_recycle: Duration,
     now: Instant,
-) {
+) -> Vec<Arc<ManagedExtensionHostInstance>> {
     let idle_keys = instances
         .iter()
         .filter(|(_, instance)| {
-            now.checked_duration_since(instance.last_used)
+            now.checked_duration_since(instance.last_used())
                 .is_some_and(|elapsed| elapsed >= idle_recycle)
         })
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
-    for key in idle_keys {
-        if let Some(instance) = instances.remove(&key) {
-            instance.dispose().await;
-        }
-    }
+    idle_keys
+        .into_iter()
+        .filter_map(|key| instances.remove(&key))
+        .collect()
 }
 
-async fn enforce_warm_limit_locked(
-    instances: &mut BTreeMap<ExtensionHostInstanceKey, ManagedExtensionHostInstance>,
+fn remove_lru_over_limit_locked(
+    instances: &mut BTreeMap<ExtensionHostInstanceKey, Arc<ManagedExtensionHostInstance>>,
     max_warm_instances: usize,
-) {
+) -> Vec<Arc<ManagedExtensionHostInstance>> {
+    let mut disposals = Vec::new();
     while instances.len() > max_warm_instances {
         let Some(key) = instances
             .iter()
-            .min_by_key(|(_, instance)| instance.last_used)
+            .min_by_key(|(_, instance)| instance.last_used())
             .map(|(key, _)| key.clone())
         else {
-            return;
+            return disposals;
         };
         if let Some(instance) = instances.remove(&key) {
-            instance.dispose().await;
+            disposals.push(instance);
         }
+    }
+    disposals
+}
+
+async fn dispose_instances(instances: impl IntoIterator<Item = Arc<ManagedExtensionHostInstance>>) {
+    for instance in instances {
+        instance.dispose().await;
     }
 }
 
@@ -438,6 +541,7 @@ mod tests {
     use serde_json::json;
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::{Duration, Instant};
+    use tokio::sync::Notify;
 
     struct FakeExtensionHostFactory {
         state: Arc<StdMutex<FakeFactoryState>>,
@@ -454,6 +558,31 @@ mod tests {
     struct FakeExtensionHostProcess {
         id: u64,
         state: Arc<StdMutex<FakeFactoryState>>,
+        running: bool,
+    }
+
+    #[derive(Default)]
+    struct BlockingExtensionHostFactory {
+        slow_command: Arc<BlockingCommandControl>,
+        slow_dispose: Arc<BlockingDisposeControl>,
+    }
+
+    #[derive(Default)]
+    struct BlockingCommandControl {
+        started: Notify,
+        release: Notify,
+    }
+
+    #[derive(Default)]
+    struct BlockingDisposeControl {
+        started: Notify,
+        release: Notify,
+    }
+
+    struct BlockingExtensionHostProcess {
+        plugin_id: String,
+        slow_command: Arc<BlockingCommandControl>,
+        slow_dispose: Arc<BlockingDisposeControl>,
         running: bool,
     }
 
@@ -527,6 +656,56 @@ mod tests {
             Box::pin(async move {
                 self.running = false;
                 self.state.lock().unwrap().disposals.push(self.id);
+            })
+        }
+    }
+
+    impl ExtensionHostFactory for BlockingExtensionHostFactory {
+        fn start<'a>(
+            &'a self,
+            detail: PluginDetail,
+            _db: db::Db,
+        ) -> BoxFuture<'a, AppResult<Box<dyn ExtensionHostProcess>>> {
+            Box::pin(async move {
+                Ok(Box::new(BlockingExtensionHostProcess {
+                    plugin_id: detail.summary.plugin_id,
+                    slow_command: self.slow_command.clone(),
+                    slow_dispose: self.slow_dispose.clone(),
+                    running: true,
+                }) as Box<dyn ExtensionHostProcess>)
+            })
+        }
+    }
+
+    impl ExtensionHostProcess for BlockingExtensionHostProcess {
+        fn execute_command<'a>(
+            &'a mut self,
+            command: &'a str,
+            _args: Value,
+        ) -> BoxFuture<'a, AppResult<Value>> {
+            Box::pin(async move {
+                if self.plugin_id == "acme.slow" && command == "slow" {
+                    self.slow_command.started.notify_waiters();
+                    self.slow_command.release.notified().await;
+                }
+                Ok(json!({
+                    "pluginId": self.plugin_id,
+                    "command": command,
+                }))
+            })
+        }
+
+        fn is_running(&mut self) -> bool {
+            self.running
+        }
+
+        fn dispose<'a>(&'a mut self) -> BoxFuture<'a, ()> {
+            Box::pin(async move {
+                if self.plugin_id == "acme.slow" {
+                    self.slow_dispose.started.notify_waiters();
+                    self.slow_dispose.release.notified().await;
+                }
+                self.running = false;
             })
         }
     }
@@ -768,6 +947,124 @@ mod tests {
 
         assert_eq!(factory.disposed_instance_ids(), vec![2]);
         assert_eq!(registry.instance_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn registry_allows_different_plugin_commands_while_one_plugin_command_is_slow() {
+        let factory = Arc::new(BlockingExtensionHostFactory::default());
+        let registry = Arc::new(ExtensionHostInstanceRegistry::new_for_tests(
+            factory.clone(),
+            ExtensionHostRegistryLimits {
+                max_warm_instances: 8,
+                idle_recycle: Duration::from_secs(120),
+            },
+        ));
+        let slow_registry = registry.clone();
+
+        let slow_task = tokio::spawn(async move {
+            slow_registry
+                .execute_command_with_now(
+                    plugin_detail("acme.slow", "slow"),
+                    "slow",
+                    json!({}),
+                    Instant::now(),
+                )
+                .await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            factory.slow_command.started.notified(),
+        )
+        .await
+        .expect("slow command should start");
+
+        let fast_result = tokio::time::timeout(
+            Duration::from_millis(100),
+            registry.execute_command_with_now(
+                plugin_detail("acme.fast", "fast"),
+                "fast",
+                json!({}),
+                Instant::now(),
+            ),
+        )
+        .await;
+
+        factory.slow_command.release.notify_waiters();
+        slow_task
+            .await
+            .expect("slow task join")
+            .expect("slow command result");
+
+        assert!(
+            fast_result.is_ok(),
+            "fast plugin command should not wait for slow plugin command"
+        );
+        fast_result
+            .expect("fast command should complete")
+            .expect("fast command result");
+    }
+
+    #[tokio::test]
+    async fn registry_dispose_plugin_does_not_block_other_plugin_commands() {
+        let factory = Arc::new(BlockingExtensionHostFactory::default());
+        let registry = Arc::new(ExtensionHostInstanceRegistry::new_for_tests(
+            factory.clone(),
+            ExtensionHostRegistryLimits {
+                max_warm_instances: 8,
+                idle_recycle: Duration::from_secs(120),
+            },
+        ));
+        registry
+            .execute_command_with_now(
+                plugin_detail("acme.slow", "slow"),
+                "warm",
+                json!({}),
+                Instant::now(),
+            )
+            .await
+            .expect("warm slow plugin");
+        registry
+            .execute_command_with_now(
+                plugin_detail("acme.fast", "fast"),
+                "warm",
+                json!({}),
+                Instant::now(),
+            )
+            .await
+            .expect("warm fast plugin");
+
+        let dispose_registry = registry.clone();
+        let dispose_task = tokio::spawn(async move {
+            dispose_registry.dispose_plugin("acme.slow").await;
+        });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            factory.slow_dispose.started.notified(),
+        )
+        .await
+        .expect("slow dispose should start");
+
+        let fast_result = tokio::time::timeout(
+            Duration::from_millis(100),
+            registry.execute_command_with_now(
+                plugin_detail("acme.fast", "fast"),
+                "fast",
+                json!({}),
+                Instant::now(),
+            ),
+        )
+        .await;
+
+        factory.slow_dispose.release.notify_waiters();
+        dispose_task.await.expect("dispose task join");
+
+        assert!(
+            fast_result.is_ok(),
+            "fast plugin command should not wait for slow plugin dispose"
+        );
+        fast_result
+            .expect("fast command should complete")
+            .expect("fast command result");
     }
 
     #[tokio::test]
