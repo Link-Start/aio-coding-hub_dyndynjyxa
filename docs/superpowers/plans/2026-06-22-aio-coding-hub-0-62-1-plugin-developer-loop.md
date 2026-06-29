@@ -1767,12 +1767,12 @@ In `docs/plugins/developer-guide.md`, update the command sequence so it reads:
 
 ```md
 pnpm --filter create-aio-plugin test
-pnpm --filter create-aio-plugin exec create-aio-plugin acme.redactor rule
-pnpm --filter create-aio-plugin exec create-aio-plugin doctor ./acme.redactor
-pnpm --filter create-aio-plugin exec create-aio-plugin validate --strict ./acme.redactor
-pnpm --filter create-aio-plugin exec create-aio-plugin replay --explain ./acme.redactor ./fixtures/claude-request.json gateway.request.afterBodyRead
-pnpm --filter create-aio-plugin exec create-aio-plugin replay --explain ./acme.redactor ./fixtures/codex-request.json gateway.request.afterBodyRead
-pnpm --filter create-aio-plugin exec create-aio-plugin pack ./acme.redactor
+pnpm --filter create-aio-plugin cli acme.redactor rule
+pnpm --filter create-aio-plugin cli doctor ./acme.redactor
+pnpm --filter create-aio-plugin cli validate --strict ./acme.redactor
+pnpm --filter create-aio-plugin cli replay --explain ./acme.redactor ./fixtures/claude-request.json gateway.request.afterBodyRead
+pnpm --filter create-aio-plugin cli replay --explain ./acme.redactor ./fixtures/codex-request.json gateway.request.afterBodyRead
+pnpm --filter create-aio-plugin cli pack ./acme.redactor
 ```
 
 Add this short explanation near the first `create-aio-plugin validate` section:
@@ -1788,10 +1788,10 @@ Warnings do not fail the command in 0.62.1; any `error` severity diagnostic retu
 In `docs/plugins/reference/sdk.md`, update the devtools command block to:
 
 ```md
-pnpm --filter create-aio-plugin exec create-aio-plugin doctor ./acme.redactor
-pnpm --filter create-aio-plugin exec create-aio-plugin validate --strict ./acme.redactor
-pnpm --filter create-aio-plugin exec create-aio-plugin replay --explain ./acme.redactor ./fixtures/request.json gateway.request.afterBodyRead
-pnpm --filter create-aio-plugin exec create-aio-plugin pack ./acme.redactor
+pnpm --filter create-aio-plugin cli doctor ./acme.redactor
+pnpm --filter create-aio-plugin cli validate --strict ./acme.redactor
+pnpm --filter create-aio-plugin cli replay --explain ./acme.redactor ./fixtures/request.json gateway.request.afterBodyRead
+pnpm --filter create-aio-plugin cli pack ./acme.redactor
 ```
 
 Add the stable diagnostic shape:

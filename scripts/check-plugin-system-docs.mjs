@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(scriptDir);
+const legacyCreateAioPluginExecCommand =
+  "pnpm --filter create-aio-plugin exec " + "create-aio-plugin";
 
 const requiredDocs = [
   {
@@ -19,6 +21,16 @@ const requiredDocs = [
       "gateway.response.chunk (active SSE chunk inspect/modify/block)",
       "log.beforePersist (active request log redaction before enqueue)",
       "WASM",
+      "public manifests use `capabilities`",
+      "Extension Host public manifest 不支持 top-level `permissions`",
+      "capability changes",
+    ],
+    forbiddenPhrases: [
+      "granted permissions",
+      "body-read permissions",
+      "write permissions",
+      "add permissions",
+      "permission changes",
     ],
   },
   {
@@ -81,9 +93,9 @@ const requiredDocs = [
       "request.normalizedMessages",
       "configSchema",
       "x-aio-ui",
-      "pnpm --filter create-aio-plugin exec create-aio-plugin validate",
-      "pnpm --filter create-aio-plugin exec create-aio-plugin replay",
-      "pnpm --filter create-aio-plugin exec create-aio-plugin pack",
+      "pnpm --filter create-aio-plugin cli validate",
+      "pnpm --filter create-aio-plugin cli replay",
+      "pnpm --filter create-aio-plugin cli pack",
       ".aio-plugin",
       "official.privacy-filter",
       "精选插件",
@@ -98,6 +110,7 @@ const requiredDocs = [
       "WASM 适合需要确定性代码逻辑的插件",
       "pnpm plugin-wasm-sdk:test",
       "最小声明式规则插件",
+      legacyCreateAioPluginExecCommand,
     ],
   },
   {
@@ -129,10 +142,10 @@ const requiredDocs = [
     path: "docs/plugins/developer-guide.md",
     phrases: [
       "create-aio-plugin",
-      "pnpm --filter create-aio-plugin exec create-aio-plugin",
-      "pnpm --filter create-aio-plugin exec create-aio-plugin validate",
-      "pnpm --filter create-aio-plugin exec create-aio-plugin replay",
-      "pnpm --filter create-aio-plugin exec create-aio-plugin pack",
+      "pnpm --filter create-aio-plugin cli",
+      "pnpm --filter create-aio-plugin cli validate",
+      "pnpm --filter create-aio-plugin cli replay",
+      "pnpm --filter create-aio-plugin cli pack",
       "从 Plugins 页面本地安装",
       "Claude 和 Codex request shapes",
       "@aio-coding-hub/plugin-sdk",

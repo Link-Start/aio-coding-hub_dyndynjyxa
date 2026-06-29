@@ -69,7 +69,7 @@ Official privacy filter rules are loaded under a 1 MiB host byte budget。社区
 - 精确列出它依赖的 capabilities，以及官方 runtime 使用的内部 context/mutation labels。
 - 简短说明哪些行为是 intentionally unsupported。
 - 能被宿主导出的 trace replay fixture 覆盖至少一个正常路径和一个边界路径。
-- 能通过 `pnpm --filter create-aio-plugin exec create-aio-plugin publish-check` 生成市场发布 metadata。
+- 能通过 `pnpm --filter create-aio-plugin cli publish-check` 生成市场发布 metadata。
 
 社区示例应使用 Extension Host。Gateway 行为通过 `contributes.gatewayHooks` 和 `api.gateway.registerHook` 表达；旧运行时只用于迁移说明。
 

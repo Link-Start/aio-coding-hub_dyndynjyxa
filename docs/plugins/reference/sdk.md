@@ -48,10 +48,10 @@ TypeScript SDK 导出：
 `create-aio-plugin` 使用 SDK 做 manifest validation，并针对真实插件目录提供本地开发命令：
 
 ```bash
-pnpm --filter create-aio-plugin exec create-aio-plugin doctor ./acme.redactor
-pnpm --filter create-aio-plugin exec create-aio-plugin validate --strict ./acme.redactor
-pnpm --filter create-aio-plugin exec create-aio-plugin replay --explain ./acme.redactor ./fixtures/request.json gateway.request.afterBodyRead
-pnpm --filter create-aio-plugin exec create-aio-plugin pack ./acme.redactor
+pnpm --filter create-aio-plugin cli doctor ./acme.redactor
+pnpm --filter create-aio-plugin cli validate --strict ./acme.redactor
+pnpm --filter create-aio-plugin cli replay --explain ./acme.redactor ./fixtures/request.json gateway.request.afterBodyRead
+pnpm --filter create-aio-plugin cli pack ./acme.redactor
 ```
 
 开发工具的诊断对象使用稳定 shape，便于 CLI、GUI 和测试共享：

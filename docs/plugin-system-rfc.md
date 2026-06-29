@@ -104,13 +104,14 @@ Earlier drafts considered declarative rule, WASM, and arbitrary process runtimes
 
 ## 6. Security Principles
 
-- Least privilege: plugins see only context allowed by their granted permissions and hook type.
-- Sensitive headers such as `Authorization` and `Cookie` are hidden unless `request.header.readSensitive` is explicitly granted.
-- Request and response bodies are hidden unless body-read permissions are granted.
-- Write actions are rejected unless matching write permissions are granted.
-- High-risk permissions require second confirmation.
-- Upgrades that add permissions require renewed authorization.
-- Audit logs record install, enable, disable, config changes, permission changes, hook errors, hook timeouts, blocks, and high-risk mutations.
+- Least privilege: public manifests use `capabilities`; Extension Host public manifest 不支持 top-level `permissions`.
+- The host trims hook context by capability, hook contract, runtime policy, and context budget before invoking plugin code.
+- Sensitive headers such as `Authorization` and `Cookie` are visible only when the hook contract, context budget, and host policy allow that field for the installed capability set.
+- Request and response body visibility is decided by the hook contract, context budget, and host policy. Internal context labels such as `request.body.read` or `request.header.readSensitive` describe host-side exposure decisions, not public top-level manifest permissions.
+- Plugin mutation proposals are host-mediated. The host validates each proposed header/body/status/log mutation against the hook contract and runtime policy, then accepts, trims, or rejects it.
+- High-risk capabilities require second confirmation.
+- Upgrades that add capabilities require renewed authorization.
+- Audit logs record install, enable, disable, config changes, capability changes, hook errors, hook timeouts, blocks, and high-risk mutations.
 - Audit logs must not store sensitive raw values.
 - Consecutive failures can quarantine a plugin.
 - Safety-class plugins may use fail-closed behavior. Decorative plugins default to fail-open.

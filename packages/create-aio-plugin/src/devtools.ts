@@ -101,9 +101,9 @@ const USAGE = [
 export function runCreateAioPluginCli(args: string[], cwd: string, io: CliIo = console): number {
   const [commandOrId, firstArg, secondArg, thirdArg] = args;
 
-  if (!commandOrId) {
-    io.error(USAGE);
-    return 1;
+  if (!commandOrId || commandOrId === "--help" || commandOrId === "-h" || commandOrId === "help") {
+    io.log(USAGE);
+    return commandOrId ? 0 : 1;
   }
 
   if (commandOrId === "doctor") {
