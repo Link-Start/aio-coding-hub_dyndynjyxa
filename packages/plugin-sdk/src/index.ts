@@ -420,6 +420,13 @@ function validateContributes(
   if (!raw) {
     return invalid("PLUGIN_INVALID_CONTRIBUTES", "contributes must be an object");
   }
+  for (const key of Object.keys(raw)) {
+    if (
+      !["providers", "protocols", "protocolBridges", "commands", "gatewayHooks", "ui"].includes(key)
+    ) {
+      return invalid("PLUGIN_INVALID_CONTRIBUTION", `unsupported contribution field: ${key}`);
+    }
+  }
   const providerError = validateProviderContributions(raw.providers);
   if (providerError) return providerError;
   const protocolError = validateProtocolContributions(raw.protocols);
@@ -430,12 +437,6 @@ function validateContributes(
   if (commandError) return commandError;
   const gatewayHookError = validateGatewayHookContributions(raw.gatewayHooks);
   if (gatewayHookError) return gatewayHookError;
-  if (hasOwn(raw, "gatewayRules")) {
-    return invalid(
-      "PLUGIN_INVALID_CONTRIBUTION",
-      "gatewayRules are no longer supported; use gatewayHooks"
-    );
-  }
   return validateUiContributions(raw.ui);
 }
 

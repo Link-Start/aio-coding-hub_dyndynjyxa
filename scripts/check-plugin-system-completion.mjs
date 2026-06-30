@@ -87,26 +87,26 @@ for (const doc of docs) {
 
 for (const [doc, phrases] of Object.entries({
   "docs/plugin-manifest-v1.md": [
-    "runtime.kind = \"extensionHost\"",
+    'runtime.kind = "extensionHost"',
     "`main` points at bundled JavaScript output",
     "`contributes.gatewayHooks`",
-    "`capabilities: [\"gateway.hooks\"]`",
+    '`capabilities: ["gateway.hooks"]`',
     "`api.gateway.registerHook`",
   ],
   "docs/plugins/developer-guide.md": [
     "Extension Host 是唯一 community runtime",
-    "`runtime.kind = \"extensionHost\"`",
+    '`runtime.kind = "extensionHost"`',
     "`main` 指向打包后的 JavaScript 输出",
     "`contributes.gatewayHooks`",
     "`api.gateway.registerHook`",
     "PLUGIN_REPLAY_UNSUPPORTED",
   ],
   "docs/plugins/plugin-api-v1-contract.json": [
-    "\"communityRuntimes\": [",
-    "\"extensionHost\"",
-    "\"unsupportedLegacyRuntimes\"",
-    "\"gatewayHooks\"",
-    "\"protocolBridges\"",
+    '"communityRuntimes": [',
+    '"extensionHost"',
+    '"unsupportedLegacyRuntimes"',
+    '"gatewayHooks"',
+    '"protocolBridges"',
   ],
 })) {
   const text = readText(doc);
@@ -119,21 +119,12 @@ for (const [doc, phrases] of Object.entries({
 
 for (const [doc, phrases] of Object.entries({
   "docs/plugins/developer-guide.md": [
-    "`declarativeRules` 是默认社区运行时",
     "WASM 执行受宿主策略控制",
     "`plugin.wasm`",
     "pnpm --filter create-aio-plugin cli replay",
   ],
-  "docs/plugin-manifest-v1.md": [
-    '"kind": "declarativeRules"',
-    '"kind": "wasm"',
-    '"gatewayRules"',
-  ],
-  "docs/plugins/plugin-api-v1-contract.json": [
-    '"communityRuntimes": ["declarativeRules"]',
-    '"policyGatedRuntimes"',
-    '"gatewayRules"',
-  ],
+  "docs/plugin-manifest-v1.md": ['"kind": "wasm"'],
+  "docs/plugins/plugin-api-v1-contract.json": ['"policyGatedRuntimes"'],
 })) {
   const text = readText(doc);
   for (const phrase of phrases) {

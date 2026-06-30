@@ -4,8 +4,8 @@
 >
 > This historical plan is retained for context only. The current public plugin
 > direction is Extension Host-only, documented in `docs/plugin-manifest-v1.md`
-> and `docs/plugins/`. Earlier declarative rule, WASM, and arbitrary process
-> runtime plans are unsupported pre-release history and are not the current
+> and `docs/plugins/`. Earlier alternate WASM and arbitrary process runtime
+> plans are unsupported pre-release history and are not the current
 > implementation plan.
 
 ## 1. 目标与开发边界
@@ -1041,7 +1041,6 @@
   - `docs/plugins/reference/hooks.md`
   - `docs/plugins/reference/permissions.md`
   - `docs/plugins/reference/config-schema.md`
-  - `docs/plugins/reference/declarative-rules.md`
   - `docs/plugins/reference/publishing.md`
   - `docs/plugins/reference/compatibility.md`
   - `docs/plugins/runtime/README.md`

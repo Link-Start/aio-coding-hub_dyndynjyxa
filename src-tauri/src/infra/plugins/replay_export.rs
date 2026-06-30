@@ -215,7 +215,7 @@ INSERT INTO request_logs (
                 plugin_id: "community.prompt-helper".to_string(),
                 trace_id: Some("trace-replay-1".to_string()),
                 hook_name: "gateway.request.afterBodyRead".to_string(),
-                runtime_kind: "declarativeRules".to_string(),
+                runtime_kind: "extensionHost".to_string(),
                 status: "completed".to_string(),
                 started_at_ms: 1_700_000_000_001,
                 duration_ms: 8,

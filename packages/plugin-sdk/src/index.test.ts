@@ -62,10 +62,10 @@ describe("validateManifest", () => {
     expect(validateManifest(openRouterManifest)).toEqual({ ok: true });
   });
 
-  test("rejects declarativeRules as unsupported public runtime", () => {
+  test("rejects wasm as unsupported public runtime", () => {
     const manifest = {
       ...openRouterManifest,
-      runtime: { kind: "declarativeRules", rules: ["rules/main.json"] },
+      runtime: { kind: "wasm", abiVersion: "1.0.0" },
       hooks: [{ name: "gateway.request.afterBodyRead" }],
       permissions: ["request.body.read"],
     } as unknown as PluginManifest;
@@ -79,11 +79,11 @@ describe("validateManifest", () => {
     });
   });
 
-  test("rejects gatewayRules contributions", () => {
+  test("rejects unknown contribution fields", () => {
     const manifest = {
       ...openRouterManifest,
       contributes: {
-        gatewayRules: [{ rules: ["rules/main.json"] }],
+        legacyRules: [{ rules: ["rules/main.json"] }],
       },
     };
 
@@ -91,7 +91,7 @@ describe("validateManifest", () => {
       ok: false,
       error: {
         code: "PLUGIN_INVALID_CONTRIBUTION",
-        message: "gatewayRules are no longer supported; use gatewayHooks",
+        message: "unsupported contribution field: legacyRules",
       },
     });
   });

@@ -67,7 +67,7 @@ Extension Host 是唯一 community runtime：
 
 `main` 必须是包内相对路径，指向 `.js` 或 `.cjs` 文件。推荐源码使用 TypeScript 或 JavaScript，发布包只携带打包后的 JavaScript 输出。宿主负责加载、激活、超时控制、失败策略和 dispose；插件不能直接创建或持有宿主 runtime 实例。
 
-旧的 declarative rules、WASM、process 和第三方 native 运行时属于 unsupported pre-release legacy runtime。公开社区插件不能声明这些运行时；迁移文档只保留用于解释旧包为什么会被拒绝。
+旧的 WASM、process 和第三方 native 运行时属于 unsupported pre-release legacy runtime。公开社区插件不能声明这些运行时；迁移到 Extension Host 后通过 `contributes.gatewayHooks` 和 `api.gateway.registerHook` 实现网关扩展。
 
 Official-only host-owned built-in runtime：
 

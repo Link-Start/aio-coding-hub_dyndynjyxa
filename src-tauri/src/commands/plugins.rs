@@ -273,10 +273,11 @@ pub(crate) async fn plugin_preview_update_from_file(
 pub(crate) async fn plugin_install_from_file(
     app: tauri::AppHandle,
     db_state: tauri::State<'_, DbInitState>,
+    registry_state: tauri::State<'_, ExtensionHostRuntimeState>,
     input: PluginInstallFromFileInput,
 ) -> Result<PluginDetail, String> {
     let db = ensure_db_ready(app.clone(), db_state.inner()).await?;
-    blocking::run("plugin_install_from_file", move || {
+    let detail = blocking::run("plugin_install_from_file", move || {
         let path = PathBuf::from(&input.file_path);
         let cache_dir = crate::app_paths::plugins_cache_dir(&app)?;
         let installed_dir = crate::app_paths::plugins_installed_dir(&app)?;
@@ -291,7 +292,9 @@ pub(crate) async fn plugin_install_from_file(
         .and_then(|detail| ensure_plugin_runtime_dirs(&app, detail))
     })
     .await
-    .map_err(Into::into)
+    .map_err(String::from)?;
+    dispose_plugin_extension_host_after_lifecycle_change(&registry_state, &detail).await;
+    Ok(detail)
 }
 
 #[tauri::command]
@@ -418,11 +421,12 @@ pub(crate) async fn plugin_parse_market_index(
 pub(crate) async fn plugin_install_remote(
     app: tauri::AppHandle,
     db_state: tauri::State<'_, DbInitState>,
+    registry_state: tauri::State<'_, ExtensionHostRuntimeState>,
     input: PluginInstallRemoteInput,
 ) -> Result<PluginDetail, String> {
     let db = ensure_db_ready(app.clone(), db_state.inner()).await?;
     let package_bytes = download_remote_plugin_package(&input.download_url).await?;
-    blocking::run("plugin_install_remote", move || {
+    let detail = blocking::run("plugin_install_remote", move || {
         let cache_dir = crate::app_paths::plugins_cache_dir(&app)?;
         let installed_dir = crate::app_paths::plugins_installed_dir(&app)?;
         let install_source = remote_install_source(input.source.as_deref(), &input.download_url)?;
@@ -446,7 +450,9 @@ pub(crate) async fn plugin_install_remote(
         .and_then(|detail| ensure_plugin_runtime_dirs(&app, detail))
     })
     .await
-    .map_err(Into::into)
+    .map_err(String::from)?;
+    dispose_plugin_extension_host_after_lifecycle_change(&registry_state, &detail).await;
+    Ok(detail)
 }
 
 #[tauri::command]
@@ -454,11 +460,12 @@ pub(crate) async fn plugin_install_remote(
 pub(crate) async fn plugin_install_official(
     app: tauri::AppHandle,
     db_state: tauri::State<'_, DbInitState>,
+    registry_state: tauri::State<'_, ExtensionHostRuntimeState>,
     input: PluginGetInput,
 ) -> Result<PluginDetail, String> {
     let db = ensure_db_ready(app.clone(), db_state.inner()).await?;
     let official_resource_root = official_resource_root(&app)?;
-    blocking::run("plugin_install_official", move || {
+    let detail = blocking::run("plugin_install_official", move || {
         let installed_dir = crate::app_paths::plugins_installed_dir(&app)?;
         plugin_service::install_official_plugin(
             &db,
@@ -471,7 +478,9 @@ pub(crate) async fn plugin_install_official(
         .and_then(|detail| ensure_plugin_runtime_dirs(&app, detail))
     })
     .await
-    .map_err(Into::into)
+    .map_err(String::from)?;
+    dispose_plugin_extension_host_after_lifecycle_change(&registry_state, &detail).await;
+    Ok(detail)
 }
 
 #[tauri::command]
@@ -913,6 +922,9 @@ INSERT INTO plugin_market_sources(
     fn plugin_lifecycle_commands_dispose_extension_host_instances_after_success() {
         let source = std::fs::read_to_string(file!()).expect("read plugin commands source");
         for function_name in [
+            "plugin_install_from_file",
+            "plugin_install_remote",
+            "plugin_install_official",
             "plugin_disable",
             "plugin_uninstall",
             "plugin_update_from_file",

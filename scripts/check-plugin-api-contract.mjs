@@ -132,7 +132,7 @@ const contract = readJson(contractPath);
 
 if (contract) {
   const runtimes = requireObject(`${contractPath}.runtimes`, contract.runtimes) ?? {};
-  for (const legacyRuntime of ["declarativeRules", "wasm", "process", "native"]) {
+  for (const legacyRuntime of ["wasm", "process", "native"]) {
     if (Object.prototype.hasOwnProperty.call(runtimes, legacyRuntime)) {
       failures.push(`${contractPath}.runtimes must not expose ${legacyRuntime}`);
     }
@@ -183,7 +183,7 @@ if (contract) {
     `${contractPath}.unsupportedLegacyRuntimes`,
     contract.unsupportedLegacyRuntimes
   );
-  for (const legacyRuntime of ["declarativeRules", "wasm", "process", "native"]) {
+  for (const legacyRuntime of ["wasm", "process", "native"]) {
     if (!unsupportedLegacyRuntimes.includes(legacyRuntime)) {
       failures.push(`${contractPath}.unsupportedLegacyRuntimes must include ${legacyRuntime}`);
     }
@@ -210,9 +210,6 @@ if (contract) {
     if (!contributionPoints.includes(contribution)) {
       failures.push(`${contractPath}.contributionPoints must include ${contribution}`);
     }
-  }
-  if (contributionPoints.includes("gatewayRules")) {
-    failures.push(`${contractPath}.contributionPoints must not include gatewayRules`);
   }
   const capabilityDependencies =
     requireObject(`${contractPath}.capabilityDependencies`, contract.capabilityDependencies) ?? {};

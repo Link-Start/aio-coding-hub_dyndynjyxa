@@ -452,7 +452,7 @@ describe("pages/PluginsPage", () => {
     vi.mocked(usePluginsListQuery).mockReturnValue({
       data: [
         summary({
-          runtime: "declarativeRules",
+          runtime: "wasm",
           status: "disabled",
           last_error: "Unsupported pre-release plugin runtime; reinstall an Extension Host version",
         }),
@@ -464,7 +464,7 @@ describe("pages/PluginsPage", () => {
     vi.mocked(usePluginQuery).mockReturnValue({
       data: detail({
         summary: summary({
-          runtime: "declarativeRules",
+          runtime: "wasm",
           status: "disabled",
           last_error: "Unsupported pre-release plugin runtime; reinstall an Extension Host version",
         }),

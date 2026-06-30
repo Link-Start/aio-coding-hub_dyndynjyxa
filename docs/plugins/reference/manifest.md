@@ -66,4 +66,4 @@ Protocol bridge MVP skeleton 只稳定 `protocolBridges` manifest 声明、`prot
 
 plugin API v1 的 active hooks 见 [Hooks](./hooks.md)。Reserved hooks 会在宿主真正实现前被 manifest 校验拒绝。Reserved permissions 只作为内部/legacy runtime history 的 host-mediated label 保留，不是 public Extension Host manifest 字段。
 
-旧的 declarative rules、WASM、process 和第三方 native manifest 属于 unsupported pre-release legacy runtime。它们的旧字段会被当前公开校验拒绝，迁移说明见 [Legacy Declarative Rules](./declarative-rules.md) 和 [运行时说明](../runtime/README.md)。
+旧的 WASM、process 和第三方 native manifest 属于 unsupported pre-release legacy runtime。当前公开插件应迁移到 Extension Host，迁移说明见 [运行时说明](../runtime/README.md)。

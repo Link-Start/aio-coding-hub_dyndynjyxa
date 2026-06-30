@@ -2,7 +2,7 @@
 
 官方 catalog 会刻意保持很小。`official.privacy-filter` 是当前唯一 bundled official plugin。
 
-这样可以让 trusted host surface 保持收敛，同时把社区扩展统一放在 Extension Host。Declarative rules、WASM、process 和第三方 native 只作为 unsupported pre-release legacy runtime 迁移说明保留。
+这样可以让 trusted host surface 保持收敛，同时把社区扩展统一放在 Extension Host。WASM、process 和第三方 native 只作为 unsupported pre-release legacy runtime 说明保留。
 
 ## 当前官方 ID
 

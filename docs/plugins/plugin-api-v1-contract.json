@@ -105,13 +105,7 @@
     "gateway.request.beforeProviderResolution",
     "gateway.response.headers"
   ],
-  "activeMutationFields": [
-    "requestBody",
-    "responseBody",
-    "streamChunk",
-    "logMessage",
-    "headers"
-  ],
+  "activeMutationFields": ["requestBody", "responseBody", "streamChunk", "logMessage", "headers"],
   "configSchemaTypes": ["object", "array", "string", "password", "number", "integer", "boolean"],
   "activePermissions": [
     "request.meta.read",
@@ -222,12 +216,7 @@
         "response.body.write": ["response.body.read"]
       },
       "mutationFields": ["headers", "responseBody"],
-      "contextFields": [
-        "traceId",
-        "response.status",
-        "response.headers",
-        "response.body"
-      ]
+      "contextFields": ["traceId", "response.status", "response.headers", "response.body"]
     },
     "gateway.error": {
       "phase": "after gateway error response materialization and before it is sent",
@@ -240,12 +229,7 @@
       "writePermissions": ["response.header.write", "response.body.write"],
       "permissionDependencies": {},
       "mutationFields": ["headers", "responseBody"],
-      "contextFields": [
-        "traceId",
-        "response.status",
-        "response.headers",
-        "response.body"
-      ]
+      "contextFields": ["traceId", "response.status", "response.headers", "response.body"]
     },
     "log.beforePersist": {
       "phase": "before gateway request log persistence",
@@ -279,6 +263,6 @@
     "status": "mainline-contract"
   },
   "communityRuntimes": ["extensionHost"],
-  "unsupportedLegacyRuntimes": ["declarativeRules", "wasm", "process", "native"],
+  "unsupportedLegacyRuntimes": ["wasm", "process", "native"],
   "officialRuntimes": ["native:privacyFilter"]
 }

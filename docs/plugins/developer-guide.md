@@ -320,7 +320,7 @@ Warnings do not fail the command in 0.62.1; any `error` severity diagnostic retu
 
 ## Legacy runtime 迁移说明
 
-Declarative rules、WASM、process 和第三方 native 运行时属于 unsupported pre-release legacy runtime。当前公开 manifest validation 会拒绝这些运行时。旧规则插件应迁移为 Extension Host 插件，把规则逻辑放进 `dist/extension.js`，通过 `contributes.gatewayHooks` 声明 hook，再在 `activate(api)` 中调用 `api.gateway.registerHook`。
+WASM、process 和第三方 native 运行时属于 unsupported pre-release legacy runtime。当前公开 manifest validation 会拒绝这些运行时。旧插件应迁移为 Extension Host 插件，把逻辑放进 `dist/extension.js`，通过 `contributes.gatewayHooks` 声明 hook，再在 `activate(api)` 中调用 `api.gateway.registerHook`。
 
 ## 常见排障
 

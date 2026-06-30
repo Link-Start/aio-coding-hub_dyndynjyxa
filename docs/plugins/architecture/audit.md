@@ -8,7 +8,7 @@
 
 移除之前官方 catalog 中的 built-in prompt optimizer、safety detector 和 generic redactor examples。它们仍然是有效扩展场景，但应通过 Extension Host gateway hooks 作为社区插件实现。
 
-Declarative rules、WASM、process 和第三方 native 属于 unsupported pre-release legacy runtime。它们可以出现在迁移说明或拒绝测试中，但不能作为当前公开社区插件路径推荐。
+WASM、process 和第三方 native 属于 unsupported pre-release legacy runtime。它们可以出现在迁移说明或拒绝测试中，但不能作为当前公开社区插件路径推荐。
 
 ## 架构依据
 

@@ -414,10 +414,10 @@ describe("create-aio-plugin scaffold", () => {
   });
 
   it("validate strict rejects legacy runtime and contribution fields", () => {
-    const declarative = validatePluginFilesStrict(legacyDeclarativeRuleFiles());
+    const legacy = validatePluginFilesStrict(legacyWasmFiles());
 
-    expect(declarative.ok).toBe(false);
-    expect(declarative.diagnostics).toContainEqual(
+    expect(legacy.ok).toBe(false);
+    expect(legacy.diagnostics).toContainEqual(
       expect.objectContaining({
         severity: "error",
         code: "PLUGIN_UNSUPPORTED_LEGACY_RUNTIME",
@@ -425,11 +425,11 @@ describe("create-aio-plugin scaffold", () => {
       })
     );
 
-    const gatewayRules = validatePluginFilesStrict({
+    const unknownContribution = validatePluginFilesStrict({
       "plugin.json": `${JSON.stringify(
         {
           ...validExtensionManifest(),
-          contributes: { gatewayRules: [{ rules: ["rules/main.json"] }] },
+          contributes: { legacyRules: [{ rules: ["rules/main.json"] }] },
         },
         null,
         2
@@ -437,8 +437,8 @@ describe("create-aio-plugin scaffold", () => {
       "dist/extension.js": "module.exports.activate = function() {};\n",
     });
 
-    expect(gatewayRules.ok).toBe(false);
-    expect(gatewayRules.diagnostics).toContainEqual(
+    expect(unknownContribution.ok).toBe(false);
+    expect(unknownContribution.diagnostics).toContainEqual(
       expect.objectContaining({
         severity: "error",
         code: "PLUGIN_INVALID_CONTRIBUTION",
@@ -479,10 +479,10 @@ describe("create-aio-plugin scaffold", () => {
   });
 
   it("doctor reports unsupported diagnostics for legacy manifests", () => {
-    const declarativeResult = doctorPluginFiles(legacyDeclarativeRuleFiles());
+    const legacyResult = doctorPluginFiles(legacyWasmFiles());
 
-    expect(declarativeResult.ok).toBe(false);
-    expect(declarativeResult.diagnostics).toContainEqual(
+    expect(legacyResult.ok).toBe(false);
+    expect(legacyResult.diagnostics).toContainEqual(
       expect.objectContaining({
         severity: "error",
         code: "PLUGIN_UNSUPPORTED_LEGACY_RUNTIME",
@@ -490,7 +490,7 @@ describe("create-aio-plugin scaffold", () => {
         path: "plugin.json#/runtime",
       })
     );
-    expect(declarativeResult.diagnostics).not.toContainEqual(
+    expect(legacyResult.diagnostics).not.toContainEqual(
       expect.objectContaining({ code: "PLUGIN_RULE_FILE_MISSING" })
     );
 
@@ -591,7 +591,7 @@ describe("create-aio-plugin scaffold", () => {
     expect(packed.bytes.length).toBeGreaterThan(64);
   });
 
-  it("replay is disabled for extension host and legacy declarative rule packages", () => {
+  it("replay is disabled for extension host and legacy packages", () => {
     const extensionFiles = createPluginScaffold({
       id: "acme.real",
       name: "Real",
@@ -607,7 +607,7 @@ describe("create-aio-plugin scaffold", () => {
       })
     ).toThrow(/PLUGIN_REPLAY_UNSUPPORTED/);
     expect(() =>
-      replayHook(legacyDeclarativeRuleFiles(), "gateway.request.afterBodyRead", {
+      replayHook(legacyWasmFiles(), "gateway.request.afterBodyRead", {
         request: { body: "SECRET_TOKEN" },
       })
     ).toThrow(/PLUGIN_REPLAY_UNSUPPORTED/);
@@ -638,8 +638,18 @@ describe("create-aio-plugin scaffold", () => {
 
 describe("create-aio-plugin example templates", () => {
   it.each([
-    ["acme.prompt-helper", "Prompt Helper", "example:prompt-helper", ["gateway.request.afterBodyRead"]],
-    ["acme.redactor", "Redactor", "example:redactor", ["gateway.request.beforeSend", "log.beforePersist"]],
+    [
+      "acme.prompt-helper",
+      "Prompt Helper",
+      "example:prompt-helper",
+      ["gateway.request.afterBodyRead"],
+    ],
+    [
+      "acme.redactor",
+      "Redactor",
+      "example:redactor",
+      ["gateway.request.beforeSend", "log.beforePersist"],
+    ],
     ["acme.response-guard", "Response Guard", "example:response-guard", ["gateway.response.after"]],
   ] as const)(
     "generates extension host gateway hook example %s",
@@ -777,11 +787,14 @@ function expectExampleReadmeDocumentsDevtoolsLoop(files: Record<string, string>)
 }
 
 function expectNoGeneratedLegacyFields(files: Record<string, string>): void {
-  for (const [path, content] of Object.entries(files)) {
+  for (const path of Object.keys(files)) {
     expect(path).not.toContain("rules/");
-    expect(content).not.toMatch(/\bdeclarativeRules\b/);
-    expect(content).not.toMatch(/\bgatewayRules\b/);
   }
+  const manifest = readManifest(files);
+  expect(manifest.runtime).toEqual({
+    kind: "extensionHost",
+    language: "typescript",
+  });
 }
 
 function readManifest(files: Record<string, string>): Record<string, any> {
@@ -814,7 +827,7 @@ function validExtensionManifest() {
   };
 }
 
-function legacyDeclarativeRuleFiles(): Record<string, string> {
+function legacyWasmFiles(): Record<string, string> {
   return {
     "plugin.json": `${JSON.stringify(
       {
@@ -822,7 +835,7 @@ function legacyDeclarativeRuleFiles(): Record<string, string> {
         name: "Legacy",
         version: "0.1.0",
         apiVersion: "1.0.0",
-        runtime: { kind: "declarativeRules", rules: ["rules/main.json"] },
+        runtime: { kind: "wasm", abiVersion: "1.0.0" },
         hooks: [{ name: "gateway.request.afterBodyRead", priority: 100 }],
         permissions: ["request.body.read", "request.body.write"],
         hostCompatibility: { app: ">=0.56.0 <1.0.0", pluginApi: "^1.0.0" },
@@ -830,7 +843,7 @@ function legacyDeclarativeRuleFiles(): Record<string, string> {
       null,
       2
     )}\n`,
-    "rules/main.json": `${JSON.stringify({ rules: [] }, null, 2)}\n`,
+    "plugin.wasm": "",
   };
 }
 

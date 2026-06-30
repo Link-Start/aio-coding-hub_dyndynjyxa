@@ -1,11 +1,10 @@
 # 插件运行时说明
 
-这里解释插件运行时如何执行，以及当前哪些能力已经开放。Extension Host 是唯一 community runtime。旧 WASM、process 和 declarative rules 文档只作为 unsupported pre-release legacy runtime notes 保留，不是当前推荐路径。
+这里解释插件运行时如何执行，以及当前哪些能力已经开放。Extension Host 是唯一 community runtime。旧 WASM、process 和第三方 native 只作为 unsupported pre-release legacy runtime notes 保留，不是当前推荐路径。
 
 - [流式响应插件](./streaming.md)：`gateway.response.chunk`、sliding window 和 `stream.modify` 的边界。
 - [WASM legacy note](./wasm.md)：说明旧 WASM runtime 为什么不属于公开 community runtime。
 - [Process runtime legacy note](./process-poc.md)：说明旧 JSON-RPC over stdio PoC 为什么不属于公开 community runtime。
-- [Declarative rules legacy note](../reference/declarative-rules.md)：规则插件迁移到 Extension Host 的说明。
 
 ## Extension Host Runtime Lifecycle
 

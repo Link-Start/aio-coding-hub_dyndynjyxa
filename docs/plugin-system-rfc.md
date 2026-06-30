@@ -100,7 +100,7 @@ The host decides when handlers run, what permission-trimmed context they receive
 
 ### Unsupported Legacy Runtime Ideas
 
-Earlier drafts considered declarative rule, WASM, and arbitrary process runtimes. They are not public community runtimes in the current contract. Old local packages using those shapes are treated as unsupported pre-release legacy packages and should migrate to Extension Host gateway hooks.
+Earlier drafts considered alternate WASM and arbitrary process runtimes. They are not public community runtimes in the current contract. Old local packages using those shapes are treated as unsupported pre-release legacy packages and should migrate to Extension Host gateway hooks.
 
 ## 6. Security Principles
 

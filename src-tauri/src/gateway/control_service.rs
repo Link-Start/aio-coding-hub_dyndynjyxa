@@ -477,7 +477,6 @@ mod tests {
                         priority: 10,
                         failure_policy: Some("fail-closed".to_string()),
                     }],
-                    unsupported_gateway_rules: Default::default(),
                     ui: BTreeMap::new(),
                 }),
                 capabilities: vec!["gateway.hooks".to_string()],

@@ -19,10 +19,12 @@ use rusqlite::OptionalExtension;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 const OFFICIAL_PRIVACY_FILTER_ID: &str = "official.privacy-filter";
 const UNSUPPORTED_LEGACY_RUNTIME_ERROR: &str =
     "Unsupported pre-release plugin runtime; reinstall an Extension Host version";
+static PLUGIN_WORK_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn list_plugins(db: &crate::db::Db) -> AppResult<Vec<crate::plugins::PluginSummary>> {
     let mut out = Vec::new();
@@ -52,7 +54,12 @@ pub(crate) fn active_plugin_contributions(
             )?,
         ));
     }
-    ActiveContributionSnapshot::from_plugin_details(&details)
+    let duplicate_plugin_ids = duplicate_enabled_command_plugin_ids(&details);
+    let active_details = details
+        .into_iter()
+        .filter(|detail| !duplicate_plugin_ids.contains(&detail.summary.plugin_id))
+        .collect::<Vec<_>>();
+    ActiveContributionSnapshot::from_plugin_details(&active_details)
 }
 
 pub(crate) async fn execute_plugin_command(
@@ -62,7 +69,7 @@ pub(crate) async fn execute_plugin_command(
     args: serde_json::Value,
 ) -> AppResult<serde_json::Value> {
     let command = normalize_plugin_command(command)?;
-    let detail = find_declared_command_owner(db, &command)?.ok_or_else(|| {
+    let detail = find_unique_enabled_command_owner(db, &command)?.ok_or_else(|| {
         AppError::new(
             "PLUGIN_COMMAND_NOT_FOUND",
             format!("plugin command is not declared: {command}"),
@@ -157,10 +164,12 @@ fn normalize_plugin_command(command: &str) -> AppResult<String> {
     Ok(command.to_string())
 }
 
-fn find_declared_command_owner(
+fn find_unique_enabled_command_owner(
     db: &crate::db::Db,
     command: &str,
 ) -> AppResult<Option<PluginDetail>> {
+    let mut owners = Vec::new();
+    let mut disabled_owner = None;
     for summary in list_plugins(db)? {
         let detail =
             normalize_unsupported_legacy_plugin_detail(detail_with_config_defaults_for_db(
@@ -178,10 +187,79 @@ fn find_declared_command_owner(
                     .any(|contribution| contribution.command == command)
             });
         if declared {
-            return Ok(Some(detail));
+            if detail.summary.status == PluginStatus::Enabled {
+                owners.push(detail);
+            } else if disabled_owner.is_none() {
+                disabled_owner = Some(detail);
+            }
         }
     }
-    Ok(None)
+    match owners.len() {
+        0 => Ok(disabled_owner),
+        1 => Ok(owners.into_iter().next()),
+        _ => {
+            let plugin_ids = owners
+                .iter()
+                .map(|detail| detail.summary.plugin_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(AppError::new(
+                "PLUGIN_DUPLICATE_COMMAND",
+                format!("command {command} is declared by multiple enabled plugins: {plugin_ids}"),
+            ))
+        }
+    }
+}
+
+fn duplicate_enabled_command_plugin_ids(details: &[PluginDetail]) -> BTreeSet<String> {
+    let mut command_owners = BTreeMap::<String, Vec<String>>::new();
+    for detail in details {
+        if detail.summary.status != PluginStatus::Enabled {
+            continue;
+        }
+        let Some(contributes) = detail.manifest.contributes.as_ref() else {
+            continue;
+        };
+        for command in &contributes.commands {
+            command_owners
+                .entry(command.command.clone())
+                .or_default()
+                .push(detail.summary.plugin_id.clone());
+        }
+    }
+
+    command_owners
+        .into_values()
+        .filter(|owners| owners.len() > 1)
+        .flatten()
+        .collect()
+}
+
+fn ensure_no_duplicate_enabled_commands(details: &[PluginDetail]) -> AppResult<()> {
+    let mut command_owners = BTreeMap::<String, Vec<String>>::new();
+    for detail in details {
+        if detail.summary.status != PluginStatus::Enabled {
+            continue;
+        }
+        let Some(contributes) = detail.manifest.contributes.as_ref() else {
+            continue;
+        };
+        for command in &contributes.commands {
+            let owners = command_owners.entry(command.command.clone()).or_default();
+            owners.push(detail.summary.plugin_id.clone());
+            if owners.len() > 1 {
+                return Err(AppError::new(
+                    "PLUGIN_DUPLICATE_COMMAND",
+                    format!(
+                        "command {} is declared by multiple enabled plugins: {}",
+                        command.command,
+                        owners.join(", ")
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -291,7 +369,7 @@ fn is_missing_plugin_table_error(err: &AppError) -> bool {
 }
 
 fn is_unsupported_legacy_runtime_summary(runtime: &str) -> bool {
-    matches!(runtime, "declarativeRules" | "wasm" | "process" | "native")
+    matches!(runtime, "wasm" | "process" | "native")
         || runtime.starts_with("native:") && runtime != "native:privacyFilter"
 }
 
@@ -506,6 +584,52 @@ fn lifecycle_notice(
 fn cleanup_staging_dir(staging_root: &Path, staging_dir: &Path) {
     let _ = std::fs::remove_dir_all(staging_dir);
     let _ = std::fs::remove_dir(staging_root);
+}
+
+fn safe_work_path_label(value: &str, fallback: &str) -> String {
+    let mut out = String::new();
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches(['.', '-']);
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out.to_string()
+    }
+}
+
+fn unique_work_path_segment(prefix: &str) -> String {
+    let counter = PLUGIN_WORK_PATH_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+    format!(
+        "{}-{}-{}-{}",
+        safe_work_path_label(prefix, "plugin"),
+        now_unix_millis(),
+        std::process::id(),
+        counter
+    )
+}
+
+fn unique_staging_dir(staging_root: &Path, prefix: &str) -> PathBuf {
+    staging_root.join(unique_work_path_segment(prefix))
+}
+
+fn unique_cache_package_path(cache_dir: &Path, plugin_id: &str, version: &str) -> PathBuf {
+    let prefix = format!(
+        "{}-{}",
+        safe_work_path_label(plugin_id, "plugin"),
+        safe_work_path_label(version, "version")
+    );
+    cache_dir.join(format!("{}.aio-plugin", unique_work_path_segment(&prefix)))
+}
+
+fn unique_remote_package_path(cache_dir: &Path, plugin_id: &str) -> PathBuf {
+    let prefix = format!("remote-{}", safe_work_path_label(plugin_id, "plugin"));
+    cache_dir.join(format!("{}.aio-plugin", unique_work_path_segment(&prefix)))
 }
 
 fn app_error_message(error: &AppError) -> String {
@@ -848,10 +972,7 @@ pub(crate) fn preview_plugin_from_local_package_with_policy(
         )
     })?;
     let staging_root = cache_dir.join("staging");
-    let staging_dir = staging_root.join(format!(
-        "preview-{}",
-        crate::shared::time::now_unix_seconds()
-    ));
+    let staging_dir = unique_staging_dir(&staging_root, "preview");
     let extracted = match package::extract_plugin_package_for_inspection(
         package_path,
         &staging_dir,
@@ -977,10 +1098,7 @@ pub(crate) fn preview_plugin_update_from_local_package(
         )
     })?;
     let staging_root = cache_dir.join("staging");
-    let staging_dir = staging_root.join(format!(
-        "update-preview-{}",
-        crate::shared::time::now_unix_seconds()
-    ));
+    let staging_dir = unique_staging_dir(&staging_root, "update-preview");
     let extracted = match package::extract_plugin_package_for_inspection(
         package_path,
         &staging_dir,
@@ -1496,8 +1614,7 @@ pub(crate) fn install_plugin_from_local_package_with_policy(
     })?;
 
     let staging_root = cache_dir.join("staging");
-    let staging_dir =
-        staging_root.join(format!("local-{}", crate::shared::time::now_unix_seconds()));
+    let staging_dir = unique_staging_dir(&staging_root, "local");
     let extracted = match package::extract_plugin_package_for_inspection(
         package_path,
         &staging_dir,
@@ -1524,12 +1641,7 @@ pub(crate) fn install_plugin_from_local_package_with_policy(
     let installed_dir = installed_root
         .join(crate::app_paths::plugin_id_path_segment(&plugin_id)?)
         .join(crate::app_paths::plugin_id_path_segment(&version)?);
-    let cache_package_path = cache_dir.join(format!(
-        "{}-{}-{}.aio-plugin",
-        plugin_id,
-        version,
-        crate::shared::time::now_unix_seconds()
-    ));
+    let cache_package_path = unique_cache_package_path(cache_dir, &plugin_id, &version);
 
     let result = (|| -> AppResult<PluginDetail> {
         std::fs::copy(package_path, &cache_package_path).map_err(|e| {
@@ -1628,11 +1740,10 @@ pub(crate) fn install_plugin_from_remote_package_bytes(
             cache_dir.display()
         )
     })?;
-    let package_path = cache_dir.join(format!(
-        "remote-{}-{}.aio-plugin",
+    let package_path = unique_remote_package_path(
+        cache_dir,
         crate::app_paths::plugin_id_path_segment(&policy.expected_plugin_id)?,
-        crate::shared::time::now_unix_seconds()
-    ));
+    );
     std::fs::write(&package_path, &package_bytes).map_err(|e| {
         format!(
             "failed to write remote plugin package cache {}: {e}",
@@ -1727,10 +1838,7 @@ pub(crate) fn update_plugin_from_local_package(
         )
     })?;
     let staging_root = cache_dir.join("staging");
-    let staging_dir = staging_root.join(format!(
-        "update-{}",
-        crate::shared::time::now_unix_seconds()
-    ));
+    let staging_dir = unique_staging_dir(&staging_root, "update");
     let extracted = match package::extract_plugin_package_for_inspection(
         package_path,
         &staging_dir,
@@ -2033,6 +2141,22 @@ pub(crate) fn enable_plugin(
     ensure_runtime_enabled(&detail.manifest)?;
     ensure_required_permissions_granted(&detail)?;
     validate_config_against_schema(detail.manifest.config_schema.as_ref(), &detail.config)?;
+    let mut candidate = detail.clone();
+    candidate.summary.status = PluginStatus::Enabled;
+    let mut active_details = Vec::new();
+    for summary in list_plugins(db)? {
+        if summary.plugin_id == plugin_id {
+            continue;
+        }
+        active_details.push(normalize_unsupported_legacy_plugin_detail(
+            detail_with_config_defaults_for_db(
+                db,
+                repository::get_plugin(db, &summary.plugin_id)?,
+            )?,
+        ));
+    }
+    active_details.push(candidate);
+    ensure_no_duplicate_enabled_commands(&active_details)?;
     let next = repository::update_plugin_status(db, plugin_id, PluginStatus::Enabled, None)?;
     append_audit(
         db,
@@ -2840,6 +2964,153 @@ mod tests {
         assert_eq!(reports[1].input_budget["coldStart"], true);
     }
 
+    #[tokio::test]
+    async fn plugin_command_execution_reports_disabled_declared_owner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::init_for_tests(&dir.path().join("plugins.db")).expect("db");
+        let manifest = extension_manifest("acme.disabled", "acme.disabled.run");
+        install_plugin_manifest(
+            &db,
+            manifest,
+            PluginInstallSource::Local,
+            Some(
+                dir.path()
+                    .join("acme.disabled")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("install disabled extension");
+        let registry = ExtensionHostInstanceRegistry::new(db.clone());
+
+        let err = execute_plugin_command(
+            &db,
+            &registry,
+            "acme.disabled.run",
+            serde_json::json!({ "traceId": "trace-disabled" }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), "PLUGIN_COMMAND_PLUGIN_DISABLED");
+    }
+
+    #[test]
+    fn active_plugin_contributions_isolates_duplicate_command_plugins() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::init_for_tests(&dir.path().join("plugins.db")).expect("db");
+        install_enabled_extension_with_command(
+            &db,
+            &dir.path().join("acme.one"),
+            "acme.one",
+            "acme.shared.run",
+        );
+        install_enabled_extension_with_command(
+            &db,
+            &dir.path().join("acme.two"),
+            "acme.two",
+            "acme.shared.run",
+        );
+        install_enabled_extension_with_command(
+            &db,
+            &dir.path().join("acme.three"),
+            "acme.three",
+            "acme.three.run",
+        );
+
+        let snapshot = active_plugin_contributions(&db).expect("snapshot");
+
+        assert_eq!(snapshot.commands.len(), 1);
+        assert_eq!(snapshot.commands[0].plugin_id, "acme.three");
+        assert_eq!(snapshot.commands[0].command, "acme.three.run");
+    }
+
+    #[test]
+    fn enable_plugin_rejects_duplicate_command_with_enabled_plugin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::init_for_tests(&dir.path().join("plugins.db")).expect("db");
+        install_enabled_extension_with_command(
+            &db,
+            &dir.path().join("acme.enabled"),
+            "acme.enabled",
+            "acme.shared.run",
+        );
+        install_plugin_manifest(
+            &db,
+            extension_manifest("acme.disabled", "acme.shared.run"),
+            PluginInstallSource::Local,
+            Some(
+                dir.path()
+                    .join("acme.disabled")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("install disabled extension");
+
+        let err = enable_plugin(&db, "acme.disabled", env!("CARGO_PKG_VERSION")).unwrap_err();
+
+        assert_eq!(err.code(), "PLUGIN_DUPLICATE_COMMAND");
+        assert!(err.to_string().contains("acme.shared.run"));
+    }
+
+    #[tokio::test]
+    async fn plugin_command_execution_rejects_duplicate_enabled_command_owners() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::init_for_tests(&dir.path().join("plugins.db")).expect("db");
+        install_enabled_extension_with_command(
+            &db,
+            &dir.path().join("acme.one"),
+            "acme.one",
+            "acme.shared.run",
+        );
+        install_enabled_extension_with_command(
+            &db,
+            &dir.path().join("acme.two"),
+            "acme.two",
+            "acme.shared.run",
+        );
+        let registry = ExtensionHostInstanceRegistry::new(db.clone());
+
+        let err = execute_plugin_command(
+            &db,
+            &registry,
+            "acme.shared.run",
+            serde_json::json!({ "traceId": "trace-duplicate" }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), "PLUGIN_DUPLICATE_COMMAND");
+        assert!(err.to_string().contains("acme.one"));
+        assert!(err.to_string().contains("acme.two"));
+    }
+
+    #[test]
+    fn plugin_package_work_paths_are_unique_for_same_prefix() {
+        let root = Path::new("/tmp/aio-plugin-cache");
+
+        let first_staging = unique_staging_dir(root, "local");
+        let second_staging = unique_staging_dir(root, "local");
+        let first_cache = unique_cache_package_path(root, "local.safe", "1.0.0");
+        let second_cache = unique_cache_package_path(root, "local.safe", "1.0.0");
+
+        assert_ne!(first_staging, second_staging);
+        assert_ne!(first_cache, second_cache);
+        assert!(first_staging
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("local-")));
+        assert!(first_cache
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with("local.safe-1.0.0-") && name.ends_with(".aio-plugin")
+            }));
+    }
+
     #[test]
     fn service_enables_extension_host_without_permission_grants_and_preserves_config_on_disable() {
         let dir = tempfile::tempdir().unwrap();
@@ -3128,7 +3399,7 @@ DROP TABLE plugins;
     fn legacy_runtime_db_row_is_disabled_for_ui_and_gateway() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::init_for_tests(&dir.path().join("legacy-runtime-plugin.db")).unwrap();
-        let manifest = legacy_declarative_rules_package_manifest("local.legacy-db", "1.0.0");
+        let manifest = legacy_wasm_package_manifest("local.legacy-db", "1.0.0");
         let manifest_json = manifest.to_string();
         let now = crate::shared::time::now_unix_seconds();
         db.open_connection()
@@ -3164,7 +3435,7 @@ INSERT INTO plugins (
         let listed = list_plugins(&db).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].status, PluginStatus::Disabled);
-        assert_eq!(listed[0].runtime, "declarativeRules");
+        assert_eq!(listed[0].runtime, "wasm");
         assert!(listed[0]
             .last_error
             .as_deref()
@@ -3172,7 +3443,7 @@ INSERT INTO plugins (
 
         let detail = get_plugin_detail(&db, "local.legacy-db").unwrap();
         assert_eq!(detail.summary.status, PluginStatus::Disabled);
-        assert_eq!(detail.summary.runtime, "declarativeRules");
+        assert_eq!(detail.summary.runtime, "wasm");
         assert!(detail
             .summary
             .last_error
@@ -3808,14 +4079,11 @@ INSERT INTO plugins (
         zip.finish().expect("finish package");
     }
 
-    fn legacy_declarative_rules_package_manifest(
-        plugin_id: &str,
-        version: &str,
-    ) -> serde_json::Value {
+    fn legacy_wasm_package_manifest(plugin_id: &str, version: &str) -> serde_json::Value {
         let mut manifest = local_package_manifest(plugin_id, version);
         manifest["runtime"] = serde_json::json!({
-            "kind": "declarativeRules",
-            "rules": ["rules/main.json"]
+            "kind": "wasm",
+            "abiVersion": "1.0.0"
         });
         let object = manifest.as_object_mut().expect("manifest object");
         object.remove("main");
@@ -3836,13 +4104,13 @@ INSERT INTO plugins (
     }
 
     #[test]
-    fn plugin_local_install_preview_rejects_legacy_declarative_rules_runtime() {
+    fn plugin_local_install_preview_rejects_legacy_wasm_runtime() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::init_for_tests(&dir.path().join("plugins.db")).unwrap();
-        let package_path = dir.path().join("legacy-declarative.aio-plugin");
+        let package_path = dir.path().join("legacy-wasm.aio-plugin");
         write_local_package(
             &package_path,
-            legacy_declarative_rules_package_manifest("local.legacy-rules", "1.0.0"),
+            legacy_wasm_package_manifest("local.legacy-rules", "1.0.0"),
         );
 
         let err = preview_plugin_from_local_package_with_policy(
@@ -4593,13 +4861,13 @@ INSERT INTO plugins (
     }
 
     #[test]
-    fn plugin_local_install_rejects_legacy_declarative_rules_runtime() {
+    fn plugin_local_install_rejects_legacy_wasm_runtime() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::init_for_tests(&dir.path().join("plugins.db")).unwrap();
-        let package_path = dir.path().join("legacy-declarative-install.aio-plugin");
+        let package_path = dir.path().join("legacy-wasm-install.aio-plugin");
         write_local_package(
             &package_path,
-            legacy_declarative_rules_package_manifest("local.legacy-install", "1.0.0"),
+            legacy_wasm_package_manifest("local.legacy-install", "1.0.0"),
         );
         let cache_dir = dir.path().join("plugins/cache");
         let installed_dir = dir.path().join("plugins/installed");

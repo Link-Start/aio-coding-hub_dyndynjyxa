@@ -734,13 +734,6 @@ fn validate_contributes(
         return Ok(());
     };
 
-    if contributes.unsupported_gateway_rules.is_present() {
-        return Err(PluginValidationError::new(
-            "PLUGIN_INVALID_CONTRIBUTION",
-            "gatewayRules are no longer supported; use gatewayHooks",
-        ));
-    }
-
     for provider in &contributes.providers {
         if is_blank(&provider.provider_type)
             || is_blank(&provider.display_name)
@@ -1270,29 +1263,7 @@ mod tests {
     use super::*;
 
     fn valid_manifest() -> serde_json::Value {
-        serde_json::json!({
-            "id": "community.prompt-helper",
-            "name": "Community Prompt Helper",
-            "version": "1.0.0",
-            "apiVersion": "1.0.0",
-            "runtime": {
-                "kind": "declarativeRules",
-                "rules": ["rules/main.json"]
-            },
-            "hooks": [
-                {
-                    "name": "gateway.request.afterBodyRead",
-                    "priority": 100,
-                    "failurePolicy": "fail-open"
-                }
-            ],
-            "permissions": ["request.body.read", "request.body.write"],
-            "hostCompatibility": {
-                "app": ">=0.56.0 <1.0.0",
-                "pluginApi": "^1.0.0",
-                "platforms": ["macos", "windows", "linux"]
-            }
-        })
+        valid_extension_host_manifest()
     }
 
     fn valid_extension_host_manifest() -> serde_json::Value {
@@ -1353,8 +1324,14 @@ mod tests {
     }
 
     #[test]
-    fn declarative_rules_runtime_is_unsupported() {
-        assert_unsupported_or_unknown_runtime(valid_manifest());
+    fn unknown_runtime_is_unsupported() {
+        let mut raw = valid_manifest();
+        raw["runtime"] = serde_json::json!({
+            "kind": "legacyRules",
+            "rules": ["rules/main.json"]
+        });
+
+        assert_unsupported_or_unknown_runtime(raw);
     }
 
     #[test]
@@ -1403,42 +1380,33 @@ mod tests {
     }
 
     #[test]
-    fn extension_host_rejects_gateway_rules() {
+    fn extension_host_rejects_unknown_contribution_fields() {
         let mut raw = valid_extension_host_manifest();
         raw["contributes"] = serde_json::json!({
-            "gatewayRules": [{
+            "legacyRules": [{
                 "id": "acme.extension.gateway-rule",
                 "rules": ["request.path == '/v1/chat/completions'"],
                 "hooks": ["gateway.request.afterBodyRead"]
             }]
         });
 
-        let err = manifest_validation_error(raw);
-        assert_eq!(err.code, "PLUGIN_INVALID_CONTRIBUTION");
-        assert_eq!(
-            err.message,
-            "gatewayRules are no longer supported; use gatewayHooks"
-        );
+        let err = serde_json::from_value::<PluginManifest>(raw).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
     }
 
     #[test]
-    fn extension_host_rejects_gateway_rules_when_empty_or_non_array() {
-        for gateway_rules in [
+    fn extension_host_rejects_unknown_contribution_fields_when_empty_or_non_array() {
+        for legacy_rules in [
             serde_json::json!([]),
             serde_json::json!({}),
             serde_json::json!("bad"),
             serde_json::json!(null),
         ] {
             let mut raw = valid_extension_host_manifest();
-            raw["contributes"] = serde_json::json!({ "gatewayRules": gateway_rules });
+            raw["contributes"] = serde_json::json!({ "legacyRules": legacy_rules });
 
-            let err = manifest_validation_error(raw);
-
-            assert_eq!(err.code, "PLUGIN_INVALID_CONTRIBUTION");
-            assert_eq!(
-                err.message,
-                "gatewayRules are no longer supported; use gatewayHooks"
-            );
+            let err = serde_json::from_value::<PluginManifest>(raw).unwrap_err();
+            assert!(err.to_string().contains("unknown field"));
         }
     }
 
@@ -1843,9 +1811,15 @@ mod tests {
             "kind": "native",
             "engine": "privacyFilter"
         });
+        official["hooks"] = serde_json::json!([{
+            "name": "gateway.request.afterBodyRead",
+            "priority": 100,
+            "failurePolicy": "fail-open"
+        }]);
+        official["permissions"] = serde_json::json!(["request.body.read"]);
         let manifest: PluginManifest = serde_json::from_value(official).unwrap();
-        validate_manifest_for_official_plugin(&manifest, "0.56.0").unwrap();
-        let err = validate_manifest(&manifest, "0.56.0").unwrap_err();
+        validate_manifest_for_official_plugin(&manifest, "0.62.0").unwrap();
+        let err = validate_manifest(&manifest, "0.62.0").unwrap_err();
         assert_eq!(err.code, "PLUGIN_UNSUPPORTED_RUNTIME");
 
         let mut local = valid_manifest();
@@ -1855,7 +1829,7 @@ mod tests {
             "engine": "privacyFilter"
         });
         let manifest: PluginManifest = serde_json::from_value(local).unwrap();
-        let err = validate_manifest(&manifest, "0.56.0").unwrap_err();
+        let err = validate_manifest(&manifest, "0.62.0").unwrap_err();
         assert_eq!(err.code, "PLUGIN_UNSUPPORTED_RUNTIME");
     }
 

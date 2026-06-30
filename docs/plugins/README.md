@@ -20,7 +20,6 @@
 | 查 hook 触发时机 | [Hooks](./reference/hooks.md) |
 | 查 capability 与贡献点依赖 | [Manifest](./reference/manifest.md) |
 | 查 context/mutation label 风险等级 | [Permissions](./reference/permissions.md) |
-| 迁移旧规则插件 | [Legacy Declarative Rules 迁移说明](./reference/declarative-rules.md) |
 | 打包发布 `.aio-plugin` | [Publishing](./reference/publishing.md) |
 | 理解旧运行时为什么不开放 | [运行时说明](./runtime/README.md) |
 | 理解架构和边界 | [插件架构说明](./architecture/README.md) |
@@ -50,4 +49,4 @@
 - 第三方插件代码不在 Rust 主进程或 Tauri WebView 中执行。
 - Manifest 校验只接受 Extension Host runtime、已激活 hooks、contributions 和 capability 组合；reserved permissions 只作为内部/legacy host-mediated labels 保留。
 - 当前只有 `official.privacy-filter` 是宿主内置官方隐私过滤插件。社区同类能力应实现为 Extension Host 插件。
-- Declarative rules、WASM、process 和第三方 native 运行时只作为 unsupported pre-release legacy runtime 迁移说明出现，不是当前推荐路径。
+- WASM、process 和第三方 native 运行时只作为 unsupported pre-release legacy runtime 说明出现，不是当前推荐路径。

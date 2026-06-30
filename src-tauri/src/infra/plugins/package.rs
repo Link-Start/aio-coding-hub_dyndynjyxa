@@ -82,15 +82,13 @@ fn extract_plugin_package_with_mode(
     }
 
     if staging_dir.exists() {
-        std::fs::remove_dir_all(staging_dir).map_err(|error| {
-            AppError::new(
-                "PLUGIN_PACKAGE_STAGING_FAILED",
-                format!(
-                    "failed to clean staging dir {}: {error}",
-                    staging_dir.display()
-                ),
-            )
-        })?;
+        return Err(AppError::new(
+            "PLUGIN_PACKAGE_STAGING_FAILED",
+            format!(
+                "plugin package staging dir already exists: {}",
+                staging_dir.display()
+            ),
+        ));
     }
     std::fs::create_dir_all(staging_dir).map_err(|error| {
         AppError::new(
@@ -428,7 +426,7 @@ fn reject_unsupported_manifest_runtime(manifest_bytes: &[u8]) -> AppResult<()> {
     };
 
     match kind {
-        "declarativeRules" | "wasm" | "process" => Err(unsupported_runtime_error(kind)),
+        "wasm" | "process" => Err(unsupported_runtime_error(kind)),
         "native" if plugin_id != "official.privacy-filter" => Err(unsupported_runtime_error(kind)),
         _ => Ok(()),
     }
@@ -556,6 +554,27 @@ mod tests {
         limits: PluginPackageLimits,
     ) -> AppResult<ExtractedPluginPackage> {
         extract_plugin_package_with_mode(package_path, staging_dir, limits, true)
+    }
+
+    #[test]
+    fn plugin_package_staging_rejects_existing_dir_without_deleting_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_path = dir.path().join("valid.aio-plugin");
+        let staging_dir = dir.path().join("staging");
+        let marker_path = staging_dir.join("marker.txt");
+        write_package(
+            &package_path,
+            &[("plugin.json", manifest_json("local.safe").as_bytes())],
+        );
+        std::fs::create_dir_all(&staging_dir).expect("create staging");
+        std::fs::write(&marker_path, b"caller-owned").expect("write marker");
+
+        let err =
+            extract_plugin_package(&package_path, &staging_dir, PluginPackageLimits::default())
+                .unwrap_err();
+
+        assert_eq!(err.code(), "PLUGIN_PACKAGE_STAGING_FAILED");
+        assert!(marker_path.exists());
     }
 
     #[test]

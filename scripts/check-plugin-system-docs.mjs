@@ -42,9 +42,9 @@ const requiredDocs = [
       "apiVersion",
       "hostCompatibility",
       "main",
-      "runtime.kind = \"extensionHost\"",
+      'runtime.kind = "extensionHost"',
       "contributes.gatewayHooks",
-      "capabilities: [\"gateway.hooks\"]",
+      'capabilities: ["gateway.hooks"]',
       "api.gateway.registerHook",
       "commands -> commands.execute",
       "providers / provider UI -> provider.extensionValues",
@@ -62,7 +62,7 @@ const requiredDocs = [
       "Extension Host public manifest 不支持 top-level `permissions`",
       "High-risk 和 critical labels",
     ],
-    forbiddenPhrases: ['"kind": "declarativeRules"', '"kind": "wasm"', '"gatewayRules"'],
+    forbiddenPhrases: ['"kind": "wasm"'],
   },
   {
     path: "docs/plugins/README.md",
@@ -87,7 +87,7 @@ const requiredDocs = [
       "plugin_export_replay_fixture",
       "publish-check",
       "dist/extension.js",
-      "runtime.kind = \"extensionHost\"",
+      'runtime.kind = "extensionHost"',
       "contributes.gatewayHooks",
       "capabilities",
       "api.gateway.registerHook",
@@ -108,7 +108,6 @@ const requiredDocs = [
       "示例是开发模板，不是默认可安装市场包",
     ],
     forbiddenPhrases: [
-      "`declarativeRules` 是默认社区运行时",
       "WASM 适合需要确定性代码逻辑的插件",
       "pnpm plugin-wasm-sdk:test",
       "最小声明式规则插件",
@@ -122,7 +121,7 @@ const requiredDocs = [
       "unsupported pre-release legacy runtime",
       "not part of the public Plugin API v1 community runtime surface",
       "community plugins must migrate to Extension Host",
-      "runtime.kind = \"extensionHost\"",
+      'runtime.kind = "extensionHost"',
     ],
     forbiddenPhrases: [
       "WASM packages are installable only when host policy enables execution",
@@ -165,25 +164,11 @@ const requiredDocs = [
       "validateManifest",
       "permissionRisk",
       "Extension Host",
-      "runtime: { kind: \"extensionHost\"",
+      'runtime: { kind: "extensionHost"',
       "api.gateway.registerHook",
       "SDK 边界",
     ],
-    forbiddenPhrases: ["aio-plugin-wasm-sdk", "runtime: { kind: \"declarativeRules\""],
-  },
-  {
-    path: "docs/plugins/reference/declarative-rules.md",
-    phrases: [
-      "unsupported pre-release legacy runtime",
-      "declarativeRules",
-      "migrate to Extension Host",
-      "contributes.gatewayHooks",
-      "api.gateway.registerHook",
-    ],
-    forbiddenPhrases: [
-      "`declarativeRules` 是社区插件当前优先使用的运行时",
-      "应使用 WASM 或未来的隔离进程运行时",
-    ],
+    forbiddenPhrases: ["aio-plugin-wasm-sdk"],
   },
   {
     path: "docs/plugins/examples/privacy-filter.md",
@@ -195,7 +180,6 @@ const requiredDocs = [
       "Extension Host",
       "已移除的内置示例",
     ],
-    forbiddenPhrases: ["社区示例应优先使用 `declarativeRules`"],
   },
   {
     path: "docs/plugins/examples/README.md",
@@ -231,13 +215,13 @@ const requiredDocs = [
     phrases: [
       "apiVersion",
       "hostCompatibility",
-      "runtime.kind = \"extensionHost\"",
+      'runtime.kind = "extensionHost"',
       "main",
       "contributes.gatewayHooks",
       "capabilities",
       "Protocol bridge MVP skeleton",
     ],
-    forbiddenPhrases: ['{ "kind": "declarativeRules"', '{ "kind": "wasm"'],
+    forbiddenPhrases: ['{ "kind": "wasm"'],
   },
   {
     path: "docs/plugins/reference/hooks.md",
@@ -317,7 +301,7 @@ const requiredDocs = [
       "Extension Host is the only community runtime",
       "unsupported pre-release legacy runtime",
     ],
-    forbiddenPhrases: ['{ "kind": "wasm"', "社区插件继续使用 `declarativeRules`"],
+    forbiddenPhrases: ['{ "kind": "wasm"'],
   },
 ];
 
@@ -327,7 +311,6 @@ const localReplayBoundaryFiles = [
   "docs/plugins/README.md",
   "docs/plugins/developer-guide.md",
   "docs/plugins/reference/sdk.md",
-  "docs/plugins/reference/declarative-rules.md",
   "docs/plugins/reference/compatibility.md",
   "docs/plugins/architecture/audit.md",
   "docs/plugins/examples/README.md",
@@ -343,17 +326,6 @@ const replaySuccessPatterns = [
   /\bcreate-aio-plugin\s+replay\b/,
   /\breplay --explain\b/,
   /validate[\s\S]{0,80}replay[\s\S]{0,80}pack/,
-];
-
-const publicDeclarativeRulesSuccessPatterns = [
-  /communityRuntimes\s*:\s*\[\s*["']declarativeRules["']\s*\]/,
-  /"communityRuntimes"\s*:\s*\[\s*"declarativeRules"\s*\]/,
-  /`?declarativeRules`?\s+(?:是|仍是|为)[^\n]{0,40}(?:稳定社区|社区稳定|默认社区|主力社区|唯一稳定社区)\s+runtime/,
-  /(?:稳定社区|社区稳定|默认社区|主力社区|唯一稳定社区)\s+runtime[^\n]{0,40}`?declarativeRules`?/,
-  /`?declarativeRules`?\s+(?:remains|is)\s+(?:the\s+)?(?:only\s+|default\s+|stable\s+){0,3}community runtime/i,
-  /(?:stable|default|only stable)\s+community runtime\s+(?:is|remains)\s+`?declarativeRules`?/i,
-  /社区插件开发主线[^\n]{0,80}`?declarativeRules`?/,
-  /当前最佳实践是\s+`?declarativeRules`?/,
 ];
 
 const supersededHistoricalDocsFallback = [
@@ -381,28 +353,26 @@ function lineExplainsReplayUnsupported(line) {
 }
 
 function trackedSuperpowersMarkdownDocs() {
-  const result = spawnSync("git", ["ls-files", "docs/superpowers/plans", "docs/superpowers/specs"], {
-    cwd: repoRoot,
-    encoding: "utf8",
-  });
+  const result = spawnSync(
+    "git",
+    ["ls-files", "docs/superpowers/plans", "docs/superpowers/specs"],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }
+  );
   if (result.status !== 0) {
     return supersededHistoricalDocsFallback;
   }
-  return result.stdout
-    .split(/\r?\n/)
-    .filter((path) => path.endsWith(".md"));
+  return result.stdout.split(/\r?\n/).filter((path) => path.endsWith(".md"));
 }
 
 function hasReplaySuccessPath(text) {
   return replaySuccessPatterns.some((pattern) => pattern.test(text));
 }
 
-function hasPublicDeclarativeRulesSuccessPath(text) {
-  return publicDeclarativeRulesSuccessPatterns.some((pattern) => pattern.test(text));
-}
-
 function hasSupersededHistoricalSuccessPath(text) {
-  return hasReplaySuccessPath(text) || hasPublicDeclarativeRulesSuccessPath(text);
+  return hasReplaySuccessPath(text);
 }
 
 for (const doc of requiredDocs) {
@@ -460,9 +430,7 @@ for (const path of trackedSuperpowersMarkdownDocs()) {
   if (!hasSupersededHistoricalSuccessPath(text)) continue;
   const head = text.split(/\r?\n/).slice(0, 16).join("\n");
   if (!head.includes("Status: Superseded.") || !head.includes("MUST NOT be executed")) {
-    failures.push(
-      `${path}: historical local replay/declarativeRules public runtime plan must be marked superseded`
-    );
+    failures.push(`${path}: historical local replay public runtime plan must be marked superseded`);
   }
 }
 

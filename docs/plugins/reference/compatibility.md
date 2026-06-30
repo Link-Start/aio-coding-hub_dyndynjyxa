@@ -20,7 +20,7 @@ Plugin API v1 remains externally compatible in 0.62. 这个版本重组的是宿
 
 0.62 does not add public provider plugin APIs. Provider adapter 仍是 host-internal 设计，用于先降低 gateway/provider 分支扩散和维护成本；未来是否公开 provider 插件 API，需要另行设计版本化契约。
 
-Extension Host is the only community runtime. Third-party JavaScript runs only in the managed Extension Host worker, not in the Rust main process or Tauri WebView. Declarative rules、WASM、process 和第三方 native 只作为 unsupported pre-release legacy runtime 迁移说明保留；当前公开 manifest validation 会拒绝这些运行时。
+Extension Host is the only community runtime. Third-party JavaScript runs only in the managed Extension Host worker, not in the Rust main process or Tauri WebView. WASM、process 和第三方 native 只作为 unsupported pre-release legacy runtime 说明保留；当前公开 manifest validation 会拒绝这些运行时。
 
 ## 0.62.1 Developer Loop Boundary
 

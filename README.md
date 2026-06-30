@@ -234,7 +234,6 @@ curl http://127.0.0.1:37123/health
 - [插件开发总览](docs/plugins/README.md)
 - [插件开发总指南](docs/plugins/developer-guide.md)
 - [Plugin SDK](docs/plugins/reference/sdk.md)
-- [旧规则运行时迁移说明](docs/plugins/reference/declarative-rules.md)
 - [官方示例插件](docs/plugins/examples/privacy-filter.md)
 - [插件 API 参考](docs/plugins/reference/README.md)
 - [Manifest v1 规范](docs/plugin-manifest-v1.md)

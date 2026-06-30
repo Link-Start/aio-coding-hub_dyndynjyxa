@@ -40,7 +40,7 @@ describe("pluginProductCopy", () => {
       label: "扩展主机插件",
       detail: "通过 Extension Host 运行打包后的 TypeScript/JavaScript 插件输出。",
     });
-    for (const runtime of ["declarativeRules", "wasm", "process", "native"]) {
+    for (const runtime of ["wasm", "process", "native"]) {
       expect(describePluginRuntime(runtime)).toEqual({
         label: "不支持的旧插件运行时",
         detail: "该插件使用预发布时期的运行方式，请安装 Extension Host 版本。",

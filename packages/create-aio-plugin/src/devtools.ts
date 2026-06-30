@@ -641,7 +641,7 @@ function unsupportedLegacyRuntimeDiagnostic(
 ): PluginDiagnostic | null {
   const runtime = asRecord(manifest.runtime);
   const kind = typeof runtime?.kind === "string" ? runtime.kind : "";
-  if (!UNSUPPORTED_PUBLIC_TEMPLATES.has(kind) && kind !== "declarativeRules") {
+  if (!UNSUPPORTED_PUBLIC_TEMPLATES.has(kind)) {
     return null;
   }
   return {

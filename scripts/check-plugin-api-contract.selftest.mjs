@@ -114,7 +114,7 @@ function writePassingManifestDocs(root) {
   );
   writeFileSync(
     join(root, "docs/plugins/reference/manifest.md"),
-    "declarativeRules wasm native privacyFilter"
+    "extensionHost wasm process native privacyFilter"
   );
 }
 
@@ -257,7 +257,7 @@ function writePassingScaffold(root) {
   writeFileSync(
     join(root, "src-tauri/src/domain/plugins.rs"),
     [
-      "extensionHost declarativeRules wasm native privacyFilter",
+      "extensionHost wasm process native privacyFilter",
       "crate::gateway::plugins::contract::is_active_hook",
       "crate::gateway::plugins::contract::is_reserved_hook",
       "crate::gateway::plugins::contract::is_reserved_permission",
@@ -311,7 +311,7 @@ function writePassingScaffold(root) {
   );
   writeFileSync(
     join(root, "docs/plugins/reference/manifest.md"),
-    "declarativeRules wasm native privacyFilter"
+    "extensionHost wasm process native privacyFilter"
   );
   writeFileSync(join(root, "docs/plugins/runtime/wasm.md"), "wasm PLUGIN_RUNTIME_DISABLED");
   writeFileSync(
@@ -401,7 +401,7 @@ writeJson(extensionHostDependencyBaselineRoot, "docs/plugins/plugin-api-v1-contr
     },
   },
   communityRuntimes: ["extensionHost"],
-  unsupportedLegacyRuntimes: ["declarativeRules", "wasm", "process", "native"],
+  unsupportedLegacyRuntimes: ["wasm", "process", "native"],
   officialRuntimes: ["native:privacyFilter"],
 });
 writePassingScaffold(extensionHostDependencyBaselineRoot);
@@ -456,7 +456,7 @@ writeJson(protocolBridgeBoundaryDriftRoot, "docs/plugins/plugin-api-v1-contract.
     )
   ).hookMatrix,
   communityRuntimes: ["extensionHost"],
-  unsupportedLegacyRuntimes: ["declarativeRules", "wasm", "process", "native"],
+  unsupportedLegacyRuntimes: ["wasm", "process", "native"],
   officialRuntimes: ["native:privacyFilter"],
 });
 writePassingScaffold(protocolBridgeBoundaryDriftRoot);
@@ -508,16 +508,17 @@ writeJson(capabilityDependencyDriftRoot, "docs/plugins/plugin-api-v1-contract.js
     gatewayHooks: ["gateway.hooks"],
     protocolBridges: ["protocol.bridge"],
   },
-  hookMatrix: extensionHostDependencyBaselineResult.status === 0
-    ? JSON.parse(
-        readFileSync(
-          join(extensionHostDependencyBaselineRoot, "docs/plugins/plugin-api-v1-contract.json"),
-          "utf8"
-        )
-      ).hookMatrix
-    : {},
+  hookMatrix:
+    extensionHostDependencyBaselineResult.status === 0
+      ? JSON.parse(
+          readFileSync(
+            join(extensionHostDependencyBaselineRoot, "docs/plugins/plugin-api-v1-contract.json"),
+            "utf8"
+          )
+        ).hookMatrix
+      : {},
   communityRuntimes: ["extensionHost"],
-  unsupportedLegacyRuntimes: ["declarativeRules", "wasm", "process", "native"],
+  unsupportedLegacyRuntimes: ["wasm", "process", "native"],
   officialRuntimes: ["native:privacyFilter"],
 });
 writePassingScaffold(capabilityDependencyDriftRoot);
@@ -528,7 +529,9 @@ if (
   !capabilityDependencyDriftResult.stderr.includes(
     "capabilityDependencies.ui.providers.editor.fields"
   ) ||
-  !capabilityDependencyDriftResult.stderr.includes("capabilityDependencies.ui.buttonCommandFields") ||
+  !capabilityDependencyDriftResult.stderr.includes(
+    "capabilityDependencies.ui.buttonCommandFields"
+  ) ||
   !capabilityDependencyDriftResult.stderr.includes("ui.providers.card.badges") ||
   !capabilityDependencyDriftResult.stderr.includes("ui.providers.card.actions")
 ) {
@@ -548,21 +551,21 @@ writeJson(reservedHookRoot, "docs/plugins/plugin-api-v1-contract.json", {
   configSchemaTypes: ["object"],
   activePermissions: ["request.body.read"],
   reservedPermissions: ["network.fetch"],
-  communityRuntimes: ["declarativeRules"],
-  policyGatedRuntimes: ["wasm"],
+  communityRuntimes: ["extensionHost"],
+  unsupportedLegacyRuntimes: ["wasm", "process", "native"],
   officialRuntimes: ["native:privacyFilter"],
 });
 writeFileSync(
   join(reservedHookRoot, "packages/plugin-sdk/src/index.ts"),
-  "gateway.request.afterBodyRead request.body.read declarativeRules"
+  "gateway.request.afterBodyRead request.body.read extensionHost"
 );
 writeFileSync(
   join(reservedHookRoot, "packages/create-aio-plugin/src/scaffold.ts"),
-  "declarativeRules gateway.request.afterBodyRead request.body.read"
+  "extensionHost gateway.request.afterBodyRead request.body.read"
 );
 writeFileSync(
   join(reservedHookRoot, "src-tauri/src/domain/plugins.rs"),
-  "gateway.request.afterBodyRead request.body.read declarativeRules"
+  "gateway.request.afterBodyRead request.body.read extensionHost"
 );
 writeFileSync(
   join(reservedHookRoot, "docs/plugin-manifest-v1.md"),
@@ -575,7 +578,7 @@ writeFileSync(
 writeFileSync(join(reservedHookRoot, "docs/plugins/reference/permissions.md"), "request.body.read");
 writeFileSync(
   join(reservedHookRoot, "docs/plugins/reference/manifest.md"),
-  "declarativeRules wasm native privacyFilter"
+  "extensionHost wasm process native privacyFilter"
 );
 writeFileSync(
   join(reservedHookRoot, "docs/plugins/runtime/wasm.md"),
@@ -612,8 +615,8 @@ writeJson(missingHookMetadataRoot, "docs/plugins/plugin-api-v1-contract.json", {
       timeoutMs: 150,
     },
   },
-  communityRuntimes: ["declarativeRules"],
-  policyGatedRuntimes: ["wasm"],
+  communityRuntimes: ["extensionHost"],
+  unsupportedLegacyRuntimes: ["wasm", "process", "native"],
   officialRuntimes: ["native:privacyFilter"],
 });
 writePassingScaffold(missingHookMetadataRoot);
@@ -660,8 +663,8 @@ writeJson(inconsistentHookMetadataRoot, "docs/plugins/plugin-api-v1-contract.jso
       contextFields: ["traceId"],
     },
   },
-  communityRuntimes: ["declarativeRules"],
-  policyGatedRuntimes: ["wasm"],
+  communityRuntimes: ["extensionHost"],
+  unsupportedLegacyRuntimes: ["wasm", "process", "native"],
   officialRuntimes: ["native:privacyFilter"],
 });
 writePassingScaffold(inconsistentHookMetadataRoot);
@@ -710,8 +713,8 @@ writeJson(duplicateHookMetadataRoot, "docs/plugins/plugin-api-v1-contract.json",
       contextFields: ["traceId"],
     },
   },
-  communityRuntimes: ["declarativeRules"],
-  policyGatedRuntimes: ["wasm"],
+  communityRuntimes: ["extensionHost"],
+  unsupportedLegacyRuntimes: ["wasm", "process", "native"],
   officialRuntimes: ["native:privacyFilter"],
 });
 writePassingScaffold(duplicateHookMetadataRoot);
@@ -754,8 +757,8 @@ writeJson(missingDevtoolsMetadataRoot, "docs/plugins/plugin-api-v1-contract.json
       contextFields: ["traceId"],
     },
   },
-  communityRuntimes: ["declarativeRules"],
-  policyGatedRuntimes: ["wasm"],
+  communityRuntimes: ["extensionHost"],
+  unsupportedLegacyRuntimes: ["wasm", "process", "native"],
   officialRuntimes: ["native:privacyFilter"],
 });
 writePassingScaffold(missingDevtoolsMetadataRoot);
@@ -801,8 +804,8 @@ writeJson(partialDevtoolsMetadataRoot, "docs/plugins/plugin-api-v1-contract.json
       contextFields: ["traceId", "request.body"],
     },
   },
-  communityRuntimes: ["declarativeRules"],
-  policyGatedRuntimes: ["wasm"],
+  communityRuntimes: ["extensionHost"],
+  unsupportedLegacyRuntimes: ["wasm", "process", "native"],
   officialRuntimes: ["native:privacyFilter"],
 });
 writePassingScaffold(partialDevtoolsMetadataRoot);
@@ -816,7 +819,7 @@ writeFileSync(
 writeFileSync(
   join(partialDevtoolsMetadataRoot, "src-tauri/src/domain/plugins.rs"),
   [
-    "declarativeRules wasm native privacyFilter",
+    "extensionHost wasm process native privacyFilter",
     "crate::gateway::plugins::contract::is_active_hook",
     "crate::gateway::plugins::contract::is_reserved_hook",
     "crate::gateway::plugins::contract::is_reserved_permission",
@@ -907,8 +910,8 @@ writeJson(globalPermissionDependencyRoot, "docs/plugins/plugin-api-v1-contract.j
       contextFields: ["traceId", "request.body"],
     },
   },
-  communityRuntimes: ["declarativeRules"],
-  policyGatedRuntimes: ["wasm"],
+  communityRuntimes: ["extensionHost"],
+  unsupportedLegacyRuntimes: ["wasm", "process", "native"],
   officialRuntimes: ["native:privacyFilter"],
 });
 writePassingScaffold(globalPermissionDependencyRoot);
@@ -919,7 +922,7 @@ writeFileSync(
     "export type ActiveGatewayHookName = 'gateway.request.afterBodyRead' | 'gateway.request.beforeSend';",
     "export type ReservedGatewayHookName = 'gateway.response.headers';",
     "export type GatewayHookName = ActiveGatewayHookName | ReservedGatewayHookName;",
-    "const runtimeTokens = 'declarativeRules wasm';",
+    "const runtimeTokens = 'extensionHost wasm';",
     "const activeMutationField = 'requestBody';",
     "function validateManifest(manifest: { permissions: PluginPermission[] }) {",
     "  return validatePermissionSet(manifest.permissions);",

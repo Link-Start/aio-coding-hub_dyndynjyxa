@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use super::plugins::PluginHook;
 
@@ -39,7 +39,7 @@ pub fn is_known_capability(capability: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginContributes {
     #[serde(default)]
     pub providers: Vec<ProviderContribution>,
@@ -53,33 +53,8 @@ pub struct PluginContributes {
     #[serde(rename = "gatewayHooks")]
     #[serde(default)]
     pub gateway_hooks: Vec<PluginHook>,
-    #[serde(rename = "gatewayRules")]
-    #[serde(default, skip_serializing)]
-    #[specta(skip)]
-    pub(crate) unsupported_gateway_rules: UnsupportedGatewayRulesPresence,
     #[serde(default)]
     pub ui: BTreeMap<String, Vec<UiContribution>>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct UnsupportedGatewayRulesPresence {
-    present: bool,
-}
-
-impl UnsupportedGatewayRulesPresence {
-    pub(crate) fn is_present(&self) -> bool {
-        self.present
-    }
-}
-
-impl<'de> Deserialize<'de> for UnsupportedGatewayRulesPresence {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let _ = serde::de::IgnoredAny::deserialize(deserializer)?;
-        Ok(Self { present: true })
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq, Eq)]

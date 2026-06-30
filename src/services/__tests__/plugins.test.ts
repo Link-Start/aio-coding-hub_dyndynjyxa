@@ -60,7 +60,7 @@ function pluginSummary() {
     name: "Community Prompt Helper",
     current_version: "1.0.0",
     status: "disabled" as const,
-    runtime: "declarativeRules",
+    runtime: "extensionHost",
     permission_risk: "high" as const,
     update_available: false,
     last_error: null,

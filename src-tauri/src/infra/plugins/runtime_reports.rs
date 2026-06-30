@@ -427,7 +427,7 @@ fn normalize_contribution_type(raw: &str) -> AppResult<&'static str> {
 fn runtime_kind_for_contribution_type(contribution_type: &str) -> &'static str {
     match contribution_type {
         "command" => "extensionHost",
-        "hook" => "declarativeRules",
+        "hook" => "extensionHost",
         _ => "extension",
     }
 }
@@ -533,7 +533,7 @@ mod tests {
             plugin_id: plugin_id.to_string(),
             trace_id: Some(trace_id.to_string()),
             hook_name: "gateway.request.afterBodyRead".to_string(),
-            runtime_kind: "declarativeRules".to_string(),
+            runtime_kind: "extensionHost".to_string(),
             status: "completed".to_string(),
             started_at_ms: 1000,
             duration_ms: 5,
@@ -641,7 +641,7 @@ mod tests {
                 plugin_id: "community.prompt-helper".to_string(),
                 trace_id: Some("trace-report-1".to_string()),
                 hook_name: "gateway.request.afterBodyRead".to_string(),
-                runtime_kind: "declarativeRules".to_string(),
+                runtime_kind: "extensionHost".to_string(),
                 status: "completed".to_string(),
                 started_at_ms: 1_000,
                 duration_ms: 17,

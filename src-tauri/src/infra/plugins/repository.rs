@@ -787,7 +787,7 @@ fn legacy_runtime_name(manifest_json: &str) -> Option<String> {
         .and_then(|runtime| runtime.get("kind"))
         .and_then(serde_json::Value::as_str)?;
     match kind {
-        "declarativeRules" | "wasm" | "process" => Some(kind.to_string()),
+        "wasm" | "process" => Some(kind.to_string()),
         "native" if plugin_id != "official.privacy-filter" => raw
             .get("runtime")
             .and_then(|runtime| runtime.get("engine"))
