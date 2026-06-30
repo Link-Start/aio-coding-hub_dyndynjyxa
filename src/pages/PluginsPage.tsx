@@ -347,6 +347,7 @@ function PluginDetailPanel({
   const runtimeCopy = describePluginRuntime(detail.summary.runtime);
   const unsigned = isUnsigned(detail);
   const rollbackVersion = previousVersion(detail);
+  const gatewayHooks = detail.manifest.contributes?.gatewayHooks ?? detail.manifest.hooks ?? [];
 
   return (
     <div className="space-y-5">
@@ -430,7 +431,7 @@ function PluginDetailPanel({
         </div>
 
         <div className="mt-3 grid gap-2">
-          {(detail.manifest.hooks ?? []).map((hook) => (
+          {gatewayHooks.map((hook) => (
             <div key={hook.name} className="rounded-md border border-border px-3 py-2 text-sm">
               <div className="font-mono text-xs">{hook.name}</div>
               <div className="mt-1 text-xs text-muted-foreground">

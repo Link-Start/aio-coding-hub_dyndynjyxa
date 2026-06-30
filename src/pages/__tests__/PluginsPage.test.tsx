@@ -130,7 +130,6 @@ function detail(overrides: Partial<PluginDetail> = {}): PluginDetail {
         ],
       },
       capabilities: ["gateway.hooks"],
-      hooks: [{ name: "gateway.request.afterBodyRead", priority: 100, failurePolicy: "fail-open" }],
       permissions: ["request.body.read", "request.body.write"],
       hostCompatibility: {
         app: ">=0.56.0 <1.0.0",
