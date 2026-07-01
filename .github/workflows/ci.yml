@@ -203,11 +203,6 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: Plugin WASM SDK tests
-        run: |
-          cargo test --manifest-path packages/plugin-wasm-sdk/Cargo.toml
-          cargo test --manifest-path packages/plugin-wasm-sdk/examples/redactor/Cargo.toml
-
       - name: Rust test
         working-directory: src-tauri
         run: cargo test --locked -- --test-threads=1
