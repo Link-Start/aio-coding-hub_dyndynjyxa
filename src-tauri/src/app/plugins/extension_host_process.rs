@@ -548,6 +548,57 @@ fn validate_json_rpc_response(expected_id: u64, response: JsonValue) -> AppResul
 }
 
 #[cfg(test)]
+#[test]
+fn extension_host_process_env_probe_for_tests() {
+    if !std::env::args().any(|arg| arg == "--extension-host-process-env-probe") {
+        return;
+    }
+
+    use std::io::{BufRead, Write};
+
+    let leaked_env = || {
+        std::env::var_os("AIO_PLUGIN_RUNTIME_SECRET_FOR_TEST")
+            .map(|value| JsonValue::String(value.to_string_lossy().into_owned()))
+            .unwrap_or(JsonValue::Null)
+    };
+
+    let mut stdout = std::io::stdout();
+    writeln!(
+        stdout,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "method": "plugin.ready",
+            "leaked": leaked_env(),
+        })
+    )
+    .expect("write ready");
+    stdout.flush().expect("flush ready");
+
+    let stdin = std::io::stdin();
+    for line in stdin.lock().lines() {
+        let line = line.expect("read request");
+        if line.trim().is_empty() {
+            continue;
+        }
+        let request: JsonValue = serde_json::from_str(&line).expect("parse request");
+        writeln!(
+            stdout,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": request.get("id").cloned().unwrap_or(JsonValue::Null),
+                "result": {
+                    "leaked": leaked_env(),
+                },
+            })
+        )
+        .expect("write response");
+        stdout.flush().expect("flush response");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -688,36 +739,27 @@ mod tests {
     #[tokio::test]
     async fn extension_host_process_does_not_inherit_host_environment() {
         std::env::set_var("AIO_PLUGIN_RUNTIME_SECRET_FOR_TEST", "host-secret");
-        let (_dir, script) = write_node_plugin(
-            r#"
-            console.log(JSON.stringify({
-              jsonrpc: "2.0",
-              method: "plugin.ready",
-              leaked: process.env.AIO_PLUGIN_RUNTIME_SECRET_FOR_TEST || null
-            }));
-            process.stdin.setEncoding("utf8");
-            let buffer = "";
-            process.stdin.on("data", chunk => {
-              buffer += chunk;
-              const lines = buffer.split("\n");
-              buffer = lines.pop();
-              for (const line of lines) {
-                if (!line.trim()) continue;
-                const req = JSON.parse(line);
-                console.log(JSON.stringify({
-                  jsonrpc: "2.0",
-                  id: req.id,
-                  result: {
-                    leaked: process.env.AIO_PLUGIN_RUNTIME_SECRET_FOR_TEST || null
-                  }
-                }));
-              }
-            });
-            "#,
-        );
-        let mut runtime = ExtensionHostChildProcess::start(node_config(&script))
-            .await
-            .expect("start extension host process");
+        let program = std::env::current_exe().expect("current test executable");
+        let mut runtime = ExtensionHostChildProcess::start(ExtensionHostProcessConfig {
+            program: program.display().to_string(),
+            args: vec![
+                "--exact".to_string(),
+                "app::plugins::extension_host_process::extension_host_process_env_probe_for_tests"
+                    .to_string(),
+                "--nocapture".to_string(),
+                "--".to_string(),
+                "--extension-host-process-env-probe".to_string(),
+            ],
+            start_timeout: Duration::from_secs(5),
+            hook_timeout: Duration::from_secs(5),
+            idle_recycle: Duration::from_millis(50),
+            max_line_bytes: 256 * 1024,
+            ready_method: "plugin.ready".to_string(),
+            allow_startup_noise: true,
+            host_handler: None,
+        })
+        .await
+        .expect("start extension host process");
 
         let response = runtime
             .call_hook(json!({"hook": "gateway.request.afterBodyRead", "context": {}}))
