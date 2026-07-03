@@ -21,7 +21,6 @@ import {
 } from "../../utils/formatters";
 import { Clock, Server, CheckCircle2, XCircle } from "lucide-react";
 import {
-  computeEffectiveInputTokens,
   computeStatusBadge,
   FolderBadge,
   formatClaudeModelMappingText,
@@ -228,11 +227,7 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
           ? sanitizeTtfbMs(trace.summary.ttfb_ms ?? null, trace.summary.duration_ms)
           : null;
 
-        const effectiveInputTokens = computeEffectiveInputTokens(
-          trace.cli_key,
-          trace.summary?.input_tokens ?? null,
-          trace.summary?.cache_read_input_tokens ?? null
-        );
+        const effectiveInputTokens = trace.summary?.effective_input_tokens ?? null;
         const displayInputTokens = effectiveInputTokens ?? (isClientAbort ? 0 : null);
         const displayOutputTokens = trace.summary?.output_tokens ?? (isClientAbort ? 0 : null);
         const displayCacheReadTokens =

@@ -19,6 +19,10 @@ function activeRequest(overrides: Record<string, unknown> = {}) {
 }
 
 function log(overrides: Partial<RequestLogSummary> = {}): RequestLogSummary {
+  // Mirror the backend derivation for realistic rows.
+  const status = "status" in overrides ? (overrides.status ?? null) : null;
+  const isInterrupted =
+    overrides.is_interrupted ?? (status == null && (overrides.error_code ?? null) == null);
   return {
     id: 1,
     trace_id: "trace-1",
@@ -49,7 +53,9 @@ function log(overrides: Partial<RequestLogSummary> = {}): RequestLogSummary {
     final_provider_id: null,
     created_at_ms: 1_700_000_000_000,
     created_at: 1_700_000_000,
+    effective_input_tokens: null,
     ...overrides,
+    is_interrupted: isInterrupted,
   } as RequestLogSummary;
 }
 

@@ -277,7 +277,9 @@ fn insert_provider(
     let sort_order = next_sort_order(tx, cli_key)?;
 
     let claude_models = if cli_key == "claude" {
-        claude_models.unwrap_or_default().normalized()
+        let input = claude_models.unwrap_or_default();
+        validate_claude_models(&input)?;
+        input.normalized()
     } else {
         ClaudeModels::default()
     };
@@ -1248,7 +1250,10 @@ pub fn upsert(
             };
 
             let next_claude_models = match claude_models {
-                Some(v) if cli_key == "claude" => Some(v.normalized()),
+                Some(v) if cli_key == "claude" => {
+                    validate_claude_models(&v)?;
+                    Some(v.normalized())
+                }
                 _ => None,
             };
 

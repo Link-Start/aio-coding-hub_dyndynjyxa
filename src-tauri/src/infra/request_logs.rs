@@ -422,6 +422,86 @@ WHERE trace_id = ?1
     .map_err(|e| db_err!("failed to touch request log activity: {e}"))
 }
 
+const RETENTION_PURGE_BATCH_SIZE: usize = 1000;
+const RETENTION_PURGE_BATCH_PAUSE_MS: u64 = 50;
+const RETENTION_TASK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Deletes request logs older than `retention_days`, in small batches so the
+/// write lock is never held long (WAL-friendly). `retention_days == 0` means
+/// retention is disabled (keep forever) and nothing is deleted.
+pub fn purge_expired(db: &db::Db, retention_days: u32, now_unix: i64) -> AppResult<u64> {
+    if retention_days == 0 {
+        return Ok(0);
+    }
+    let cutoff = now_unix.saturating_sub(i64::from(retention_days).saturating_mul(24 * 60 * 60));
+    let mut total: u64 = 0;
+    loop {
+        // Re-acquire per batch so the pooled connection (pool max is small) is
+        // not held across the inter-batch pauses of a long purge.
+        let conn = db.open_connection()?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM request_logs WHERE id IN (
+                   SELECT id FROM request_logs WHERE created_at < ?1 LIMIT ?2
+                 )",
+                params![cutoff, RETENTION_PURGE_BATCH_SIZE as i64],
+            )
+            .map_err(|e| db_err!("failed to purge expired request_logs: {e}"))?;
+        drop(conn);
+        total = total.saturating_add(deleted as u64);
+        if deleted < RETENTION_PURGE_BATCH_SIZE {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(RETENTION_PURGE_BATCH_PAUSE_MS));
+    }
+    Ok(total)
+}
+
+/// Spawns the daily request-log retention job (idempotent). Reads the setting
+/// fresh on each tick — fail-open to disabled — so changes apply without a
+/// restart. Lives at app level, not in the gateway: retention must not depend
+/// on the gateway running.
+pub(crate) fn spawn_retention_task(app: tauri::AppHandle, db: db::Db) {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        run_retention_once(&app, &db).await;
+
+        let mut interval = tokio::time::interval(RETENTION_TASK_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // First tick is immediate; skip it so we don't run twice at startup.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            run_retention_once(&app, &db).await;
+        }
+    });
+}
+
+async fn run_retention_once(app: &tauri::AppHandle, db: &db::Db) {
+    let app = app.clone();
+    let db = db.clone();
+    let result = crate::blocking::run("request_log_retention", move || {
+        let retention_days = crate::settings::request_log_retention_days_fail_open(&app);
+        if retention_days == 0 {
+            return Ok::<u64, crate::shared::error::AppError>(0);
+        }
+        let deleted = purge_expired(&db, retention_days, now_unix_seconds())?;
+        if deleted > 0 {
+            tracing::info!(retention_days, deleted, "purged expired request logs");
+        }
+        Ok(deleted)
+    })
+    .await;
+
+    if let Err(err) = result {
+        tracing::warn!("request-log retention task failed: {}", err);
+    }
+}
+
 pub(crate) fn reconcile_unresolved_pending(
     db: &db::Db,
     reason: RequestLogReconcileReason,
@@ -858,9 +938,9 @@ GROUP BY cli_key, session_id
 #[cfg(test)]
 mod tests {
     use super::{
-        insert_batch_once, parse_cx2cc_cost_basis, reconcile_unresolved_pending, touch_activity,
-        try_acquire_write_through_permit, writer_loop, InsertBatchCache, RequestLogInsert,
-        RequestLogReconcileReason, COST_MULTIPLIER_CACHE_MAX_ENTRIES,
+        insert_batch_once, parse_cx2cc_cost_basis, purge_expired, reconcile_unresolved_pending,
+        touch_activity, try_acquire_write_through_permit, writer_loop, InsertBatchCache,
+        RequestLogInsert, RequestLogReconcileReason, COST_MULTIPLIER_CACHE_MAX_ENTRIES,
         EFFECTIVE_COST_MULTIPLIER_SQL, MODEL_PRICE_CACHE_MAX_ENTRIES, WRITE_BATCH_MAX,
     };
     use rusqlite::{params, Connection};
@@ -1024,6 +1104,93 @@ WHERE trace_id = ?1
         drop(first);
         assert!(try_acquire_write_through_permit(limiter).is_some());
         drop(second);
+    }
+
+    #[test]
+    fn purge_expired_deletes_only_rows_older_than_retention() {
+        let (app, db, _dir) = init_test_db();
+        let app_handle = app.handle().clone();
+        let mut cache = InsertBatchCache::default();
+        let now_unix = 1_770_000_000_i64;
+        let day_secs = 24 * 60 * 60;
+
+        insert_batch_once(
+            &app_handle,
+            &db,
+            &[
+                RequestLogInsert {
+                    created_at: now_unix - 10 * day_secs,
+                    created_at_ms: (now_unix - 10 * day_secs) * 1000,
+                    ..request_log_insert("trace-purge-old")
+                },
+                RequestLogInsert {
+                    created_at: now_unix - day_secs / 2,
+                    created_at_ms: (now_unix - day_secs / 2) * 1000,
+                    ..request_log_insert("trace-purge-recent")
+                },
+            ],
+            &mut cache,
+        )
+        .expect("insert rows");
+
+        let deleted = purge_expired(&db, 7, now_unix).expect("purge");
+        assert_eq!(deleted, 1);
+        assert_eq!(count_request_logs(&db), 1);
+
+        let conn = db.open_connection().expect("open connection");
+        let remaining: String = conn
+            .query_row("SELECT trace_id FROM request_logs", [], |row| row.get(0))
+            .expect("remaining row");
+        assert_eq!(remaining, "trace-purge-recent");
+    }
+
+    #[test]
+    fn purge_expired_is_disabled_when_retention_is_zero() {
+        let (app, db, _dir) = init_test_db();
+        let app_handle = app.handle().clone();
+        let mut cache = InsertBatchCache::default();
+        let now_unix = 1_770_000_000_i64;
+
+        insert_batch_once(
+            &app_handle,
+            &db,
+            &[RequestLogInsert {
+                created_at: now_unix - 400 * 24 * 60 * 60,
+                created_at_ms: (now_unix - 400 * 24 * 60 * 60) * 1000,
+                ..request_log_insert("trace-purge-disabled")
+            }],
+            &mut cache,
+        )
+        .expect("insert row");
+
+        let deleted = purge_expired(&db, 0, now_unix).expect("purge disabled");
+        assert_eq!(deleted, 0);
+        assert_eq!(count_request_logs(&db), 1);
+    }
+
+    #[test]
+    fn purge_expired_drains_multiple_batches() {
+        let (app, db, _dir) = init_test_db();
+        let app_handle = app.handle().clone();
+        let mut cache = InsertBatchCache::default();
+        let now_unix = 1_770_000_000_i64;
+        let old_created_at = now_unix - 30 * 24 * 60 * 60;
+
+        // More rows than one purge batch (batch size 1000) to cover the loop.
+        let rows: Vec<RequestLogInsert> = (0..1100)
+            .map(|index| RequestLogInsert {
+                created_at: old_created_at,
+                created_at_ms: old_created_at * 1000,
+                ..request_log_insert(&format!("trace-purge-batch-{index}"))
+            })
+            .collect();
+        for chunk in rows.chunks(WRITE_BATCH_MAX) {
+            insert_batch_once(&app_handle, &db, chunk, &mut cache).expect("insert chunk");
+        }
+
+        let deleted = purge_expired(&db, 7, now_unix).expect("purge batches");
+        assert_eq!(deleted, 1100);
+        assert_eq!(count_request_logs(&db), 0);
     }
 
     #[test]

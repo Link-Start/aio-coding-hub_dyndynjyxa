@@ -17,6 +17,9 @@ pub(super) struct PreparedProvider {
     pub(super) provider_base_url_display: String,
     pub(super) auth_mode: String,
     pub(super) provider_index: u32,
+    // Bridged (cx2cc) input semantics for this provider; threaded into
+    // FailoverAttempt so the request event can compute effective_input_tokens.
+    pub(super) provider_bridged: bool,
     pub(super) session_reuse: Option<bool>,
     pub(super) effective_credential: String,
     pub(super) provider_max_attempts: u32,
@@ -275,6 +278,7 @@ pub(super) async fn prepare_provider<R: tauri::Runtime>(
         provider_base_url_base: &provider_base_url_base,
         auth_mode: provider.auth_mode.as_str(),
         provider_index,
+        provider_bridged: is_cx2cc_bridge,
         session_reuse,
         stream_idle_timeout_seconds: provider.stream_idle_timeout_seconds,
         claude_model_mapping: None,
@@ -329,6 +333,7 @@ pub(super) async fn prepare_provider<R: tauri::Runtime>(
         provider_base_url_display,
         auth_mode: provider.auth_mode.clone(),
         provider_index,
+        provider_bridged: is_cx2cc_bridge,
         session_reuse,
         effective_credential,
         provider_max_attempts,

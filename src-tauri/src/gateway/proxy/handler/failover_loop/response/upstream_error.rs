@@ -563,6 +563,7 @@ pub(super) async fn handle_non_success_response<R: tauri::Runtime>(
         circuit_state_after,
         circuit_failure_count,
         circuit_failure_threshold,
+        provider_bridged: Some(provider_ctx.provider_bridged),
     });
 
     emit_attempt_event_and_log(

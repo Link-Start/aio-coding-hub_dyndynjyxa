@@ -20,9 +20,11 @@ const DEFAULT_CLI_PROXY_STATUS: CliProxyStatus[] = [
   { cli_key: "gemini", enabled: false, base_origin: null, applied_to_current_gateway: null },
 ];
 
-// Default settings matching the Rust backend defaults.
+// Default settings matching the Rust backend defaults (src-tauri/src/infra/settings/defaults.rs).
+// schema_version and the historically drift-prone fields below are guarded by
+// src/constants/__tests__/crossLayerContracts.test.ts.
 const DEFAULT_SETTINGS: AppSettings = {
-  schema_version: 32,
+  schema_version: 34,
   preferred_port: 37123,
   show_home_heatmap: true,
   show_home_usage: true,
@@ -42,10 +44,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   tray_enabled: true,
   enable_cli_proxy_startup_recovery: true,
   log_retention_days: 7,
+  request_log_retention_days: 0,
   provider_cooldown_seconds: 30,
   provider_base_url_ping_cache_ttl_seconds: 60,
   upstream_first_byte_timeout_seconds: 30,
-  upstream_stream_idle_timeout_seconds: 120,
+  upstream_stream_idle_timeout_seconds: 300,
   upstream_request_timeout_non_streaming_seconds: 0,
   update_releases_url: "https://github.com/dyndynjyxa/aio-coding-hub/releases",
   failover_max_attempts_per_provider: 5,
@@ -57,7 +60,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   intercept_anthropic_warmup_requests: true,
   enable_thinking_signature_rectifier: true,
   enable_thinking_budget_rectifier: true,
-  enable_billing_header_rectifier: true,
+  enable_billing_header_rectifier: false,
   enable_codex_session_id_completion: true,
   enable_claude_metadata_user_id_injection: true,
   enable_cache_anomaly_monitor: false,

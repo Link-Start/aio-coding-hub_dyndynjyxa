@@ -1260,12 +1260,21 @@ mod tests {
 
         let request_log = recv_terminal_request_log(&mut log_rx).await;
         assert_eq!(request_log.status, Some(200));
-        let plugin_detail = repository::get_plugin(&db, &plugin.summary.plugin_id)
-            .expect("read persisted plugin detail");
-        assert!(plugin_detail.audit_logs.iter().any(|audit| {
-            audit.trace_id.as_deref() == Some(request_log.trace_id.as_str())
-                && audit.event_type == "plugin.hook.completed"
-        }));
+        // Audit persistence is fire-and-forget off the request path; poll for it.
+        let mut audit_persisted = false;
+        for _ in 0..40 {
+            let plugin_detail = repository::get_plugin(&db, &plugin.summary.plugin_id)
+                .expect("read persisted plugin detail");
+            audit_persisted = plugin_detail.audit_logs.iter().any(|audit| {
+                audit.trace_id.as_deref() == Some(request_log.trace_id.as_str())
+                    && audit.event_type == "plugin.hook.completed"
+            });
+            if audit_persisted {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(audit_persisted, "plugin audit log should be persisted");
         upstream_task.abort();
     }
 

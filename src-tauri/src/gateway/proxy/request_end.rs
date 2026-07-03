@@ -951,6 +951,7 @@ mod tests {
             circuit_state_after: None,
             circuit_failure_count: None,
             circuit_failure_threshold: None,
+            provider_bridged: Some(false),
         }
     }
 
@@ -980,6 +981,7 @@ mod tests {
             circuit_state_after: Some("OPEN"),
             circuit_failure_count: Some(5),
             circuit_failure_threshold: Some(5),
+            provider_bridged: Some(false),
         }
     }
 

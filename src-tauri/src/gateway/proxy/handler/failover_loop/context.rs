@@ -187,6 +187,7 @@ pub(super) struct ProviderCtx<'a> {
     pub(super) provider_base_url_base: &'a String,
     pub(super) auth_mode: &'a str,
     pub(super) provider_index: u32,
+    pub(super) provider_bridged: bool,
     pub(super) session_reuse: Option<bool>,
     pub(super) stream_idle_timeout_seconds: Option<u32>,
     pub(super) claude_model_mapping: Option<&'a ClaudeModelMapping>,
@@ -198,6 +199,7 @@ pub(super) struct ProviderCtxOwned {
     pub(super) provider_base_url_base: String,
     pub(super) auth_mode: String,
     pub(super) provider_index: u32,
+    pub(super) provider_bridged: bool,
     pub(super) session_reuse: Option<bool>,
     pub(super) stream_idle_timeout_seconds: Option<u32>,
 }
@@ -210,6 +212,7 @@ impl<'a> From<ProviderCtx<'a>> for ProviderCtxOwned {
             provider_base_url_base: ctx.provider_base_url_base.clone(),
             auth_mode: ctx.auth_mode.to_string(),
             provider_index: ctx.provider_index,
+            provider_bridged: ctx.provider_bridged,
             session_reuse: ctx.session_reuse,
             stream_idle_timeout_seconds: ctx.stream_idle_timeout_seconds,
         }

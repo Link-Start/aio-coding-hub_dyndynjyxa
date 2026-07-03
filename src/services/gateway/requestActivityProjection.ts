@@ -142,6 +142,8 @@ function mergeTraceWithRequestLog(
       summary?.cache_creation_5m_input_tokens ?? requestLog.cache_creation_5m_input_tokens ?? null,
     cache_creation_1h_input_tokens:
       summary?.cache_creation_1h_input_tokens ?? requestLog.cache_creation_1h_input_tokens ?? null,
+    effective_input_tokens:
+      summary?.effective_input_tokens ?? requestLog.effective_input_tokens ?? null,
     cost_usd: summary?.cost_usd ?? requestLog.cost_usd ?? null,
     cost_multiplier: summary?.cost_multiplier ?? requestLog.cost_multiplier ?? null,
   };
@@ -175,6 +177,8 @@ function requestLogFromActiveRequest(
     requested_model: activeRequest.requested_model ?? null,
     status: null,
     error_code: null,
+    // Synthetic in-progress rows are by definition not interrupted.
+    is_interrupted: false,
     duration_ms: 0,
     ttfb_ms: null,
     attempt_count: 0,
@@ -194,6 +198,7 @@ function requestLogFromActiveRequest(
     cache_creation_input_tokens: null,
     cache_creation_5m_input_tokens: null,
     cache_creation_1h_input_tokens: null,
+    effective_input_tokens: null,
     cost_usd: null,
     provider_chain_json: null,
     error_details_json: null,

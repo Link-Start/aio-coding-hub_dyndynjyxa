@@ -255,6 +255,7 @@ where
             circuit_state_after: None,
             circuit_failure_count: Some(circuit_before.failure_count),
             circuit_failure_threshold: Some(circuit_before.failure_threshold),
+            provider_bridged: Some(provider_ctx_owned.provider_bridged),
         });
 
         emit_attempt_event_and_log_with_circuit_before(

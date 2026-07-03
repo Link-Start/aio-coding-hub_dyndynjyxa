@@ -1,6 +1,8 @@
 export type RequestLogProgressInput = {
   status: number | null;
   error_code?: string | null;
+  // Backend-owned interrupted flag (RequestLogSummary.is_interrupted).
+  is_interrupted: boolean;
   created_at?: number;
   created_at_ms?: number | null;
 };
@@ -30,7 +32,7 @@ export function isPersistedRequestLogInProgress(_log: RequestLogProgressInput) {
 }
 
 export function isPersistedRequestLogIncomplete(log: RequestLogProgressInput) {
-  return log.status == null && (log.error_code ?? null) == null;
+  return log.is_interrupted;
 }
 
 export function isRequestLogActivityInProgress(activityState: RequestLogActivityState) {

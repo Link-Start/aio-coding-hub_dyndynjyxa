@@ -576,6 +576,18 @@ mod tests {
         );
         assert_eq!(no_provider.error_category, None);
         assert!(!no_provider.excluded_from_stats);
+
+        let selection_failed = early_error_contract(EarlyErrorKind::ProviderSelectionFailed);
+        assert_eq!(selection_failed.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            selection_failed.error_code,
+            GatewayErrorCode::InternalError.as_str()
+        );
+        assert_eq!(
+            selection_failed.error_category,
+            Some(ErrorCategory::SystemError.as_str())
+        );
+        assert!(!selection_failed.excluded_from_stats);
     }
 
     #[test]

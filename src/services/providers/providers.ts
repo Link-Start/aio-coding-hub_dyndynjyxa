@@ -30,6 +30,7 @@ import {
   type Override,
 } from "../generatedTypeUtils";
 import { createRiskyIpcConfirm } from "../ipcConfirm";
+import { FeValidationError } from "../../utils/errors";
 
 export type {
   ProviderAvailabilityResult,
@@ -137,7 +138,7 @@ export function validateProviderCliKey(cliKey: string): CliKey {
   if ((CLI_KEY_VALUES as readonly string[]).includes(normalizedCliKey)) {
     return normalizedCliKey as CliKey;
   }
-  throw new Error(`SEC_INVALID_INPUT: invalid cliKey=${cliKey}`);
+  throw new FeValidationError(`SEC_INVALID_INPUT: invalid cliKey=${cliKey}`);
 }
 
 function toProviderAuthMode(value: string, label: string): ProviderAuthMode {

@@ -616,6 +616,58 @@ fn upsert_rejects_unicode_note_over_character_limit() {
 }
 
 #[test]
+fn upsert_accepts_claude_model_name_at_character_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_model_name_limit.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let mut params = default_provider_params("model-name-at-limit");
+    params.claude_models = Some(ClaudeModels {
+        main_model: Some("m".repeat(MAX_MODEL_NAME_LEN)),
+        ..ClaudeModels::default()
+    });
+
+    let saved = upsert(&db, params).expect("save provider");
+    let main_model = saved.claude_models.main_model.expect("main model");
+    assert_eq!(main_model.chars().count(), MAX_MODEL_NAME_LEN);
+}
+
+#[test]
+fn upsert_rejects_claude_model_name_over_character_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_model_name_over_limit.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let mut params = default_provider_params("model-name-over-limit");
+    params.claude_models = Some(ClaudeModels {
+        main_model: Some("m".repeat(MAX_MODEL_NAME_LEN + 1)),
+        ..ClaudeModels::default()
+    });
+
+    let err = upsert(&db, params).expect_err("model name over limit");
+    assert!(err.to_string().contains("main_model must be at most"));
+}
+
+#[test]
+fn upsert_update_rejects_claude_model_name_over_character_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_model_name_update_over_limit.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let saved = upsert(&db, default_provider_params("model-name-update")).expect("save provider");
+
+    let mut params = default_provider_params("model-name-update");
+    params.provider_id = Some(saved.id);
+    params.claude_models = Some(ClaudeModels {
+        reasoning_model: Some("模".repeat(MAX_MODEL_NAME_LEN + 1)),
+        ..ClaudeModels::default()
+    });
+
+    let err = upsert(&db, params).expect_err("model name over limit on update");
+    assert!(err.to_string().contains("reasoning_model must be at most"));
+}
+
+#[test]
 fn upsert_oauth_provider_drops_submitted_base_urls() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("providers_oauth_base_urls.db");
