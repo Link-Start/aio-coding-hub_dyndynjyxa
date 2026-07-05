@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AppErrorCodes } from "../appErrorCodes";
 import { appEventNames } from "../appEvents";
+import { DEFAULT_GATEWAY_PORT } from "../gateway";
 import { GATEWAY_EVENT_TEXT_LIMITS, gatewayEventNames } from "../gatewayEvents";
 import { GatewayErrorCodes } from "../gatewayErrorCodes";
 import { HOME_USAGE_PERIOD_VALUES } from "../homeUsagePeriods";
@@ -221,6 +222,15 @@ describe("cross-layer contracts", () => {
     expect(limits.MIN_FAILOVER_MAX_PROVIDERS_TO_TRY).toBe(1);
     expect(limits.MIN_CIRCUIT_BREAKER_FAILURE_THRESHOLD).toBe(1);
     expect(limits.MIN_CIRCUIT_BREAKER_OPEN_DURATION_MINUTES).toBe(1);
+  });
+
+  it("keeps the default gateway port aligned with Rust", () => {
+    // Guards all three former hardcode sites: Rust DEFAULT_GATEWAY_PORT plus
+    // the shared frontend const consumed by useGatewayMeta and
+    // settingsPersistenceModel. Editing either side's 37123 turns this red.
+    expect(extractRustNumericConst(settingsDefaultsSource, "DEFAULT_GATEWAY_PORT")).toBe(
+      DEFAULT_GATEWAY_PORT
+    );
   });
 
   it("keeps the provider model-name length limit aligned with Rust", () => {
