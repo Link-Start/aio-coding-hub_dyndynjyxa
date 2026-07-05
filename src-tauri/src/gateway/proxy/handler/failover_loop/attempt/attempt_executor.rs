@@ -417,6 +417,8 @@ fn emit_started_event<R: tauri::Runtime>(
         circuit_state_after: None,
         circuit_failure_count: Some(circuit_before.failure_count),
         circuit_failure_threshold: Some(circuit_before.failure_threshold),
+        circuit_recover_at_unix: None,
+        circuit_trigger_error_code: None,
         provider_bridged: Some(prepared.provider_bridged),
         timeout_secs: None,
     };

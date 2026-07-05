@@ -123,11 +123,22 @@ describe("cross-layer contracts", () => {
     );
   });
 
-  it("keeps gateway event payloads free of skip_serializing_if", () => {
+  it("keeps gateway event payloads free of skip_serializing_if outside known exemptions", () => {
     // The shared-fixture contract tests compare serde_json values, so a field
     // skipped when None would silently evade both sides while the frontend
     // normalizers never learn about it. Options must serialize as explicit null.
-    expect(gatewayEventsSource).not.toContain("skip_serializing_if");
+    // Exemptions: circuit attribution fields are omitted when None by explicit
+    // space-constraint design (attempts_json must gain zero bytes on success
+    // paths); both sides pin the omission with dedicated tests (Rust key-set
+    // assertions in failover_loop/tests.rs, absence handling in attemptsJson).
+    const exemptFields = ["circuit_recover_at_unix", "circuit_trigger_error_code"];
+    const skippedFields = Array.from(
+      gatewayEventsSource.matchAll(
+        /#\[serde\(skip_serializing_if[^\]]*\)\]\s*(?:pub(?:\([^)]*\))?\s+)?(\w+):/g
+      ),
+      (match) => match[1]
+    );
+    expect(skippedFields.sort()).toEqual(exemptFields.sort());
   });
 
   it("keeps the MSW settings mock aligned with Rust defaults for drift-prone fields", () => {

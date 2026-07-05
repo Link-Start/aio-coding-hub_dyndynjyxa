@@ -91,6 +91,13 @@ pub(super) struct FailoverAttempt {
     pub(super) circuit_state_after: Option<&'static str>,
     pub(super) circuit_failure_count: Option<u32>,
     pub(super) circuit_failure_threshold: Option<u32>,
+    // Circuit attribution for circuit-gate skip attempts (recovery point and
+    // the error code that triggered the breaker). Serialized only when set so
+    // success attempts and non-circuit paths gain zero bytes in attempts_json.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) circuit_recover_at_unix: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) circuit_trigger_error_code: Option<&'static str>,
     // Whether the attempted provider has bridged (cx2cc) input semantics; None
     // for synthetic attempts without a concrete provider. Feeds the request
     // event's effective_input_tokens.
@@ -734,6 +741,8 @@ mod tests {
             circuit_state_after: None,
             circuit_failure_count: None,
             circuit_failure_threshold: None,
+            circuit_recover_at_unix: None,
+            circuit_trigger_error_code: None,
             provider_bridged: Some(false),
             timeout_secs: None,
         }
@@ -807,6 +816,8 @@ mod tests {
                 circuit_state_after: Some("CLOSED"),
                 circuit_failure_count: Some(0),
                 circuit_failure_threshold: Some(5),
+                circuit_recover_at_unix: None,
+                circuit_trigger_error_code: None,
                 provider_bridged: Some(false),
                 timeout_secs: None,
             }],
@@ -1165,6 +1176,7 @@ mod tests {
                 failure_threshold: 5,
                 open_until: Some(1_750_001_800),
                 cooldown_until: None,
+                last_trigger_error_code: None,
             },
         }
     }
