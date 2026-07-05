@@ -227,6 +227,57 @@ describe("services/gateway/requestActivityProjection", () => {
     expect(afterExit.requestRows.map((row) => row.log.trace_id)).toEqual(["completed"]);
   });
 
+  it("merged summary falls back per field: summary over trace over request log", () => {
+    // 覆盖 mergeTraceWithRequestLog 三条新增回退链的优先级：
+    // session_id 取 summary；requested_model 在 summary 缺失时取 trace（而非 log）；
+    // claude_model_mapping 在 summary 缺失时取 trace。
+    const traceMapping = {
+      requestedModel: "claude-sonnet",
+      effectiveModel: "gpt-4.1",
+      mappingKind: "sonnet",
+      providerId: 1,
+      providerName: "Provider A",
+      applied: true,
+    };
+    const projection = buildRequestActivityProjection({
+      requestLogs: [
+        log({
+          trace_id: "merged",
+          status: 200,
+          session_id: "sess-log",
+          requested_model: "model-log",
+        }),
+      ],
+      activeRequests: [],
+      traces: [
+        trace({
+          trace_id: "merged",
+          session_id: null,
+          requested_model: "model-trace",
+          claude_model_mapping: traceMapping,
+          last_seen_ms: 1_700_000_000_000,
+          summary: {
+            ...summaryOf("merged"),
+            session_id: "sess-summary",
+            requested_model: null,
+            claude_model_mapping: null,
+          },
+        }),
+      ],
+      nowMs: 1_700_000_000_500,
+      realtimeCardLimit: 5,
+      realtimeCandidateLimit: 20,
+    });
+
+    const merged = projection.realtimeCards[0]?.trace.summary;
+    expect(merged?.session_id).toBe("sess-summary");
+    expect(merged?.requested_model).toBe("model-trace");
+    expect(merged?.claude_model_mapping).toMatchObject({
+      effectiveModel: "gpt-4.1",
+      providerId: 1,
+    });
+  });
+
   it("backfills realtime card model mapping from persisted request log settings", () => {
     const projection = buildRequestActivityProjection({
       requestLogs: [

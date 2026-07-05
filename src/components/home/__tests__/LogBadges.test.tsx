@@ -5,7 +5,7 @@ import { FastModeBadge, FolderBadge, FreeBadge, SessionReuseBadge } from "../Log
 import { getErrorCodeLabel } from "../requestLogErrorLabels";
 
 describe("components/home/LogBadges", () => {
-  it("renders small badges and computes effective input tokens", () => {
+  it("renders small badges with tooltips and labels", () => {
     render(
       <div>
         <SessionReuseBadge showCustomTooltip={false} />

@@ -4,8 +4,9 @@
  * `gateway:circuit` 状态跃迁（prev != next）且熔断提示开关开启时，在前端组装
  * 通知文案并通过 `noticeSend` 走现有系统通知发送路径（notice_send → notice:notify）。
  *
- * 文案语义逐行对齐已删除的 Rust `build_circuit_notice`（src-tauri/src/gateway/events.rs）；
- * 触发失败短标签唯一来源为 `constants/gatewayErrorCodes`。
+ * 正文行结构对齐已删除的 Rust `build_circuit_notice`（src-tauri/src/gateway/events.rs）；
+ * 触发失败短标签唯一来源为 `constants/gatewayErrorCodes`——其映射覆盖全部错误码，
+ * 比旧 Rust `short_label_zh` 的 10 码子集更宽（原始码仍在括号中展示），属有意改进。
  */
 
 import { GatewayErrorCodes, getGatewayErrorShortLabel } from "../../constants/gatewayErrorCodes";

@@ -22,32 +22,21 @@ describe("services/gateway/traceRoute hasFailoverFromSegments", () => {
     ).toBe(false);
   });
 
-  it("skipped segments do not count as hops", () => {
-    // 防御分支行为：真实输入（RealtimeTraceCards segments）从不产出 "skipped"
-    //（skipped outcome 被映射为 "failed" 计 hop，与 Rust 一致），见 traceRoute.ts 头注释。
+  it("counts hops by provider sequence regardless of status (skipped included, mirrors Rust)", () => {
+    // 与 Rust route_from_attempts 一致：provider_id>0 的 skipped attempt 计入 hop
+    //（其测试 route_includes_skipped_attempts）。真实输入（RealtimeTraceCards
+    // segments）从不产出 "skipped"（已映射为 "failed"），此处锚定镜像语义本身。
     expect(
       hasFailoverFromSegments([
         { provider: "A", status: "skipped" },
         { provider: "B", status: "success" },
       ])
-    ).toBe(false);
-    // skipped 夹在同 provider 中间：仍视为同一 hop
-    expect(
-      hasFailoverFromSegments([
-        { provider: "A", status: "failed" },
-        { provider: "B", status: "skipped" },
-        { provider: "A", status: "success" },
-      ])
-    ).toBe(false);
+    ).toBe(true);
+    // 单 provider 的 skipped 仍只是一个 hop，不算 failover。
+    expect(hasFailoverFromSegments([{ provider: "A", status: "skipped" }])).toBe(false);
   });
 
-  it("empty or all-skipped segments are not failover and do not throw", () => {
+  it("empty segments are not failover and do not throw", () => {
     expect(hasFailoverFromSegments([])).toBe(false);
-    expect(
-      hasFailoverFromSegments([
-        { provider: "A", status: "skipped" },
-        { provider: "B", status: "skipped" },
-      ])
-    ).toBe(false);
   });
 });
