@@ -1,3 +1,6 @@
+// 契约：请求"进行中"判定的单一真值来源 = activeRequests 注册表成员身份，本模块是唯一判定处。
+// requestLogState 只负责持久化终态（completed / interrupted）的分类，不判定进行中。
+
 import {
   isRequestLogActivityInProgress,
   requestLogActiveActivityState,
@@ -74,7 +77,7 @@ function requestLogActivitySortRank(
 ) {
   const traceId = normalizeTraceId(log.trace_id);
   if (traceId != null && activeByTraceId.has(traceId) && !isRequestLogTerminal(log)) return 0;
-  return requestLogActivityState(log, 0) === "interrupted" ? 2 : 1;
+  return requestLogActivityState(log) === "interrupted" ? 2 : 1;
 }
 
 function sortRequestLogsForActivity(
@@ -332,7 +335,7 @@ export function buildRequestActivityProjection({
     const activityState =
       activeRequest && !hasEnded
         ? requestLogActiveActivityState(activeRequest.last_activity_ms, nowMs)
-        : requestLogActivityState(log, nowMs);
+        : requestLogActivityState(log);
     requestRows.push({
       log,
       liveTrace,

@@ -10,6 +10,7 @@ import type { CliKey } from "../../services/providers/providers";
 import type { ProjectedRealtimeCard } from "../../services/gateway/requestActivityProjection";
 import { REALTIME_TRACE_EXIT_START_MS } from "../../services/gateway/requestActivityProjection";
 import { requestLogActiveActivityState } from "../../services/gateway/requestLogState";
+import { hasFailoverFromSegments } from "../../services/gateway/traceRoute";
 import { cn } from "../../utils/cn";
 import {
   computeOutputTokensPerSecond,
@@ -154,9 +155,8 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
           return { providerText, startProvider, endProvider, segments: segs };
         })();
 
-        const hasFailover =
-          attemptRoute.segments.length > 1 ||
-          attemptRoute.segments.some((s) => s.status === "failed");
+        // 与落库后徽章同规则（见 traceRoute.ts，复刻后端 has_failover）。
+        const hasFailover = hasFailoverFromSegments(attemptRoute.segments);
 
         const statusBadge = computeStatusBadge({
           status: summaryStatus,
