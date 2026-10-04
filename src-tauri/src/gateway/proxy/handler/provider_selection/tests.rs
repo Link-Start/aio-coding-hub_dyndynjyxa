@@ -248,6 +248,8 @@ fn insert_provider(db: &crate::db::Db, name: &str, enabled: bool) -> providers::
             limit_weekly_usd: None,
             limit_monthly_usd: None,
             limit_total_usd: None,
+            oauth_min_remaining_percent: None,
+            oauth_use_credits: false,
             tags: None,
             note: None,
             source_provider_id: None,
