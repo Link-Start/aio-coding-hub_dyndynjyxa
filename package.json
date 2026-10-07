@@ -2,7 +2,7 @@
   "name": "aio-coding-hub",
   "private": true,
   "version": "0.60.20",
-  "packageManager": "pnpm@10.34.3",
+  "packageManager": "pnpm@12.9.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
