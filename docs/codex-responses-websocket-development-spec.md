@@ -9,6 +9,8 @@
 > 已确认：采用本文默认策略；2026-09-27 已获实现授权。开发不提交、不推送；阶段证据见 [M0 验证记录](./codex-responses-websocket-m0-report.md)。
 >
 > 复审记录：[开发 spec 二次复审](./codex-responses-websocket-spec-review.md)。
+>
+> 2026-10-08 已实施通用供应商不可用错误适配及 Codex WS 失败结果修复；本地回归与 Codex/Claude 实际 CLI 结果见 [修复计划与实施记录](./codex-responses-websocket-error-recovery-plan.md) 第 8 节。Gemini/Grok 实际 CLI 及跨平台网络验收未完成。
 
 ## 1. 目标、术语与验收底线
 
@@ -427,6 +429,10 @@ Codex `rust-v0.156.0`：`map_wrapped_websocket_error_event` 把 `previous_respon
 
 并发规则：同一恢复记录只能原子认领一次；配置变化、用户取消、模型/forced provider 改变时不盲目沿用。候选与当前数据库资格取交集，不恢复已禁用供应商，不提升原本无资格的供应商。
 
+供应商不可用的已结束生成与 pending 恢复授权分开处理。现有 owner 只为标准的 503 `GW_ALL_PROVIDERS_UNAVAILABLE/GW_NO_ENABLED_PROVIDER` 保存小型失败摘要，包含最终消息、原 trace、恢复期限及原增量/完整输入和约束的摘要，不保留请求正文或详细 attempts。WS 和 HTTP 在 continuation 校验、缓冲区预留、pending 认领和开始生成之前，按 owner/nonce/epoch 及摘要匹配；合法重复输入只读取原失败，不执行上游或领取新预算。允许相同 previous_response_id 的原增量及已验证的完整重发；篡改输入、约束或归属仍明确拒绝。
+
+失败结果沿用 owner 的 30 分钟空闲 TTL 和 128 条上限，读取不续期，容量满时只淘汰无 active/pending 的旧 owner。它不会延长 pending 的 30 秒 TTL 或改变单次认领规则。上下文恢复信号、取消、断流、输出后错误和插件自定义错误不保存为该结果；供应商恢复后的新用户轮次使用新的 owner 正常选择供应商。
+
 ### 7.5 不能承诺的恢复
 
 - 全量重发仍可能包含跨账号不可解的 encrypted reasoning、私有附件或其他供应商状态；不得静默删除后声称上下文完整。
@@ -443,6 +449,8 @@ Codex `rust-v0.156.0`：`map_wrapped_websocket_error_event` 把 `previous_respon
 
 | 错误                                                      | 动作                                                 | 健康归因                                                                                                        |
 | --------------------------------------------------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 所有候选被熔断、冷却或限额 gate 拒绝 | HTTP 返回原生协议 503；WS error 包含 status=503、具体原因和恢复提示 | skipped、upstream_sent=false；不因供应商不可用标记 WS 不支持 |
+| 合法重连/HTTP 降级读取已结束的供应商不可用结果 | 返回原状态、消息、trace 及递减恢复提示；不启动新生成 | 不重新计入失败，不增加上游调用 |
 | WS DNS/TCP/TLS/代理/Upgrade 失败、建连超时                | 全量输入同家 HTTP；增量先上下文恢复                  | WS 传输冷却，不直接熔断整个 provider                                                                            |
 | 握手 400/404/405/426/501，且响应证明为协议/Upgrade 不支持 | 同家 HTTP，记录能力负向证据                          | 临时 WS 不可用；400/404 仅识别 `websocket_not_supported` / `unsupported_websocket_protocol`，其他响应保留原分类 |
 | 握手或生成明确 401/403                                    | 走现有供应商认证处理；OAuth 401 保留既有刷新一次规则 | 认证/供应商失败，不写“WS 不支持”                                                                                |
@@ -457,6 +465,10 @@ Codex `rust-v0.156.0`：`map_wrapped_websocket_error_event` 把 `previous_respon
 | 已收到合法成功终态后的普通 socket 关闭                    | 保持一次成功                                         | 关闭不应反向改写已完成结果                                                                                      |
 
 错误映射必须覆盖 WS 顶层 error、response.failed 内嵌错误与 HTTP 非成功正文；未知协议错误保守失败，不能杜撰可恢复状态。原 HTTP 错误分类作为兼容基线，但 WS 新增上下文/传输错误不能硬塞进旧的普通 4xx 分支。[E09]
+
+标准网关失败由 `proxy/errors.rs` 的 `GatewayFailure` 统一生成，经现有 error hook 后同步最终值；`gateway/client_error.rs` 仅按入站路径/传输适配 OpenAI HTTP、Responses WS、Anthropic HTTP 和 Gemini HTTP。HTTP 在 proxy facade 编码，WS 在发送帧时编码；上游原生错误和插件自定义正文保留原契约，包含额外字段的插件正文不作为标准 DTO 重编码或缓存。Gemini error.code 使用数值 HTTP 状态，WS 同时提供顶层 status 及 Retry-After 提示，不根据 CLI 名称或上游 provider 类型推测格式。
+
+本地拒绝保留实际 400，以通用 `GW_REQUEST_REJECTED` 记录并通过已有 error_details_json 保存具体 reason/reason_code；`previous_response_not_found` 的协议码保持不变。未知断流使用 502，不能用默认 400 伪装输入错误。503 允许外部客户端有限重试，熔断期间实际上游发送为零；供应商不可用不等于 WS 传输不可用，不强制制造 HTTP 降级。
 
 ### 8.2 状态机
 
@@ -513,6 +525,8 @@ stateDiagram-v2
 | B 不支持 WS            | 保留 B 候选 → B HTTP/SSE → 下游 WS；不继续跳找另一个 WS provider                                |
 | 全部尝试失败           | 原错误汇总逻辑 → 下游结构化终态；HTTP 原来 502/503 与 Retry-After 语义保持，WS 错误表达等价原因 |
 | 所有候选被 gate 跳过   | `upstream_sent=false`、skipped；展示“无可用供应商”，不把最后一家展示成真正调用失败              |
+| 预热遇到纯供应商不可用 | 不写正式日志或共享不可用缓存，不设置 HTTP 偏好；首个正式失败独立记录 503，后续合法重试引用它 |
+| 强制 A 失败后普通 A/B 请求 | 不可用缓存按最终候选集合隔离，健康 B 仍可调用；受原 Budget 限制的恢复失败不污染新请求缓存 |
 | 已输出后断流           | 当前 provider 输出 → committed → 断流 → 当前生成失败；不得出现 B 的正文                         |
 | 增量需要切家           | A continuation 失效 → 上下文恢复信号 → Codex 全量重发 → 匹配恢复预算 → B；旧流不拼接新流        |
 | 强制 A                 | 只允许 A 合法传输/原重试；A 不可用时失败，不能为 WS 成功突破强制选择                            |
@@ -559,7 +573,7 @@ sequenceDiagram
 | 首内容前缓冲               | 冻结为 1 MiB、256 个完整事件；超限在未提交时明确失败，不无限等待                                                                                                       |
 | 上游单事件及未消费发送队列 | 单事件/解析缓冲 4 MiB，应用待发送队列总计 4 MiB/256 个事件；双向 codec 写缓冲 8 MiB；直接背压，不建立额外流 relay channel                                              |
 | 进程 WS 附加缓冲           | 256 MiB 共享预留池；每条 WS 或受控 HTTP 恢复按 128 MiB 保守预留，RAII 归还；覆盖受控 WS 字节窗口，非逐字节 heap/RSS 计量，不覆盖既有插件执行器和 JSON Value 的通用内存 |
-| 空闲连接与恢复记录         | 连接计数上限 4，当前内存预留最多同时容纳 2 个 WS/恢复上下文，空闲 60 秒；owner/恢复记录上限 128、待恢复 TTL 30 秒；budget 满额拒绝不消费恢复资格                       |
+| 空闲连接与恢复记录         | 连接计数上限 4，当前内存预留最多同时容纳 2 个 WS/恢复上下文，空闲 60 秒；owner 上限 128、空闲 TTL 30 分钟、pending TTL 30 秒；失败结果读取不续期且不领取缓冲区；budget 满额拒绝不消费恢复资格 |
 
 不能把大请求原始文本、解析对象和多份克隆同时保留到生成结束。资源拒绝必须是本地原因，不触发 provider 熔断；若发生在提交后，只结束当前流。实现复审将初始 8 MiB 收紧为 4 MiB，给 codec capacity 和跨层串行字节副本留出余量；这里只承诺受控缓冲/准入边界，不承诺整个进程 RSS。新 WS 准入资源不足在 101 前返回 426，让目标客户端使用原 HTTP 通道；受控恢复资源不足明确拒绝且保留未认领资格。
 
@@ -603,12 +617,14 @@ sequenceDiagram
 | `failure_class` / `reason_code`          | 新分类为 `transport` / `provider` / `client_input` / `context` / `local` / `cancelled`；无失败为 null。reason_code 复用已有常量，新原因按现有校验机制注册；UI 不解析自由文本猜动作 |
 | `output_committed`                       | 错误发生时是否已提交                                                                                                                                                               |
 | `ws_cooldown_until`                      | 可选运行时截止；不等同 provider 熔断恢复时间                                                                                                                                       |
-| `recovery_id` / `recovery_from_trace_id` | 关联不同请求，不复用 trace ID，不合并覆盖旧请求日志                                                                                                                                |
+| `recovery_id` / `recovery_from_trace_id` | 有效上下文恢复关联不同请求并使用新 trace；已结束失败结果的读取引用原 trace，不追加或覆盖正式日志                                                                                   |
 | 现有 provider/index/retry/upstream_sent  | 保留；实际上游发送和仅 gate skip 明确区分                                                                                                                                          |
 
 这些是待新增语义字段，不要求为每个字段单独加 DB 列；优先利用现有 JSON 扩展存储。必须确保实时视图与从历史日志重新打开的视图一致。每个物理 attempt 都能解释实际调用、超时预算及下一步；不得伪造 HTTP 状态充当 WS 握手结果。
 
 不记录 API key、Bearer、refresh token、完整 prompt、工具参数/结果或敏感 response ID 原文。错误正文和 endpoint 查询参数先走现有脱敏，诊断数据只保留必要标识。
+
+body 解析后、恢复校验及供应商早退前统一确定 observe；预热不观察且健康中立，不在后续中间件重复覆盖。首个正式失败走既有 RequestEnd 通道；无效 HTTP 恢复即使没有 request_start 也记录独立的 400 终态。共享不可用缓存仅接受已观察、非受控恢复、hook 后仍为标准且恢复信息一致的失败，键包含最终候选 ID 集合。缓存命中和合法失败结果读取不产生新的活动请求或正式日志。
 
 ### 11.2 UI 行为
 
@@ -620,6 +636,7 @@ sequenceDiagram
 - 恢复阶段显示“正在恢复请求上下文”，说明将由 Codex 自动重发；新请求通过 recovery 关联旧请求，不伪装成旧流持续成功。
 - 成功降级只在链路/详情中提示，不对每次 fallback 弹系统通知。最终失败、设置应用失败才显示需要处理的错误。
 - 失败文案至少回答“哪个供应商、哪种传输、什么原因、是否尝试过降级/切换”。全部 gate 跳过时显示“暂无可用供应商”。
+- 熔断分组仅在各供应商触发原因一致且都已记录时显示共同原因；逐供应商详情保留真实触发码。“本组最后预计恢复”标注组内最晚恢复时间，不能暗示所有供应商都要等到该时间才能探测。
 - 已输出后中断显示“响应中断”，保留已输出内容，不提示“已无缝切换”。
 - 保存中、无变化、部分同步失败、重试、无 WS provider 等状态明确。无 WS provider 不阻止使用 HTTP，也不伪称上游 WS 已启用。界面不要求用户匹配指定 CLI 版本；协议或恢复条件不满足时说明具体原因。
 - 键盘可操作、label 对应控件、屏幕阅读器可读；深浅色和窄窗口下不挤掉关键错误信息。

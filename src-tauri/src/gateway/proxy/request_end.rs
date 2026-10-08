@@ -160,6 +160,7 @@ pub(super) struct RequestEndArgs<'a, R: tauri::Runtime = tauri::Wry> {
     usage_metrics: Option<crate::usage::UsageMetrics>,
     log_usage_metrics: Option<crate::usage::UsageMetrics>,
     usage: Option<crate::usage::UsageExtract>,
+    error_details_json: Option<String>,
 }
 
 impl<'a, R: tauri::Runtime> RequestEndArgs<'a, R> {
@@ -188,7 +189,20 @@ impl<'a, R: tauri::Runtime> RequestEndArgs<'a, R> {
             usage_metrics: None,
             log_usage_metrics: None,
             usage: None,
+            error_details_json: None,
         }
+    }
+
+    pub(super) fn with_request_rejection(mut self, reason_code: &str, reason: &str) -> Self {
+        self.error_details_json = serde_json::to_string(&serde_json::json!({
+            "gateway_error_code":self.error_code,
+            "error_code":self.error_code,
+            "error_category":self.error_category,
+            "reason_code":truncate_text_ref(reason_code, REQUEST_END_LOG_SHORT_TEXT_MAX_CHARS),
+            "reason":truncate_text_ref(reason, REQUEST_END_LOG_REASON_MAX_CHARS),
+        }))
+        .ok();
+        self
     }
 
     pub(super) fn with_completion(mut self, completion: RequestCompletion) -> Self {
@@ -743,7 +757,7 @@ impl RequestLogEnqueueArgs {
 fn prepare_request_end<R: tauri::Runtime>(
     args: RequestEndArgs<'_, R>,
 ) -> PreparedRequestEnd<'_, R> {
-    let (log_args, attempts) = RequestLogEnqueueArgs::from_proxy_request_end_parts(
+    let (mut log_args, attempts) = RequestLogEnqueueArgs::from_proxy_request_end_parts(
         args.trace_id,
         args.cli_key,
         args.session_id,
@@ -763,6 +777,10 @@ fn prepare_request_end<R: tauri::Runtime>(
         args.log_usage_metrics,
         args.usage,
     );
+
+    if let Some(details) = args.error_details_json {
+        log_args.error_details_json = Some(details);
+    }
 
     PreparedRequestEnd {
         deps: args.deps,

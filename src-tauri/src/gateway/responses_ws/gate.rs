@@ -307,8 +307,21 @@ pub(in crate::gateway) fn error_status(event: &Value) -> reqwest::StatusCode {
 
 pub(in crate::gateway) fn error_response(event: Value) -> UpstreamResponse {
     let status = error_status(&event);
-    let body = event.get("response").cloned().unwrap_or(event);
     let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(retry_after) = event
+        .get("headers")
+        .and_then(Value::as_object)
+        .and_then(|headers| {
+            headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+                .and_then(|(_, value)| value.as_str())
+        })
+        .and_then(|value| reqwest::header::HeaderValue::from_str(value).ok())
+    {
+        headers.insert(reqwest::header::RETRY_AFTER, retry_after);
+    }
+    let body = event.get("response").cloned().unwrap_or(event);
     headers.insert(
         reqwest::header::CONTENT_TYPE,
         reqwest::header::HeaderValue::from_static("application/json"),
@@ -330,6 +343,21 @@ mod tests {
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
+    #[test]
+    fn error_frame_preserves_retry_after() {
+        let response = error_response(
+            json!({"type":"error", "status":429, "headers":{"Retry-After":"120"}, "error":{"code":"rate_limit_exceeded", "message":"try later"}}),
+        );
+        assert_eq!(response.status().as_u16(), 429);
+        assert_eq!(
+            response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .unwrap(),
+            "120"
+        );
+    }
+
     fn request() -> RequestState {
         let runtime = Arc::new(Runtime::new(true));
         let owner = Owner::parse(&json!({"session_id":"s","thread_id":"t","window_id":"w","context_window_id":"c","turn_id":"g"}).to_string()).unwrap();
@@ -340,6 +368,7 @@ mod tests {
             generation: Arc::new(Mutex::new(Generation {
                 identity: Some(RecoveryIdentity { owner, nonce }),
                 expected: HistoryDigest::default(),
+                input: HistoryDigest::default(),
                 properties: HistoryDigest::default(),
                 previous: None,
                 committed: false,

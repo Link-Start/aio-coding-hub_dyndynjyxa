@@ -1820,70 +1820,31 @@ mod tests {
         let payload: Value = serde_json::from_slice(&body).expect("JSON error response");
         assert_eq!(
             payload.get("error_code").and_then(Value::as_str),
-            Some(crate::gateway::proxy::GatewayErrorCode::NoEnabledProvider.as_str())
+            Some(crate::gateway::proxy::GatewayErrorCode::AllProvidersUnavailable.as_str())
         );
 
         let log = recv_terminal_request_log(&mut log_rx).await;
         assert_eq!(log.status, Some(503));
         assert_eq!(
             log.error_code.as_deref(),
-            Some(crate::gateway::proxy::GatewayErrorCode::NoEnabledProvider.as_str())
+            Some(crate::gateway::proxy::GatewayErrorCode::AllProvidersUnavailable.as_str())
         );
-        let special_settings: Value = serde_json::from_str(
-            log.special_settings_json
-                .as_deref()
-                .expect("special settings JSON"),
-        )
-        .expect("valid special settings JSON");
-        let settings = special_settings.as_array().expect("special settings array");
-        let circuit_denied = settings
-            .iter()
-            .find(|item| {
-                item.get("type").and_then(Value::as_str)
-                    == Some("session_bound_provider_circuit_denied")
-            })
-            .expect("session-bound circuit diagnostic");
+        assert!(payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("circuit breakers"));
+        assert_eq!(payload["error"]["code"], "GW_ALL_PROVIDERS_UNAVAILABLE");
+        let attempts: Value = serde_json::from_str(&log.attempts_json).unwrap();
+        assert_eq!(attempts.as_array().unwrap().len(), 1);
+        assert_eq!(attempts[0]["provider_id"], provider_id);
+        assert_eq!(attempts[0]["outcome"], "skipped");
+        assert_eq!(attempts[0]["upstream_sent"], false);
+        assert_eq!(attempts[0]["circuit_state_before"], "OPEN");
         assert_eq!(
-            circuit_denied
-                .pointer("/denied/providerId")
-                .and_then(Value::as_i64),
-            Some(provider_id)
+            attempts[0]["circuit_trigger_error_code"],
+            "GW_UPSTREAM_TIMEOUT"
         );
-        assert_eq!(
-            circuit_denied
-                .pointer("/denied/state")
-                .and_then(Value::as_str),
-            Some("OPEN")
-        );
-        assert_eq!(
-            circuit_denied
-                .pointer("/denied/lastTriggerErrorCode")
-                .and_then(Value::as_str),
-            Some(crate::gateway::proxy::GatewayErrorCode::UpstreamTimeout.as_str())
-        );
-
-        let selection = settings
-            .iter()
-            .find(|item| {
-                item.get("type").and_then(Value::as_str) == Some("provider_selection_diagnostic")
-            })
-            .expect("provider selection diagnostic");
-        assert_eq!(
-            selection.get("clearedReason").and_then(Value::as_str),
-            Some("session_bound_provider_circuit_open")
-        );
-        assert_eq!(
-            selection
-                .get("sessionBoundCircuitDenied")
-                .and_then(Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            selection
-                .get("deniedBoundProviderId")
-                .and_then(Value::as_i64),
-            Some(provider_id)
-        );
+        assert!(payload["retry_after_seconds"].as_u64().unwrap() > 0);
     }
 
     fn gateway_state_with_plugin_pipeline(

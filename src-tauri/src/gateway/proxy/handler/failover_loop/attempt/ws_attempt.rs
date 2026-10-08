@@ -192,15 +192,20 @@ pub(super) async fn finish_error<R: tauri::Runtime>(
             } else {
                 "local"
             }),
-            GatewayErrorCode::StreamError.as_str(),
+            GatewayErrorCode::RequestRejected.as_str(),
             input.started.elapsed().as_millis(),
-        )),
+        ))
+        .with_request_rejection(code, message),
     )
     .await;
     loop_state.abort_guard.disarm();
     let mut event = protocol::error_event(code, message);
     event["trace_id"] = serde_json::Value::String(input.trace_id.clone());
-    LoopControl::Return((StatusCode::BAD_REQUEST, axum::Json(event)).into_response())
+    let mut response = (StatusCode::BAD_REQUEST, axum::Json(event)).into_response();
+    if let Ok(trace_id) = axum::http::HeaderValue::from_str(&input.trace_id) {
+        response.headers_mut().insert("x-trace-id", trace_id);
+    }
+    LoopControl::Return(response)
 }
 
 fn record_attempt<R: tauri::Runtime>(

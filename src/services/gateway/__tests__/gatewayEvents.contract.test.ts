@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import attemptFixture from "../__fixtures__/gatewayEvents/attempt.json";
 import circuitFixture from "../__fixtures__/gatewayEvents/circuit.json";
 import logFixture from "../__fixtures__/gatewayEvents/log.json";
+import unavailableFixture from "../__fixtures__/gatewayEvents/request_unavailable.json";
 import requestFixture from "../__fixtures__/gatewayEvents/request.json";
 import requestSignalFixture from "../__fixtures__/gatewayEvents/request_signal.json";
 import requestStartFixture from "../__fixtures__/gatewayEvents/request_start.json";
@@ -41,6 +42,13 @@ describe("gateway event payload contract (shared fixtures)", () => {
     // type, so dropping the copy would not fail typecheck).
     expect(normalized?.effective_input_tokens).toBe(1200);
     expect(normalized?.reasoning_effort).toBe("high");
+  });
+
+  it("accepts unavailable terminal failures with skipped suppliers and their own circuit causes", () => {
+    const event = normalizeGatewayRequestEvent(unavailableFixture);
+    expect(event).toMatchObject({ status: 503, error_code: "GW_ALL_PROVIDERS_UNAVAILABLE" });
+    expect(event?.attempts).toHaveLength(2);
+    expect(event?.attempts.every((attempt) => attempt.outcome === "skipped")).toBe(true);
   });
 
   it("accepts null forms of the optional gateway:request fields", () => {

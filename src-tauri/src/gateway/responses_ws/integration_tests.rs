@@ -100,9 +100,26 @@ impl Fixture {
         provider_id: Option<i64>,
         tenant: Option<&str>,
     ) -> i64 {
-        let priority = providers::default_route_list(&self.db, "codex")
-            .unwrap()
-            .len() as i64;
+        self.provider_for_cli_with_headers(
+            "codex",
+            name,
+            base_url,
+            supports_ws,
+            provider_id,
+            tenant,
+        )
+    }
+
+    fn provider_for_cli_with_headers(
+        &self,
+        cli: &str,
+        name: &str,
+        base_url: &str,
+        supports_ws: bool,
+        provider_id: Option<i64>,
+        tenant: Option<&str>,
+    ) -> i64 {
+        let priority = providers::default_route_list(&self.db, cli).unwrap().len() as i64;
         let row = providers::upsert(
             &self.db,
             providers::ProviderUpsertParams {
@@ -116,7 +133,7 @@ impl Fixture {
                         .collect(),
                 ),
                 provider_id,
-                cli_key: "codex".into(),
+                cli_key: cli.into(),
                 name: name.into(),
                 base_urls: vec![base_url.into()],
                 base_url_mode: providers::ProviderBaseUrlMode::Order,
@@ -146,7 +163,7 @@ impl Fixture {
             },
         )
         .unwrap();
-        let mut ids: Vec<_> = providers::default_route_list(&self.db, "codex")
+        let mut ids: Vec<_> = providers::default_route_list(&self.db, cli)
             .unwrap()
             .into_iter()
             .map(|row| row.provider_id)
@@ -154,7 +171,7 @@ impl Fixture {
         if !ids.contains(&row.id) {
             ids.push(row.id);
         }
-        providers::default_route_set_order(&self.db, "codex", ids).unwrap();
+        providers::default_route_set_order(&self.db, cli, ids).unwrap();
         row.id
     }
 
@@ -176,6 +193,17 @@ impl Fixture {
         tokio::sync::mpsc::Receiver<request_logs::RequestLogInsert>,
     ) {
         let (log_tx, log_rx) = tokio::sync::mpsc::channel(32);
+        (
+            Server::start(self.router(log_tx, plugin_pipeline)).await,
+            log_rx,
+        )
+    }
+
+    fn router(
+        &self,
+        log_tx: tokio::sync::mpsc::Sender<request_logs::RequestLogInsert>,
+        plugin_pipeline: Arc<GatewayPluginPipeline>,
+    ) -> Router {
         let state = GatewayAppState {
             app: self.app.handle().clone(),
             db: self.db.clone(),
@@ -189,7 +217,7 @@ impl Fixture {
             active_requests: self.active.clone(),
             responses_ws: self.runtime.clone(),
         };
-        (Server::start(build_router(state)).await, log_rx)
+        build_router(state)
     }
 }
 
@@ -1083,6 +1111,13 @@ fn isolated_cli_command(path: &std::path::Path, root: &std::path::Path) -> tokio
 }
 
 async fn run_cli(command: &mut tokio::process::Command) -> std::process::Output {
+    run_cli_with_timeout(command, Duration::from_secs(40)).await
+}
+
+async fn run_cli_with_timeout(
+    command: &mut tokio::process::Command,
+    timeout: Duration,
+) -> std::process::Output {
     use tokio::io::AsyncReadExt;
     command
         .stdin(std::process::Stdio::null())
@@ -1110,7 +1145,7 @@ async fn run_cli(command: &mut tokio::process::Command) -> std::process::Output 
             .unwrap();
         bytes
     });
-    let result = tokio::time::timeout(Duration::from_secs(40), child.wait()).await;
+    let result = tokio::time::timeout(timeout, child.wait()).await;
     if result.is_err() {
         #[cfg(unix)]
         crate::shared::process::terminate_unix_process_group(pid);
@@ -1120,7 +1155,7 @@ async fn run_cli(command: &mut tokio::process::Command) -> std::process::Output 
     }
     let output = std::process::Output {
         status: result
-            .expect("Codex CLI completed within 40 seconds")
+            .expect("selected CLI completed within the test deadline")
             .expect("wait Codex CLI"),
         stdout: stdout_task.await.unwrap(),
         stderr: stderr_task.await.unwrap(),
@@ -1791,4 +1826,602 @@ async fn custom_headers_local_cx2cc_gateway_uses_final_codex_provider() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "http");
     assert_eq!(calls[0].1["x-tenant"], "final-tenant");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unavailable_cache_is_scoped_to_final_candidates() {
+    let fixture = Fixture::new(true).await;
+    let (first, first_server) = Stub::start("A", Behavior::Complete).await;
+    let (next, next_server) = Stub::start("B", Behavior::Complete).await;
+    let a = fixture.provider("A", &first_server.origin(), false);
+    fixture.provider("B", &next_server.origin(), false);
+    fixture
+        .circuit
+        .record_failure(a, crate::gateway::util::now_unix_seconds() as i64, None);
+    let (gateway, _logs) = fixture.start().await;
+    let client = reqwest::Client::new();
+    let body =
+        json!({"model":"gpt-test", "stream":true, "input":[{"role":"user","content":"hello"}]});
+    let forced = client
+        .post(format!("{}/v1/responses", gateway.origin()))
+        .header("session-id", "review-cache")
+        .header("x-aio-provider-id", a.to_string())
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forced.status().as_u16(), 503);
+    let forced_body: Value = forced.json().await.unwrap();
+    let ordinary = client
+        .post(format!("{}/v1/responses", gateway.origin()))
+        .header("session-id", "review-cache")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ordinary.status().as_u16(), 200);
+    assert!(ordinary.text().await.unwrap().contains("answer-B"));
+    assert!(first.transports().is_empty());
+    assert_eq!(next.transports(), ["http"]);
+    assert_eq!(forced_body["error_code"], "GW_ALL_PROVIDERS_UNAVAILABLE");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovered_budget_does_not_cache_global_unavailability() {
+    use super::protocol::{HistoryDigest, Owner};
+    use super::state::{Budget, Generation, RecoveryIdentity, RequestState};
+    for all_budget_failed in [false, true] {
+        let fixture = Fixture::new(true).await;
+        let (first, first_server) = Stub::start("A", Behavior::Complete).await;
+        let (next, next_server) = Stub::start("B", Behavior::Complete).await;
+        let a = fixture.provider("A", &first_server.origin(), false);
+        let b = fixture.provider("B", &next_server.origin(), false);
+        if !all_budget_failed {
+            fixture.circuit.record_failure(
+                b,
+                crate::gateway::util::now_unix_seconds() as i64,
+                None,
+            );
+        }
+        let metadata = json!({"session_id":"review-recovery", "thread_id":"thread", "window_id":"window", "context_window_id":"context", "turn_id":"turn"}).to_string();
+        let owner = Owner::parse(&metadata).unwrap();
+        let nonce = fixture.runtime.issue_nonce(&owner).unwrap();
+        let body = json!({"model":"gpt-test", "stream":true, "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]});
+        let mut budget = Budget {
+            providers: vec![a, b],
+            failed_providers: std::collections::HashSet::from([a]),
+            ..Budget::default()
+        };
+        if all_budget_failed {
+            budget.failed_providers.insert(b);
+        }
+        let original = RequestState {
+            connection: fixture.runtime.connection().unwrap(),
+            client_ws: true,
+            generation: Arc::new(Mutex::new(Generation {
+                identity: Some(RecoveryIdentity {
+                    owner,
+                    nonce: nonce.clone(),
+                }),
+                expected: HistoryDigest::from_items(body["input"].as_array().unwrap()),
+                input: HistoryDigest::from_items(body["input"].as_array().unwrap()),
+                properties: super::state::request_properties(&body, None),
+                previous: None,
+                committed: false,
+                terminal: false,
+                incomplete: false,
+                failed: false,
+                recovered: false,
+                from_trace: None,
+                trace_id: "review-original-upstream-failure".into(),
+                budget,
+                upstream_ws: false,
+            })),
+        };
+        fixture.runtime.begin_generation(&original).unwrap();
+        fixture.runtime.suspend(&original).unwrap();
+        let (gateway, _logs) = fixture.start().await;
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{}/v1/responses", gateway.origin()))
+            .header(protocol::TURN_STATE_HEADER, nonce)
+            .header("x-codex-turn-metadata", metadata)
+            .header("session-id", "review-recovery")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let recovery_status = response.status().as_u16();
+        let recovery_body: Value = response.json().await.unwrap();
+        let ordinary = client
+            .post(format!("{}/v1/responses", gateway.origin()))
+            .header("session-id", "new-request")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let ordinary_status = ordinary.status().as_u16();
+        let ordinary_text = ordinary.text().await.unwrap();
+        assert_eq!(recovery_status, if all_budget_failed { 502 } else { 503 });
+        assert_eq!(
+            recovery_body["error_code"],
+            if all_budget_failed {
+                "GW_UPSTREAM_ALL_FAILED"
+            } else {
+                "GW_ALL_PROVIDERS_UNAVAILABLE"
+            }
+        );
+        assert_eq!(ordinary_status, 200);
+        assert!(ordinary_text.contains("answer-A"));
+        assert_eq!(first.transports(), ["http"]);
+        assert!(next.transports().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn circuit_failure_uses_inbound_protocol_for_every_cli_and_auxiliary_route() {
+    let fixture = Fixture::new(true).await;
+    let (stub, upstream) = Stub::start("A", Behavior::Complete).await;
+    let (gateway, _logs) = fixture.start().await;
+    let client = reqwest::Client::new();
+    for (cli, paths, protocol) in [
+        (
+            "codex",
+            vec!["/v1/responses", "/responses", "/v1/chat/completions"],
+            "openai",
+        ),
+        ("grok", vec!["/v1/responses", "/chat/completions"], "openai"),
+        (
+            "claude",
+            vec!["/v1/messages", "/v1/messages/count_tokens"],
+            "anthropic",
+        ),
+        (
+            "gemini",
+            vec![
+                "/v1beta/models/gemini-test:generateContent",
+                "/v1beta/models/gemini-test:streamGenerateContent",
+                "/v1beta/models/gemini-test:countTokens",
+            ],
+            "gemini",
+        ),
+    ] {
+        let provider = fixture.provider_for_cli_with_headers(
+            cli,
+            cli,
+            &upstream.origin(),
+            cli == "codex",
+            None,
+            None,
+        );
+        fixture.circuit.record_failure(
+            provider,
+            crate::gateway::util::now_unix_seconds() as i64,
+            Some("GW_UPSTREAM_TIMEOUT"),
+        );
+        for path in paths {
+            for stream in [false, true] {
+                let url = format!("{}/{cli}/_aio/provider/{provider}{path}", gateway.origin());
+                let body = json!({"model":"test", "stream":stream, "input":[], "messages":[{"role":"user","content":"hello"}], "contents":[{"parts":[{"text":"hello"}]}]});
+                let response = client.post(&url).json(&body).send().await.unwrap();
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{url}");
+                assert!(response.headers()[header::CONTENT_TYPE]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("application/json"));
+                let trace = response.headers()["x-trace-id"]
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                assert!(response.headers().contains_key(header::RETRY_AFTER));
+                let error: Value = response.json().await.unwrap();
+                assert_eq!(error["trace_id"], trace);
+                assert_eq!(error["error_code"], "GW_ALL_PROVIDERS_UNAVAILABLE");
+                assert_eq!(error["error"]["message"], error["message"]);
+                assert!(error["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("circuit breakers"));
+                match protocol {
+                    "openai" => {
+                        assert_eq!(error["error"]["code"], "GW_ALL_PROVIDERS_UNAVAILABLE");
+                        assert_eq!(error["error"]["type"], "server_error");
+                    }
+                    "anthropic" => {
+                        assert_eq!(error["type"], "error");
+                        assert_eq!(error["error"]["type"], "api_error");
+                    }
+                    _ => {
+                        assert_eq!(error["error"]["code"], 503);
+                        assert_eq!(error["error"]["status"], "UNAVAILABLE");
+                    }
+                }
+            }
+        }
+    }
+    assert!(stub.transports().is_empty());
+    assert!(fixture.active.snapshot().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prewarm_unavailability_does_not_hide_formal_log_or_override_ws_http_retries() {
+    for enabled_provider in [false, true] {
+        let fixture = Fixture::new(true).await;
+        let (stub, upstream) = Stub::start("A", Behavior::Complete).await;
+        if enabled_provider {
+            let a = fixture.provider("A", &upstream.origin(), true);
+            fixture.circuit.record_failure(
+                a,
+                crate::gateway::util::now_unix_seconds() as i64,
+                None,
+            );
+        }
+        let (gateway, mut logs) = fixture.start().await;
+        let mut body = json!({"type":"response.create","model":"gpt-test","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],"generate":false});
+        let mut warm = connect(&gateway, "unavailable").await.unwrap();
+        warm.send(Message::Text(body.to_string())).await.unwrap();
+        let error = recv_until(&mut warm, "error").await;
+        assert_eq!(error["status"], 503);
+        assert!(logs.try_recv().is_err());
+        assert!(!fixture.runtime.prefers_http("unavailable"));
+        drop(warm);
+
+        body.as_object_mut().unwrap().remove("generate");
+        let metadata = json!({"session_id":"unavailable","thread_id":"thread","window_id":"window","context_window_id":"context","turn_id":"turn"}).to_string();
+        body["client_metadata"] = json!({"x-codex-turn-metadata":metadata});
+        let mut socket = connect(&gateway, "unavailable").await.unwrap();
+        socket.send(Message::Text(body.to_string())).await.unwrap();
+        let nonce = recv_until(&mut socket, "response.metadata").await["headers"]
+            [protocol::TURN_STATE_HEADER]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let original = recv_until(&mut socket, "error").await;
+        assert_eq!(original["status"], 503);
+        let code = if enabled_provider {
+            "GW_ALL_PROVIDERS_UNAVAILABLE"
+        } else {
+            "GW_NO_ENABLED_PROVIDER"
+        };
+        assert_eq!(original["error"]["code"], code);
+        let log = terminal_log(&mut logs).await;
+        assert_eq!(log.status, Some(503));
+        assert_eq!(log.trace_id, original["trace_id"].as_str().unwrap());
+        drop(socket);
+
+        body["client_metadata"][protocol::TURN_STATE_HEADER] = json!(nonce);
+        let mut socket = connect(&gateway, "unavailable").await.unwrap();
+        socket.send(Message::Text(body.to_string())).await.unwrap();
+        let replay = recv_until(&mut socket, "error").await;
+        assert_eq!(replay["error"], original["error"]);
+        assert_eq!(replay["trace_id"], original["trace_id"]);
+        if enabled_provider {
+            assert_eq!(
+                replay["headers"]["retry-after"],
+                replay["retry_after_seconds"].as_u64().unwrap().to_string()
+            );
+        }
+        drop(socket);
+
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.origin()))
+            .header("session-id", "unavailable")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let replay: Value = response.json().await.unwrap();
+        assert_eq!(replay["error"], original["error"]);
+        assert_eq!(replay["trace_id"], original["trace_id"]);
+        assert!(logs.try_recv().is_err());
+        assert!(stub.transports().is_empty());
+        assert!(fixture.active.snapshot().is_empty());
+
+        body["input"][0]["content"][0]["text"] = json!("different request");
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.origin()))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let rejected: Value = response.json().await.unwrap();
+        assert_eq!(rejected["status"], 400);
+        let log = terminal_log(&mut logs).await;
+        assert_eq!(log.status, Some(400));
+        assert_eq!(log.error_code.as_deref(), Some("GW_REQUEST_REJECTED"));
+        assert_ne!(log.trace_id, original["trace_id"]);
+        let details: Value =
+            serde_json::from_str(log.error_details_json.as_ref().unwrap()).unwrap();
+        assert_eq!(details["reason_code"], "invalid_request");
+        assert!(details["reason"].as_str().unwrap().contains("mismatch"));
+        assert!(logs.try_recv().is_err());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unavailable_tool_delta_on_a_new_socket_returns_the_original_failure() {
+    let fixture = Fixture::new(true).await;
+    let upstream = CliRecoveryStub::default();
+    let server = Server::start(
+        Router::new()
+            .route("/v1/responses", get(cli_recovery_ws))
+            .with_state(upstream.clone()),
+    )
+    .await;
+    let a = fixture.provider("A", &server.origin(), true);
+    let (gateway, mut logs) = fixture.start().await;
+    let Message::Text(create) = create_message(Some("unavailable-tool-delta")) else {
+        unreachable!()
+    };
+    let mut body: Value = serde_json::from_str(&create).unwrap();
+    body["input"][0]["type"] = json!("message");
+    body["tools"] =
+        json!([{"type":"function","name":"shell_command","parameters":{"type":"object"}}]);
+    let mut socket = connect(&gateway, "unavailable-tool-delta").await.unwrap();
+    socket.send(Message::Text(body.to_string())).await.unwrap();
+    let nonce = recv_until(&mut socket, "response.metadata").await["headers"]
+        [protocol::TURN_STATE_HEADER]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    recv_until(&mut socket, "response.completed").await;
+    assert_eq!(terminal_log(&mut logs).await.status, Some(200));
+
+    fixture
+        .circuit
+        .record_failure(a, crate::gateway::util::now_unix_seconds() as i64, None);
+    body["input"] = json!([{"type":"function_call_output","call_id":"router_tool","output":"synthetic result"}]);
+    body["previous_response_id"] = json!("resp-tool");
+    body["client_metadata"][protocol::TURN_STATE_HEADER] = json!(nonce);
+    socket.send(Message::Text(body.to_string())).await.unwrap();
+    let original = recv_until(&mut socket, "error").await;
+    assert_eq!(original["status"], 503);
+    assert_eq!(original["error"]["code"], "GW_ALL_PROVIDERS_UNAVAILABLE");
+    let log = terminal_log(&mut logs).await;
+    assert_eq!(log.status, Some(503));
+    assert_eq!(log.trace_id, original["trace_id"].as_str().unwrap());
+    drop(socket);
+
+    let mut socket = connect(&gateway, "unavailable-tool-delta").await.unwrap();
+    socket.send(Message::Text(body.to_string())).await.unwrap();
+    let replay = recv_until(&mut socket, "error").await;
+    assert_eq!(replay["status"], 503);
+    assert_eq!(replay["error"], original["error"]);
+    assert_eq!(replay["trace_id"], original["trace_id"]);
+    assert!(replay["headers"]["retry-after"].is_string());
+    assert_eq!(upstream.calls.lock().unwrap().len(), 1);
+    assert!(logs.try_recv().is_err());
+    assert!(fixture.active.snapshot().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires an explicitly selected real Codex CLI executable"]
+async fn real_codex_cli_reports_circuit_failure_with_finite_retries() {
+    use std::sync::atomic::AtomicUsize;
+    let cli = std::path::PathBuf::from(
+        std::env::var_os("AIO_CODEX_WS_TEST_CLI").expect("selected Codex executable"),
+    );
+    let mut reports = Vec::new();
+    for (stream, request, retry_after) in [
+        (Some(0), Some(0), None),
+        (Some(1), Some(0), Some(1)),
+        (None, Some(0), Some(1)),
+        (Some(0), None, Some(1)),
+        (Some(1), None, Some(1)),
+        (None, None, Some(1)),
+        (Some(0), Some(1), Some(31)),
+    ] {
+        let fixture = Fixture::new(true).await;
+        let (stub, upstream) = Stub::start("A", Behavior::Complete).await;
+        let a = fixture.provider("A", &upstream.origin(), true);
+        fixture
+            .circuit
+            .record_failure(a, crate::gateway::util::now_unix_seconds() as i64, None);
+        let pipeline = retry_after.map_or_else(GatewayPluginPipeline::empty_shared, |seconds| {
+            plugin_tests::unavailable_pipeline(Arc::new(AtomicUsize::new(0)), Some(seconds), None)
+        });
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let counts = requests.clone();
+        let (log_tx, mut logs) = tokio::sync::mpsc::channel(32);
+        let router = fixture.router(log_tx, pipeline).layer(axum::middleware::from_fn(move |request: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
+            let counts = counts.clone();
+            async move {
+                let method = request.method().to_string();
+                let path = request.uri().path().to_owned();
+                let response = next.run(request).await;
+                counts.lock().unwrap().push(json!({"method":method,"path":path,"status":response.status().as_u16(),"trace_id":response.headers().get("x-trace-id").and_then(|value| value.to_str().ok())}));
+                response
+            }
+        }));
+        let gateway = Server::start(router).await;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("work")).unwrap();
+        std::fs::create_dir(root.path().join("codex")).unwrap();
+        let mut config = cli_test_config(&gateway.origin());
+        config = config.replace(
+            "stream_max_retries = 1\n",
+            &stream.map_or_else(String::new, |count| {
+                format!("stream_max_retries = {count}\n")
+            }),
+        );
+        config = config.replace(
+            "request_max_retries = 0\n",
+            &request.map_or_else(String::new, |count| {
+                format!("request_max_retries = {count}\n")
+            }),
+        );
+        std::fs::write(root.path().join("codex/config.toml"), config).unwrap();
+        let version = run_cli(isolated_cli_command(&cli, root.path()).arg("--version")).await;
+        let started = std::time::Instant::now();
+        let output = run_cli_with_timeout(
+            isolated_cli_command(&cli, root.path())
+                .args([
+                    "exec",
+                    "--skip-git-repo-check",
+                    "--ephemeral",
+                    "--ignore-rules",
+                    "--json",
+                    "--color",
+                    "never",
+                    "--cd",
+                ])
+                .arg(root.path().join("work"))
+                .arg("Reply OK."),
+            Duration::from_secs(180),
+        )
+        .await;
+        let elapsed = started.elapsed().as_secs_f64();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let events: Vec<Value> = stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| matches!(event["type"].as_str(), Some("error" | "turn.failed")))
+            .collect();
+        let final_error = events
+            .iter()
+            .find(|event| event["type"] == "turn.failed")
+            .expect("CLI returns a failed turn")
+            .to_string();
+        assert!(!output.status.success());
+        assert!(
+            final_error.contains("No available providers")
+                && final_error.contains("circuit breakers"),
+            "stream={stream:?}, request={request:?}: {final_error}"
+        );
+        assert!(!stdout.contains("ownership mismatch"));
+        assert!(stub.transports().is_empty());
+        assert!(fixture.active.snapshot().is_empty());
+        let mut rows = Vec::new();
+        while let Ok(row) = logs.try_recv() {
+            rows.push(row);
+        }
+        assert_eq!(
+            rows.len(),
+            1,
+            "one formal failure, with prewarm and result reads excluded"
+        );
+        assert_eq!(rows[0].status, Some(503));
+        if retry_after == Some(31) {
+            assert!(elapsed >= 30.0, "must cross the pending recovery TTL");
+        }
+        let requests = requests.lock().unwrap();
+        let report = json!({"client":String::from_utf8_lossy(&version.stdout).trim(),"stream_max_retries":stream,"request_max_retries":request,"controlled_retry_after":retry_after,"elapsed_seconds":elapsed,"ws_handshakes":requests.iter().filter(|request| request["status"] == 101).count(),"http_posts":requests.iter().filter(|request| request["method"] == "POST").count(),"upstream_calls":0,"request_log_rows":rows.len(),"requests":*requests,"events":events,"exit":output.status.code()});
+        println!("Codex circuit failure: stream={stream:?}, request={request:?}, wait={retry_after:?}, elapsed={elapsed:.2}s, WS={}, HTTP={}, upstream=0, logs=1", report["ws_handshakes"], report["http_posts"]);
+        reports.push(report);
+        std::fs::write(
+            "/tmp/aio-codex-unavailable-validation.json",
+            serde_json::to_string_pretty(&reports).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires an explicitly selected real Claude CLI executable"]
+async fn real_claude_cli_reports_circuit_failure_and_new_request_recovers() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let cli = std::path::PathBuf::from(
+        std::env::var_os("AIO_CLAUDE_TEST_CLI").expect("selected Claude executable"),
+    );
+    let fixture = Fixture::new(true).await;
+    let upstream_calls = Arc::new(AtomicUsize::new(0));
+    let count = upstream_calls.clone();
+    let upstream = Server::start(Router::new().route("/v1/messages", axum::routing::post(move || {
+        let count = count.clone();
+        async move {
+            count.fetch_add(1, Ordering::Relaxed);
+            let events = [
+                json!({"type":"message_start","message":{"id":"msg_local","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}),
+                json!({"type":"content_block_stop","index":0}),
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}),
+                json!({"type":"message_stop"}),
+            ];
+            let body: String = events.iter().map(|event| format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap())).collect();
+            ([(header::CONTENT_TYPE, "text/event-stream")], body)
+        }
+    }))).await;
+    let a =
+        fixture.provider_for_cli_with_headers("claude", "A", &upstream.origin(), false, None, None);
+    fixture
+        .circuit
+        .record_failure(a, crate::gateway::util::now_unix_seconds() as i64, None);
+    let hooks = Arc::new(AtomicUsize::new(0));
+    let (gateway, mut logs) = fixture
+        .start_with_pipeline(plugin_tests::unavailable_pipeline(
+            hooks.clone(),
+            Some(1),
+            None,
+        ))
+        .await;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("work")).unwrap();
+    std::fs::create_dir(root.path().join("claude")).unwrap();
+    let version = run_cli(isolated_cli_command(&cli, root.path()).arg("--version")).await;
+    assert!(version.status.success());
+    let mut command = isolated_cli_command(&cli, root.path());
+    command
+        .env("CLAUDE_CONFIG_DIR", root.path().join("claude"))
+        .env("ANTHROPIC_API_KEY", "local-test-key")
+        .env(
+            "ANTHROPIC_BASE_URL",
+            format!("{}/claude/_aio/provider/{a}", gateway.origin()),
+        )
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        .args([
+            "--bare",
+            "--print",
+            "--no-session-persistence",
+            "--setting-sources",
+            "",
+            "--tools",
+            "",
+            "--model",
+            "claude-sonnet-4-5",
+            "--output-format",
+            "json",
+            "Reply OK.",
+        ]);
+    let started = std::time::Instant::now();
+    let output = run_cli_with_timeout(&mut command, Duration::from_secs(240)).await;
+    let elapsed = started.elapsed().as_secs_f64();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stdout} {stderr}");
+    assert!(
+        stdout.contains("No available providers") && stdout.contains("circuit breakers"),
+        "{stdout} {stderr}"
+    );
+    assert_eq!(upstream_calls.load(Ordering::Relaxed), 0);
+    assert!(fixture.active.snapshot().is_empty());
+    let mut rows = 0;
+    while let Ok(log) = logs.try_recv() {
+        if let Some(status) = log.status {
+            assert_eq!(status, 503);
+            rows += 1;
+        }
+    }
+    assert!(rows > 0);
+    fixture
+        .circuit
+        .reset(a, crate::gateway::util::now_unix_seconds() as i64);
+    let recovered = run_cli_with_timeout(&mut command, Duration::from_secs(40)).await;
+    assert!(
+        recovered.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert!(String::from_utf8_lossy(&recovered.stdout).contains("OK"));
+    assert!(upstream_calls.load(Ordering::Relaxed) > 0);
+    let report = json!({"client":String::from_utf8_lossy(&version.stdout).trim(),"controlled_retry_after":1,"elapsed_seconds":elapsed,"exit":output.status.code(),"error":stdout,"error_hooks":hooks.load(Ordering::Relaxed),"unavailable_upstream_calls":0,"failure_log_rows":rows,"new_request_exit":recovered.status.code(),"new_request_upstream_calls":upstream_calls.load(Ordering::Relaxed)});
+    std::fs::write(
+        "/tmp/aio-claude-unavailable-validation.json",
+        serde_json::to_string_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    println!("Claude circuit failure and recovery: {rows} failure logs, rejected upstream=0, recovered upstream={}", upstream_calls.load(Ordering::Relaxed));
 }

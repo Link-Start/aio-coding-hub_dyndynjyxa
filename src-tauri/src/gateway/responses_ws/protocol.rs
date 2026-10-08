@@ -61,7 +61,7 @@ pub(in crate::gateway) fn event_kind(event: &Value) -> Result<EventKind, &'stati
 }
 
 pub(in crate::gateway) fn error_event(code: &str, message: &str) -> Value {
-    serde_json::json!({"type":"error","error":{"type":"invalid_request_error","code":code,"message":message}})
+    crate::gateway::client_error::ws_error(axum::http::StatusCode::BAD_REQUEST, code, message)
 }
 
 pub(in crate::gateway) fn metadata_event(nonce: &str) -> Value {

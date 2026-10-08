@@ -2,6 +2,7 @@
 
 use super::protocol::{HistoryDigest, Owner, TURN_STATE_HEADER};
 use super::upstream::UpstreamConnection;
+use crate::gateway::proxy::GatewayFailure;
 use crate::shared::mutex_ext::MutexExt;
 use axum::http::HeaderMap;
 use rand::RngCore;
@@ -215,6 +216,7 @@ impl Runtime {
                 http_only: false,
                 completed: None,
                 pending: None,
+                failure: None,
                 expires: Instant::now() + OWNER_IDLE_TTL,
             },
         );
@@ -296,7 +298,12 @@ impl Runtime {
         if completed {
             record.completed = Some(generation.expected.clone());
             record.pending = None;
+            record.failure = None;
             record.http_only |= !request.client_ws || generation.budget.http_only;
+            record.expires = Instant::now() + OWNER_IDLE_TTL;
+        } else if record.failure.is_some() {
+            record.retired = true;
+            record.pending = None;
             record.expires = Instant::now() + OWNER_IDLE_TTL;
         } else if record
             .pending
@@ -307,6 +314,94 @@ impl Runtime {
             record.pending = None;
             record.expires = Instant::now() + RECOVERY_TTL;
         }
+    }
+
+    pub(in crate::gateway) fn remember_failure(
+        &self,
+        request: &RequestState,
+        failure: &GatewayFailure,
+    ) {
+        let Some(failure) = failure.unavailable_summary() else {
+            return;
+        };
+        let generation = request.generation.lock_or_recover();
+        let Some(identity) = &generation.identity else {
+            return;
+        };
+        if generation.committed
+            || !generation.expected.is_recoverable()
+            || !generation.input.is_recoverable()
+            || !generation.properties.is_recoverable()
+        {
+            return;
+        }
+        let mut records = self.owners.lock_or_recover();
+        let Some(record) = records.get_mut(&identity.owner) else {
+            return;
+        };
+        if record.epoch != self.epoch()
+            || record.nonce != identity.nonce
+            || !record
+                .active_generation
+                .as_ref()
+                .is_some_and(|active| active.ptr_eq(&Arc::downgrade(&request.generation)))
+            || record
+                .pending
+                .as_ref()
+                .is_some_and(|pending| !pending.consumed)
+        {
+            return;
+        }
+        record.failure = Some(KnownFailure {
+            retry_at: failure
+                .retry_after_seconds
+                .and_then(|seconds| Instant::now().checked_add(Duration::from_secs(seconds))),
+            failure,
+            input: generation.input.clone(),
+            expected: generation.expected.clone(),
+            properties: generation.properties.clone(),
+            previous: generation.previous.clone(),
+        });
+    }
+
+    /// Read an ended result before validating socket continuation or claiming recovery resources.
+    pub(in crate::gateway) fn known_failure(
+        &self,
+        owner: &Owner,
+        nonce: Option<&str>,
+        input: &[Value],
+        previous: Option<&str>,
+        properties: &HistoryDigest,
+    ) -> Result<Option<GatewayFailure>, &'static str> {
+        let Some(nonce) = nonce else {
+            return Ok(None);
+        };
+        let mut records = self.owners.lock_or_recover();
+        prune_owners(&mut records);
+        let Some(record) = records.get(owner) else {
+            return Ok(None);
+        };
+        let Some(known) = &record.failure else {
+            return Ok(None);
+        };
+        if !self.enabled()
+            || record.epoch != self.epoch()
+            || record.nonce != nonce
+            || record.active_generation.is_some()
+        {
+            return Err("context recovery ownership mismatch");
+        }
+        let input = HistoryDigest::from_items(input);
+        let original = previous == known.previous.as_deref() && input == known.input;
+        let full = previous.is_none() && input == known.expected;
+        if !input.is_recoverable() || *properties != known.properties || !(original || full) {
+            return Err("context recovery history or constraints mismatch");
+        }
+        let mut failure = known.failure.clone();
+        failure.retry_after_seconds = known
+            .retry_at
+            .map(|at| at.saturating_duration_since(Instant::now()).as_secs());
+        Ok(Some(failure))
     }
 
     pub(in crate::gateway) fn suspend(&self, request: &RequestState) -> Result<(), &'static str> {
@@ -432,9 +527,9 @@ impl Runtime {
         headers: &HeaderMap,
         body: &Value,
         forced: Option<i64>,
-    ) -> Result<Option<RequestState>, &'static str> {
+    ) -> Result<PreparedRequest, &'static str> {
         let Some(nonce) = recovery_nonce(headers, body)? else {
-            return Ok(None);
+            return Ok(PreparedRequest::Dispatch(None));
         };
         let body_owner = body
             .pointer("/client_metadata/x-codex-turn-metadata")
@@ -461,17 +556,26 @@ impl Runtime {
         let owner = body_owner
             .or(header_owner)
             .ok_or("missing Codex turn metadata for recovery")?;
+        let input = body
+            .get("input")
+            .and_then(Value::as_array)
+            .ok_or("missing full recovery input")?;
+        let properties = request_properties(body, forced);
+        if let Some(failure) = self.known_failure(
+            &owner,
+            Some(nonce),
+            input,
+            body.get("previous_response_id").and_then(Value::as_str),
+            &properties,
+        )? {
+            return Ok(PreparedRequest::Failure(failure));
+        }
         if body
             .get("previous_response_id")
             .is_some_and(|value| !value.is_null())
         {
             return Err("HTTP context recovery requires full input");
         }
-        let input = body
-            .get("input")
-            .and_then(Value::as_array)
-            .ok_or("missing full recovery input")?;
-        let properties = request_properties(body, forced);
         // Reserve before claiming: local pressure must not consume a recovery grant.
         let buffers = self.reserve_raw_buffers()?;
         let recovered = self.claim_for_transport(&owner, Some(nonce), input, &properties, false)?;
@@ -497,6 +601,7 @@ impl Runtime {
                     nonce: nonce.to_owned(),
                 }),
                 expected: HistoryDigest::from_items(input),
+                input: HistoryDigest::from_items(input),
                 properties,
                 previous: None,
                 committed: false,
@@ -511,7 +616,7 @@ impl Runtime {
             })),
         };
         self.begin_generation(&request)?;
-        Ok(Some(request))
+        Ok(PreparedRequest::Dispatch(Some(request)))
     }
 }
 
@@ -558,6 +663,7 @@ struct OwnerRecord {
     http_only: bool,
     completed: Option<HistoryDigest>,
     pending: Option<Pending>,
+    failure: Option<KnownFailure>,
     expires: Instant,
 }
 
@@ -635,6 +741,7 @@ pub(in crate::gateway) struct RequestState {
 pub(in crate::gateway) struct Generation {
     pub(in crate::gateway) identity: Option<RecoveryIdentity>,
     pub(in crate::gateway) expected: HistoryDigest,
+    pub(in crate::gateway) input: HistoryDigest,
     pub(in crate::gateway) properties: HistoryDigest,
     pub(in crate::gateway) previous: Option<String>,
     pub(in crate::gateway) committed: bool,
@@ -646,6 +753,30 @@ pub(in crate::gateway) struct Generation {
     pub(in crate::gateway) trace_id: String,
     pub(in crate::gateway) budget: Budget,
     pub(in crate::gateway) upstream_ws: bool,
+}
+
+pub(in crate::gateway) enum PreparedRequest {
+    Dispatch(Option<RequestState>),
+    Failure(GatewayFailure),
+}
+
+#[cfg(test)]
+impl PreparedRequest {
+    fn unwrap_dispatch(self) -> Option<RequestState> {
+        match self {
+            Self::Dispatch(request) => request,
+            Self::Failure(_) => panic!("expected generation dispatch"),
+        }
+    }
+}
+
+struct KnownFailure {
+    failure: GatewayFailure,
+    retry_at: Option<Instant>,
+    input: HistoryDigest,
+    expected: HistoryDigest,
+    properties: HistoryDigest,
+    previous: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -771,6 +902,7 @@ mod tests {
                     nonce: nonce.into(),
                 }),
                 expected: HistoryDigest::from_items(items),
+                input: HistoryDigest::from_items(items),
                 properties: HistoryDigest::default(),
                 previous: Some("resp_1".into()),
                 committed: false,
@@ -810,6 +942,143 @@ mod tests {
         assert!(runtime
             .claim(&owner(), Some(&nonce), &items, &HistoryDigest::default())
             .is_err());
+    }
+
+    #[test]
+    fn known_unavailability_matches_delta_or_full_history_and_never_claims_a_budget() {
+        let runtime = Arc::new(Runtime::new(true));
+        let nonce = runtime.issue_nonce(&owner()).unwrap();
+        let items = vec![input("first"), input("tool result")];
+        let original = request(&runtime, &nonce, &items, false);
+        let body = json!({"model":"model-a","input":items});
+        {
+            let mut generation = original.generation.lock_or_recover();
+            generation.input = HistoryDigest::from_items(&items[1..]);
+            generation.properties = request_properties(&body, Some(3));
+            generation.budget.http_only = true;
+        }
+        runtime.begin_generation(&original).unwrap();
+        let failure = GatewayFailure {
+            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            trace_id: "original-failure".into(),
+            error_code: "GW_ALL_PROVIDERS_UNAVAILABLE".into(),
+            message: "No available providers: all candidate providers have open circuit breakers"
+                .into(),
+            attempts: vec![json!({"upstream_sent":false})],
+            retry_after_seconds: Some(60),
+        };
+        runtime.remember_failure(&original, &failure);
+        runtime.finish_generation(&original, false);
+        let properties = request_properties(&body, Some(3));
+        let expires = runtime.owners.lock_or_recover()[&owner()].expires;
+        let read = || {
+            runtime.known_failure(
+                &owner(),
+                Some(&nonce),
+                &items[1..],
+                Some("resp_1"),
+                &properties,
+            )
+        };
+        for _ in 0..2 {
+            let result = read().unwrap().unwrap();
+            assert_eq!(result.trace_id, failure.trace_id);
+            assert!(result.attempts.is_empty());
+            assert!(result.retry_after_seconds.unwrap() <= 60);
+            assert_eq!(runtime.owners.lock_or_recover()[&owner()].expires, expires);
+        }
+        assert!(runtime
+            .known_failure(
+                &owner(),
+                Some(&nonce),
+                &items[1..],
+                Some("changed"),
+                &properties
+            )
+            .is_err());
+        assert!(runtime
+            .known_failure(
+                &owner(),
+                Some(&nonce),
+                &items,
+                None,
+                &request_properties(&body, None)
+            )
+            .is_err());
+        assert!(runtime
+            .known_failure(&owner(), Some("aio-ws-forged"), &items, None, &properties)
+            .is_err());
+        assert!(runtime.begin_generation(&original).is_err());
+        assert!(runtime
+            .claim(&owner(), Some(&nonce), &items, &properties)
+            .is_err());
+
+        // Both buffer reservations are occupied; result reading still works over HTTP.
+        let _other_connection = runtime.connection().unwrap();
+        let headers = HeaderMap::from_iter([
+            (axum::http::HeaderName::from_static(TURN_STATE_HEADER), nonce.parse().unwrap()),
+            (axum::http::HeaderName::from_static("x-codex-turn-metadata"), json!({"session_id":"session","thread_id":"thread","window_id":"window","context_window_id":"context","turn_id":"turn"}).to_string().parse().unwrap()),
+        ]);
+        assert!(matches!(
+            runtime.prepare_http_recovery(&headers, &body, Some(3)),
+            Ok(PreparedRequest::Failure(_))
+        ));
+        {
+            let mut records = runtime.owners.lock_or_recover();
+            let known = records.get_mut(&owner()).unwrap().failure.as_mut().unwrap();
+            known.retry_at = Some(Instant::now().checked_sub(Duration::from_secs(31)).unwrap());
+        }
+        assert_eq!(read().unwrap().unwrap().retry_after_seconds, Some(0));
+        runtime
+            .owners
+            .lock_or_recover()
+            .get_mut(&owner())
+            .unwrap()
+            .expires = Instant::now();
+        assert!(read().unwrap().is_none());
+        assert!(runtime
+            .prepare_http_recovery(&headers, &body, Some(3))
+            .is_err());
+    }
+
+    #[test]
+    fn recovery_signal_and_non_unavailable_failures_are_not_retained_as_results() {
+        for (status, code) in [
+            (400, "previous_response_not_found"),
+            (502, "GW_STREAM_ERROR"),
+            (503, "GW_INTERNAL_ERROR"),
+        ] {
+            let runtime = Arc::new(Runtime::new(true));
+            let nonce = runtime.issue_nonce(&owner()).unwrap();
+            let items = vec![input("hello")];
+            let original = request(&runtime, &nonce, &items, false);
+            runtime.begin_generation(&original).unwrap();
+            runtime.remember_failure(
+                &original,
+                &GatewayFailure {
+                    status: axum::http::StatusCode::from_u16(status).unwrap(),
+                    trace_id: "original".into(),
+                    error_code: code.into(),
+                    message: "failed".into(),
+                    attempts: vec![],
+                    retry_after_seconds: None,
+                },
+            );
+            assert!(runtime.owners.lock_or_recover()[&owner()].failure.is_none());
+            if code == "previous_response_not_found" {
+                runtime.suspend(&original).unwrap();
+                runtime.finish_generation(&original, false);
+                assert!(runtime
+                    .claim(&owner(), Some(&nonce), &items, &HistoryDigest::default())
+                    .unwrap()
+                    .is_some());
+            } else {
+                runtime.finish_generation(&original, false);
+                assert!(runtime
+                    .claim(&owner(), Some(&nonce), &items, &HistoryDigest::default())
+                    .is_err());
+            }
+        }
     }
 
     #[test]
@@ -932,6 +1201,7 @@ mod tests {
         assert!(runtime
             .prepare_http_recovery(&headers, &body, None)
             .unwrap()
+            .unwrap_dispatch()
             .is_none());
         let nonce = runtime.issue_nonce(&owner()).unwrap();
         let original = request(&runtime, &nonce, &items, false);
@@ -943,6 +1213,7 @@ mod tests {
         let recovered = runtime
             .prepare_http_recovery(&headers, &body, None)
             .unwrap()
+            .unwrap_dispatch()
             .unwrap();
         assert!(!recovered.client_ws);
         assert!(recovered.generation.lock_or_recover().budget.http_only);
@@ -968,6 +1239,7 @@ mod tests {
         let next = runtime
             .prepare_http_recovery(&headers, &body, None)
             .unwrap()
+            .unwrap_dispatch()
             .unwrap();
         assert!(!next.generation.lock_or_recover().recovered);
         assert!(next.generation.lock_or_recover().budget.http_only);
@@ -1120,6 +1392,7 @@ mod tests {
         let recovered = runtime
             .prepare_http_recovery(&headers, &body, None)
             .unwrap()
+            .unwrap_dispatch()
             .unwrap();
         assert!(recovered.generation.lock_or_recover().recovered);
         assert!(runtime.connection().is_err());

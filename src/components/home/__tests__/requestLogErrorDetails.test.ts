@@ -233,6 +233,7 @@ describe("components/home/requestLogErrorDetails", () => {
           provider_name: "Provider B",
           outcome: "skipped",
           error_code: GatewayErrorCodes.PROVIDER_CIRCUIT_OPEN,
+          circuit_trigger_error_code: GatewayErrorCodes.UPSTREAM_TIMEOUT,
           circuit_recover_at_unix: 1_750_002_000,
         }),
       ]);
@@ -248,6 +249,29 @@ describe("components/home/requestLogErrorDetails", () => {
         },
       ]);
     });
+
+    it.each([GatewayErrorCodes.UPSTREAM_4XX, undefined])(
+      "does not assign one provider's trigger to a mixed or unknown group (%s)",
+      (otherCause) => {
+        const summary = buildAttemptFailureSummary([
+          createAttempt({
+            error_code: GatewayErrorCodes.PROVIDER_CIRCUIT_OPEN,
+            circuit_trigger_error_code: GatewayErrorCodes.UPSTREAM_TIMEOUT,
+          }),
+          createAttempt({
+            provider_id: 2,
+            error_code: GatewayErrorCodes.PROVIDER_CIRCUIT_OPEN,
+            circuit_trigger_error_code: otherCause,
+          }),
+          createAttempt({
+            provider_id: 3,
+            error_code: GatewayErrorCodes.PROVIDER_CIRCUIT_OPEN,
+            circuit_trigger_error_code: GatewayErrorCodes.UPSTREAM_TIMEOUT,
+          }),
+        ]);
+        expect(summary?.[0]?.circuitTriggerErrorCode).toBeNull();
+      }
+    );
 
     it("degrades to null attribution when the new fields are absent (legacy logs)", () => {
       const summary = buildAttemptFailureSummary([

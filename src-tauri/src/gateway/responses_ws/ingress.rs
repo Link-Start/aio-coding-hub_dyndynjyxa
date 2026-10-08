@@ -158,7 +158,15 @@ async fn serve<R>(
         let forced =
             crate::gateway::proxy::handler::early_error::extract_forced_provider_id(&headers);
         let request_state = match prepare_request(connection.clone(), &headers, &body, forced) {
-            Ok(value) => value,
+            Ok(state::PreparedRequest::Dispatch(value)) => value,
+            Ok(state::PreparedRequest::Failure(failure)) => {
+                let event = crate::gateway::client_error::encode_failure(
+                    crate::gateway::client_error::ClientProtocol::ResponsesWs,
+                    &failure,
+                );
+                let _ = send_event(&mut socket, &event).await;
+                break;
+            }
             Err(message) => {
                 let _ = send_event(
                     &mut socket,
@@ -248,8 +256,14 @@ async fn serve<R>(
                 message = socket.next() => if !handle_busy_message(&mut socket, message).await { return; },
             }
         };
-        let success = response.status().is_success();
+        let status = response.status();
+        let success = status.is_success();
         let trace = response.headers().get("x-trace-id").cloned();
+        let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
+        let failure = response
+            .extensions()
+            .get::<crate::gateway::proxy::GatewayFailure>()
+            .cloned();
         let mut bytes = response.into_body().into_data_stream();
         let mut decoder = EventDecoder::default();
         let mut terminal = false;
@@ -282,7 +296,7 @@ async fn serve<R>(
             }
             drop(chunk);
             loop {
-                let event = match decoder.next() {
+                let mut event = match decoder.next() {
                     Ok(Some(event)) => event,
                     Ok(None) => break,
                     Err(_) => {
@@ -290,6 +304,9 @@ async fn serve<R>(
                         break;
                     }
                 };
+                if event.get("type").and_then(Value::as_str) == Some("error") {
+                    event = crate::gateway::client_error::normalize_ws_error(event, None);
+                }
                 let kind = protocol::event_kind(&event).unwrap();
                 if prewarm {
                     if event.get("type").and_then(Value::as_str)
@@ -333,17 +350,40 @@ async fn serve<R>(
             }
         }
         if !terminal {
-            let mut event = serde_json::from_slice::<Value>(&error_body)
-                .ok()
-                .filter(|v| v.get("type").and_then(Value::as_str) == Some("error"))
-                .unwrap_or_else(|| {
-                    protocol::error_event(
-                        "upstream_error",
-                        "Responses generation failed before a valid terminal event",
-                    )
-                });
+            let mut event = if let Some(failure) = failure {
+                crate::gateway::client_error::encode_failure(
+                    crate::gateway::client_error::ClientProtocol::ResponsesWs,
+                    &failure,
+                )
+            } else {
+                serde_json::from_slice::<Value>(&error_body)
+                    .ok()
+                    .filter(|value| {
+                        value.get("error").is_some_and(Value::is_object)
+                            || value.get("type").and_then(Value::as_str) == Some("response.failed")
+                    })
+                    .map(|event| {
+                        crate::gateway::client_error::normalize_ws_error(event, Some(status))
+                    })
+                    .unwrap_or_else(|| {
+                        crate::gateway::client_error::ws_error(
+                            if success {
+                                StatusCode::BAD_GATEWAY
+                            } else {
+                                status
+                            },
+                            "upstream_error",
+                            "Responses generation failed before a valid terminal event",
+                        )
+                    })
+            };
             if let Some(trace) = trace.and_then(|v| v.to_str().ok().map(str::to_owned)) {
                 event["trace_id"] = Value::String(trace);
+            }
+            if let Some(retry_after) =
+                retry_after.and_then(|value| value.to_str().ok().map(str::to_owned))
+            {
+                event["headers"]["retry-after"] = Value::String(retry_after);
             }
             let _ = send_event(&mut socket, &event).await;
             error = true;
@@ -377,9 +417,9 @@ fn prepare_request(
     headers: &HeaderMap,
     body: &Value,
     forced: Option<i64>,
-) -> Result<Option<RequestState>, &'static str> {
+) -> Result<state::PreparedRequest, &'static str> {
     if body.get("generate") == Some(&Value::Bool(false)) {
-        return Ok(None);
+        return Ok(state::PreparedRequest::Dispatch(None));
     }
     if body.get("background") == Some(&Value::Bool(true)) {
         return Err("Background generation is not supported over this WebSocket");
@@ -403,6 +443,17 @@ fn prepare_request(
         return Err("missing or invalid Codex turn metadata for recovery");
     }
     let properties = state::request_properties(body, forced);
+    if let Some(owner) = &owner {
+        if let Some(failure) = connection.runtime.known_failure(
+            owner,
+            nonce_in,
+            input,
+            previous.as_deref(),
+            &properties,
+        )? {
+            return Ok(state::PreparedRequest::Failure(failure));
+        }
+    }
     let continuation = connection.continuation.lock_or_recover();
     // The cached WebSocket context spans turns; recovery nonces remain turn-scoped.
     let current =
@@ -475,12 +526,13 @@ fn prepare_request(
         || (state::Budget::default(), None),
         |record| (record.budget, Some(record.from_trace)),
     );
-    Ok(Some(RequestState {
+    Ok(state::PreparedRequest::Dispatch(Some(RequestState {
         connection,
         client_ws: true,
         generation: Arc::new(Mutex::new(Generation {
             identity,
             expected,
+            input: HistoryDigest::from_items(input),
             properties,
             previous,
             committed: false,
@@ -493,7 +545,7 @@ fn prepare_request(
             budget,
             upstream_ws: false,
         })),
-    }))
+    })))
 }
 
 struct GenerationLease(Option<RequestState>);
@@ -515,6 +567,17 @@ impl Drop for GenerationLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn prepare_request(
+        connection: Arc<Connection>,
+        headers: &HeaderMap,
+        body: &Value,
+        forced: Option<i64>,
+    ) -> Result<Option<RequestState>, &'static str> {
+        match super::prepare_request(connection, headers, body, forced)? {
+            state::PreparedRequest::Dispatch(request) => Ok(request),
+            state::PreparedRequest::Failure(_) => panic!("expected generation dispatch"),
+        }
+    }
     #[test]
     fn continuation_can_cross_turns_but_not_session_window_or_context() {
         use serde_json::json;
